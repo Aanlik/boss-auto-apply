@@ -1,0 +1,16 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.superpowers/
+*.log
+tmp/
+data/chrome_profile/
+data/uploads/
+data/resumes/
+data/api_key.json
+data/boss_session.json
+data/provider.json
+boss-scraper-ref/
