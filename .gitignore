@@ -10,6 +10,7 @@ tmp/
 tmp-*.png
 /package.json
 /package-lock.json
+data/
 data/chrome_profile/
 data/uploads/
 data/resumes/
