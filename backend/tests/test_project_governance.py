@@ -30,3 +30,10 @@ def test_boss_scraper_declares_reference_boundary():
 
     assert "无运行时依赖" in text
     assert "独立实现" in text
+
+
+def test_spa_fallback_is_registered_even_when_frontend_dist_is_missing_at_startup():
+    text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+
+    assert "if STATIC_DIR.exists():" not in text
+    assert "@app.get(\"/{full_path:path}\")" in text

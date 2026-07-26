@@ -1,11 +1,24 @@
+from __future__ import annotations
+
 """AI 供应商设置路由"""
-from fastapi import APIRouter, HTTPException
+import json as _json
+import logging
+import secrets
+import time
+
+from fastapi import APIRouter, Header, HTTPException
+from pathlib import Path as _Path
+
 from app.services.ai_client import (
     get_config, set_config, clear_config, test_connection,
     PROVIDER_PRESETS,
 )
+from app.services.workflow_persistence import write_json_atomic
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+_EXPORT_TOKENS: dict[str, float] = {}
+EXPORT_TOKEN_TTL_SECONDS = 300
+logger = logging.getLogger(__name__)
 
 
 def _mask_secret(value: str, head: int = 6, tail: int = 4) -> str:
@@ -72,10 +85,35 @@ def test_provider() -> dict:
     return result
 
 
+@router.post("/export/authorize")
+def authorize_settings_export() -> dict:
+    """生成一次性完整配置导出令牌。"""
+    token = secrets.token_urlsafe(24)
+    _EXPORT_TOKENS[token] = time.time() + EXPORT_TOKEN_TTL_SECONDS
+    return {"token": token, "expiresIn": EXPORT_TOKEN_TTL_SECONDS}
+
+
+def _consume_export_token(token: str | None) -> bool:
+    now = time.time()
+    for saved, expires_at in list(_EXPORT_TOKENS.items()):
+        if expires_at < now:
+            _EXPORT_TOKENS.pop(saved, None)
+    if not token:
+        return False
+    expires_at = _EXPORT_TOKENS.pop(token, None)
+    return bool(expires_at and expires_at >= now)
+
+
 @router.get("/export")
-def export_settings(include_secret: bool = False) -> dict:
+def export_settings(
+    include_secret: bool = False,
+    x_settings_export_token: str | None = Header(default=None),
+) -> dict:
     """导出全部 API 配置。默认脱敏；include_secret=true 才导出完整密钥。"""
     from app.services import business_info
+
+    if include_secret and not _consume_export_token(x_settings_export_token):
+        raise HTTPException(status_code=403, detail="完整配置导出需要重新确认")
 
     provider_cfg = get_config()
     baidu_cfg = _read_baidu_config()
@@ -149,9 +187,6 @@ def import_settings(payload: dict) -> dict:
 #  百度千帆智能搜索 API 配置（仅需 API Key）
 # ═══════════════════════════════════════════════════════════
 
-import json as _json
-from pathlib import Path as _Path
-
 BAIDU_CONFIG_FILE = _Path(__file__).resolve().parents[3] / "data" / "baidu_config.json"
 
 
@@ -159,14 +194,14 @@ def _read_baidu_config() -> dict:
     try:
         if BAIDU_CONFIG_FILE.exists():
             return _json.loads(BAIDU_CONFIG_FILE.read_text())
-    except Exception:
-        pass
+    except (_json.JSONDecodeError, OSError) as e:
+        logger.warning("加载百度搜索 API 配置失败: %s", e)
     return {"api_key": ""}
 
 
 def _write_baidu_config(cfg: dict):
     BAIDU_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    BAIDU_CONFIG_FILE.write_text(_json.dumps(cfg, ensure_ascii=False))
+    write_json_atomic(BAIDU_CONFIG_FILE, cfg)
 
 
 @router.get("/baidu")

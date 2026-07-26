@@ -11,7 +11,9 @@ import type {
 } from "./types";
 
 // ── 持久化 key + schema 版本 ──
-const STORAGE_KEY = "boss-workbench-state-v4";
+export const STORAGE_KEY = "boss-workbench-state-v4";
+export const ACTIVE_PAGE_KEY = "boss-workbench-active-page";
+export const HIDDEN_COMMON_TAGS_KEY = "boss-workbench-hidden-common-tags";
 const SCHEMA_VERSION = 4;
 
 // ── 空状态 ──
@@ -86,6 +88,18 @@ function compactForStorage(state: WorkflowState): WorkflowState {
     return [key, { ...report, businessInfo }];
   }));
   return { ...state, diligenceReports: reports };
+}
+
+export function clearLocalWorkflowStorage() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(STORAGE_KEY);
+  window.localStorage.removeItem(ACTIVE_PAGE_KEY);
+  window.localStorage.removeItem(HIDDEN_COMMON_TAGS_KEY);
+  for (const key of Object.keys(window.localStorage)) {
+    if (key.startsWith("chat-")) {
+      window.localStorage.removeItem(key);
+    }
+  }
 }
 
 // ── Actions ──

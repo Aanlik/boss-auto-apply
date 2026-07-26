@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { listJobPool, getJobPoolQuality, listBossCities, listBossFilterOptions, captureBossJobs, bossLogin, bossLoginStatus, enrichJdDetails, deleteJob, deleteBatchJobs, tagJob, clearAllJobs, listCompanyBlacklist, addCompanyBlacklist, deleteCompanyBlacklist, exportCompanyBlacklist, importCompanyBlacklist, cleanupExpiredJobs, keepExpiredJobs, mergeDuplicateJobs, updateJobApplicationStatus, updateJobDecisionStatus } from "../lib/api";
 import type { BossCaptureFilters, BossFilterOptions, BossLoginStatus, CompanyBlacklistItem, JobApplicationStatus, JobDecisionStatus, JobPoolQuality, JobPosting } from "../lib/types";
-import { useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
+import { HIDDEN_COMMON_TAGS_KEY, useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
 import { CitySearchSelect } from "../components/CitySearchSelect";
 import { JobFilterPanel } from "../components/JobFilterPanel";
@@ -10,7 +10,6 @@ import { CompanyBlacklistPanel } from "../components/CompanyBlacklistPanel";
 import { buildCommonTags } from "../lib/jobTags";
 import { formatApiError } from "../lib/workflowInsights";
 
-const HIDDEN_COMMON_TAGS_KEY = "boss-workbench-hidden-common-tags";
 const FALLBACK_CITY_OPTIONS = ["全国", "北京", "上海", "广州", "深圳", "杭州", "成都", "南京", "武汉", "西安", "郑州", "长沙", "苏州"];
 const FILTER_LABELS: Array<[keyof BossCaptureFilters, string]> = [
   ["scale", "规模"],
@@ -105,7 +104,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       loadCityOptions();
       loadFilterOptions();
       loadBlacklist();
-      loadJobs();
+      loadJobs(qualityFilter === "blacklisted");
       loadQuality();
       // JD 抓取进行中不触发 checkStatus，防止抢占 Chrome 导致页面跳转
       if (!loading || loading !== "enrich") checkStatus();
@@ -139,9 +138,9 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     }
   }
 
-  async function loadJobs() {
+  async function loadJobs(includeHidden = false) {
     try {
-      const r = await listJobPool();
+      const r = await listJobPool(includeHidden);
       const all: JobPosting[] = r.jobs || [];
       setJobs(all);
       const g: Record<string, boolean> = {};
@@ -155,6 +154,15 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     } catch (err) {
       console.warn("[jobs] 加载岗位失败:", err);
     }
+  }
+
+  async function reloadJobsForQualityFilter(nextFilter: QualityFilterKey = qualityFilter) {
+    await loadJobs(nextFilter === "blacklisted");
+  }
+
+  function applyQualityFilter(nextFilter: QualityFilterKey) {
+    setQualityFilter(nextFilter);
+    void reloadJobsForQualityFilter(nextFilter);
   }
 
   async function loadQuality() {
@@ -186,7 +194,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
         max_pages: maxPages,
         filters: captureFilters,
       });
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) { setError(formatApiError(err) || "抓取失败"); }
     finally { setLoading(prev => prev === "capture" ? "" : prev); }
@@ -196,7 +204,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     setLoading("enrich"); setError("");
     try {
       await enrichJdDetails({ job_ids: selectedJobIds.length > 0 ? selectedJobIds : undefined, max_jobs: 30 });
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) { setError(formatApiError(err) || "JD抓取失败"); }
     finally { setLoading(prev => prev === "enrich" ? "" : prev); }
@@ -209,7 +217,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       const r = await addCompanyBlacklist(companyName);
       setBlacklist(r.companies || []);
       setBlacklistInput("");
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
       if (r.removed > 0) setError(`已加入黑名单，并自动过滤 ${r.removed} 个岗位`);
     } catch (err) {
@@ -221,6 +229,12 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     try {
       const r = await deleteCompanyBlacklist(name);
       setBlacklist(r.companies || []);
+      if (qualityFilter === "blacklisted") {
+        setQualityFilter("");
+      }
+      await loadJobs(false);
+      await loadQuality();
+      setError(r.restored ? `已移出黑名单，并恢复 ${r.restored} 个岗位` : "已移出黑名单");
     } catch (err) {
       setError(err instanceof Error ? err.message : "删除黑名单失败");
     }
@@ -253,7 +267,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       const payload = JSON.parse(await file.text());
       const r = await importCompanyBlacklist(payload);
       setBlacklist(r.companies || []);
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
       setError(`黑名单导入完成，共 ${r.total} 家，自动过滤 ${r.removed || 0} 个岗位`);
     } catch (err) {
@@ -270,7 +284,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     try {
       await cleanupExpiredJobs(ids);
       dispatch(actions.setSelection(selectedJobIds.filter(id => !ids.includes(id))));
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) {
       setError(err instanceof Error ? err.message : "清理过期岗位失败");
@@ -282,7 +296,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     if (ids.length === 0) return;
     try {
       await keepExpiredJobs(ids);
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) {
       setError(err instanceof Error ? err.message : "保留岗位失败");
@@ -295,7 +309,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     try {
       const r = await mergeDuplicateJobs(jobIds);
       dispatch(actions.setSelection(selectedJobIds.filter(id => !r.removed.includes(id))));
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
       setError(`重复岗位已合并，保留 ${r.kept}，删除 ${r.removed.length} 个`);
     } catch (err) {
@@ -306,7 +320,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   async function onUpdateApplicationStatus(job: JobPosting, status: JobApplicationStatus) {
     try {
       await updateJobApplicationStatus(job.id, status, job.application_note || "");
-      await loadJobs();
+      await reloadJobsForQualityFilter();
     } catch (err) {
       setError(formatApiError(err) || "更新求职状态失败");
     }
@@ -315,7 +329,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   async function onUpdateDecisionStatus(job: JobPosting, status: JobDecisionStatus) {
     try {
       await updateJobDecisionStatus(job.id, status);
-      await loadJobs();
+      await reloadJobsForQualityFilter();
     } catch (err) {
       setError(formatApiError(err) || "更新决策标签失败");
     }
@@ -331,7 +345,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       await deleteJob(id);
       if (selectedJobIds.includes(id)) toggleJob(id);
       if (detailId === id) setDetailId(null);
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) {
       setError(err instanceof Error ? err.message : "删除岗位失败");
@@ -345,7 +359,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       await deleteBatchJobs(selectedJobIds);
       clearSel();
       setDetailId(null);
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) {
       setError(err instanceof Error ? err.message : "批量删除失败");
@@ -358,7 +372,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       await clearAllJobs();
       clearSel();
       setDetailId(null);
-      await loadJobs();
+      await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) {
       setError(err instanceof Error ? err.message : "清空岗位失败");
@@ -420,6 +434,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   const filteredJobs = useMemo(() => {
     const duplicateJobIds = new Set((quality?.duplicateGroups || []).flatMap(group => group.jobIds));
     return jobs.filter(j => {
+      if (qualityFilter !== "blacklisted" && j.lifecycle_status === "blacklisted") return false;
       if (qualityFilter === "with_jd" && !(j.jd_text || "").trim()) return false;
       if (qualityFilter === "missing_jd" && (j.jd_text || "").trim()) return false;
       if (qualityFilter === "suspected_expired" && j.lifecycle_status !== "suspected_expired") return false;
@@ -615,7 +630,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
                   </span>
                 )}
                 {qualityFilter && (
-                  <button type="button" className="button-quiet" onClick={() => setQualityFilter("")}>清除质量筛选</button>
+                  <button type="button" className="button-quiet" onClick={() => applyQualityFilter("")}>清除质量筛选</button>
                 )}
                 {quality.duplicateGroups.length > 0 && (
                   <button type="button" className="button-secondary" onClick={() => setDuplicatesExpanded(prev => !prev)}>
@@ -625,22 +640,22 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
               </div>
             </div>
             <div className="quality-metric-grid">
-              <button type="button" className={`quality-metric ${qualityFilter === "" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("")}>
+              <button type="button" className={`quality-metric ${qualityFilter === "" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("")}>
                 <span>总岗位</span><strong>{quality.summary.total}</strong>
               </button>
-              <button type="button" className={`quality-metric ${qualityFilter === "with_jd" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("with_jd")}>
+              <button type="button" className={`quality-metric ${qualityFilter === "with_jd" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("with_jd")}>
                 <span>已获取 JD</span><strong>{quality.summary.with_jd}</strong>
               </button>
-              <button type="button" className={`quality-metric ${qualityFilter === "missing_jd" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("missing_jd")}>
+              <button type="button" className={`quality-metric ${qualityFilter === "missing_jd" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("missing_jd")}>
                 <span>缺少 JD</span><strong>{quality.summary.missing_jd}</strong>
               </button>
-              <button type="button" className={`quality-metric ${qualityFilter === "suspected_expired" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("suspected_expired")}>
+              <button type="button" className={`quality-metric ${qualityFilter === "suspected_expired" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("suspected_expired")}>
                 <span>疑似过期</span><strong>{quality.summary.suspected_expired}</strong>
               </button>
-              <button type="button" className={`quality-metric ${qualityFilter === "blacklisted" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("blacklisted")}>
+              <button type="button" className={`quality-metric ${qualityFilter === "blacklisted" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("blacklisted")}>
                 <span>黑名单命中</span><strong>{quality.summary.blacklisted}</strong>
               </button>
-              <button type="button" className={`quality-metric ${qualityFilter === "duplicates" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("duplicates")}>
+              <button type="button" className={`quality-metric ${qualityFilter === "duplicates" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("duplicates")}>
                 <span>重复岗位</span><strong>{quality.summary.duplicate_jobs}</strong>
               </button>
             </div>

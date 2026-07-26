@@ -17,7 +17,7 @@ function extractFromHtml(html: string) {
     },
   });
   const result = dom.window.eval(script);
-  return JSON.parse(result);
+  return JSON.parse(String(result));
 }
 
 describe("extract_detail.js", () => {

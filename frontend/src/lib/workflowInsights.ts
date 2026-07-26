@@ -148,7 +148,9 @@ export type RecoveryTask = {
 
 export function buildRecoveryTasks(tasks: WorkflowRuntimeTask[]): RecoveryTask[] {
   return tasks
-    .filter(task => task.status === "failed" || task.status === "partial_failed")
+    .filter((task): task is WorkflowRuntimeTask & { status: RecoveryTask["status"] } =>
+      task.status === "failed" || task.status === "partial_failed"
+    )
     .map(task => ({
       id: task.id,
       title: task.title,

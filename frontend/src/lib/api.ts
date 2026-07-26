@@ -17,8 +17,8 @@ export async function parseResumeFile(file: File): Promise<{
 
 // ---------- 岗位 ----------
 
-export async function listJobPool(): Promise<{ jobs: JobPosting[]; total: number }> {
-  return fetchJson("/api/jobs/pool");
+export async function listJobPool(includeHidden = false): Promise<{ jobs: JobPosting[]; total: number; hidden?: number }> {
+  return fetchJson(`/api/jobs/pool${includeHidden ? "?include_hidden=true" : ""}`);
 }
 
 export async function getJobPoolQuality(): Promise<JobPoolQuality> {
@@ -71,7 +71,7 @@ export async function addCompanyBlacklist(companyName: string): Promise<{ compan
   });
 }
 
-export async function deleteCompanyBlacklist(companyName: string): Promise<{ companies: CompanyBlacklistItem[]; total: number }> {
+export async function deleteCompanyBlacklist(companyName: string): Promise<{ companies: CompanyBlacklistItem[]; total: number; restored: number }> {
   return fetchJson("/api/jobs/company-blacklist", {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
@@ -487,7 +487,12 @@ export async function testBusinessConnection(): Promise<{ ok: boolean; message: 
 }
 
 export async function exportSettings(includeSecret = false): Promise<unknown> {
-  return fetchJson(`/api/settings/export${includeSecret ? "?include_secret=true" : ""}`);
+  let headers: Record<string, string> | undefined;
+  if (includeSecret) {
+    const tokenResponse = await fetchJson("/api/settings/export/authorize", { method: "POST" }) as { token: string };
+    headers = { "X-Settings-Export-Token": tokenResponse.token };
+  }
+  return fetchJson(`/api/settings/export${includeSecret ? "?include_secret=true" : ""}`, { headers });
 }
 
 export async function importSettings(payload: unknown): Promise<{ imported: string[]; message: string }> {

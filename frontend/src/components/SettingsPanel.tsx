@@ -7,6 +7,7 @@ import {
   getBusinessConfig, saveBusinessConfig, deleteBusinessConfig, testBusinessConnection,
   exportSettings, importSettings,
 } from "../lib/api";
+import { clearLocalWorkflowStorage } from "../lib/store";
 
 // 内置默认预设 — 即使 API 延迟也能立刻显示
 const DEFAULT_PRESETS: Record<string, ProviderPreset> = {
@@ -157,6 +158,13 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
     } finally {
       if (settingsImportRef.current) settingsImportRef.current.value = "";
     }
+  }
+
+  function onClearLocalData() {
+    if (!confirm("确定清除本机页面流程数据？这会清除当前模块、已选岗位、简历解析结果、尽调缓存和对话记录。")) return;
+    clearLocalWorkflowStorage();
+    setBackupStatus("本机页面流程数据已清除，页面将重新载入");
+    window.setTimeout(() => window.location.reload(), 300);
   }
 
   return (
@@ -310,6 +318,17 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
             </div>
           </div>
           {backupStatus && <p className="settings-status">{backupStatus}</p>}
+        </div>
+
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+          <div className="page-kicker">本机数据</div>
+          <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "4px 0 8px" }}>
+            清除保存在本机浏览器里的流程状态、聊天记录和页面偏好，不会删除后端岗位池文件。
+          </p>
+          <div className="settings-row" style={{ alignItems: "center" }}>
+            <label className="settings-label">浏览器数据</label>
+            <button type="button" className="button-quiet button-danger" onClick={onClearLocalData}>清除本机流程数据</button>
+          </div>
         </div>
       </div>
     </section>

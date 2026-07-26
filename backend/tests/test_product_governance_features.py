@@ -75,6 +75,25 @@ def test_company_blacklist_hides_jobs_without_deleting_and_restores_on_remove(tm
     assert restored_pool["total"] == 1
 
 
+def test_job_pool_can_include_hidden_blacklisted_jobs_for_quality_drilldown(tmp_path, monkeypatch):
+    from app.services import workflow_persistence as persistence
+    import app.routes.jobs as jobs_route
+
+    monkeypatch.setattr(persistence, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "job-1": JobRecord(id="job-1", title="产品经理", company="示例科技有限公司")
+    })
+    client.post("/api/jobs/company-blacklist", json={"company_name": "示例科技有限公司"})
+
+    visible_pool = client.get("/api/jobs/pool").json()
+    full_pool = client.get("/api/jobs/pool?include_hidden=true").json()
+
+    assert visible_pool["total"] == 0
+    assert full_pool["total"] == 1
+    assert full_pool["hidden"] == 1
+    assert full_pool["jobs"][0]["lifecycle_status"] == "blacklisted"
+
+
 def test_settings_export_is_masked_by_default_and_can_import(tmp_path, monkeypatch):
     import app.routes.settings as settings_route
     from app.services import ai_client, business_info
@@ -94,11 +113,27 @@ def test_settings_export_is_masked_by_default_and_can_import(tmp_path, monkeypat
     assert exported["baidu"]["api_key"] == ""
     assert exported["business"]["secret_key"] == ""
 
-    full = client.get("/api/settings/export?include_secret=true").json()
+    blocked = client.get("/api/settings/export?include_secret=true")
+    assert blocked.status_code == 403
+
+    token_response = client.post("/api/settings/export/authorize")
+    assert token_response.status_code == 200
+    token = token_response.json()["token"]
+
+    full = client.get(
+        "/api/settings/export?include_secret=true",
+        headers={"X-Settings-Export-Token": token},
+    ).json()
     assert full["provider"]["api_key"] == "sk-secret-value"
     response = client.post("/api/settings/import", json=full)
     assert response.status_code == 200
     assert response.json()["imported"] == ["provider", "baidu", "business"]
+
+    reused = client.get(
+        "/api/settings/export?include_secret=true",
+        headers={"X-Settings-Export-Token": token},
+    )
+    assert reused.status_code == 403
 
 
 def test_diligence_refresh_business_updates_existing_report(monkeypatch, tmp_path):

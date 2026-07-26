@@ -5,7 +5,7 @@ type CompanyBlacklistPanelProps = {
   companies: CompanyBlacklistItem[];
   inputValue: string;
   expanded: boolean;
-  importInputRef: RefObject<HTMLInputElement>;
+  importInputRef: RefObject<HTMLInputElement | null>;
   onInputChange: (value: string) => void;
   onAdd: (name: string) => void;
   onRemove: (name: string) => void;

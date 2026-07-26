@@ -213,11 +213,17 @@ def _job_quality_report() -> dict:
 # ---------- 路由 ----------
 
 @router.get("/pool")
-def list_jobs() -> dict:
+def list_jobs(include_hidden: bool = False) -> dict:
     """获取全部岗位池。"""
-    jobs = _visible_jobs()
+    jobs = _all_jobs() if include_hidden else _visible_jobs()
     expired = [job for job in jobs if job.lifecycle_status == "suspected_expired"]
-    return {"jobs": [job.model_dump() for job in jobs], "total": len(jobs), "suspected_expired": len(expired)}
+    hidden = [job for job in jobs if job.lifecycle_status == "blacklisted"]
+    return {
+        "jobs": [job.model_dump() for job in jobs],
+        "total": len(jobs),
+        "suspected_expired": len(expired),
+        "hidden": len(hidden),
+    }
 
 
 @router.get("/pool/quality")

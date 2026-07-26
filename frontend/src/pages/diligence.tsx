@@ -66,8 +66,8 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
     const index: Record<string, DiligenceReport> = {};
     Object.entries(diligenceReports).forEach(([key, report]) => {
       if (!report) return;
-      const businessInfo = report.businessInfo || {};
-      [key, report.companyName, report.sourceCompanyName, report.companyKey, businessInfo.companyName, businessInfo.sourceCompanyName, businessInfo.companyKey, businessInfo.unifiedCreditCode]
+      const businessInfo = report.businessInfo;
+      [key, report.companyName, report.sourceCompanyName, report.companyKey, businessInfo?.companyName, businessInfo?.sourceCompanyName, businessInfo?.companyKey, businessInfo?.unifiedCreditCode]
         .filter(Boolean)
         .forEach(value => { index[String(value).trim()] = report; });
     });

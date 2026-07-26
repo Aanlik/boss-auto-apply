@@ -6,6 +6,7 @@ import base64
 import logging
 from pathlib import Path
 from openai import OpenAI
+from app.services.workflow_persistence import write_json_atomic
 
 logger = logging.getLogger("ai_client")
 
@@ -48,14 +49,14 @@ def _load_config() -> dict:
     try:
         if CONFIG_FILE.exists():
             return json.loads(CONFIG_FILE.read_text())
-    except Exception:
-        pass
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("加载 AI 供应商配置失败: %s", e)
     return {}
 
 
 def _save_config(cfg: dict):
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False))
+    write_json_atomic(CONFIG_FILE, cfg)
 
 
 def get_config() -> dict:

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { WorkflowProvider, useWorkflowState } from "./lib/store";
+import { ACTIVE_PAGE_KEY, WorkflowProvider, useWorkflowState } from "./lib/store";
 import { listJobPool, listWorkflowTasks } from "./lib/api";
 import { buildRecoveryTasks, buildWorkflowTasks, buildWorkflowTodos } from "./lib/workflowInsights";
 import type { JobPosting, WorkflowRuntimeTask } from "./lib/types";
@@ -20,12 +20,11 @@ const pages: Array<{ key: PageKey; label: string }> = [
   { key: "greeting", label: "打招呼" },
 ];
 
-const ACTIVE_PAGE_KEY = "boss-workbench-active-page";
-
 function getInitialPage(): PageKey {
   if (typeof window === "undefined") return "resumes";
-  const saved = window.localStorage.getItem(ACTIVE_PAGE_KEY) as PageKey | null;
-  return pages.some(p => p.key === saved) ? saved : "resumes";
+  const saved = window.localStorage.getItem(ACTIVE_PAGE_KEY);
+  if (pages.some(p => p.key === saved)) return saved as PageKey;
+  return "resumes";
 }
 
 function AppShell() {

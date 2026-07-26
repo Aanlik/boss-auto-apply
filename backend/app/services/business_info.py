@@ -25,6 +25,7 @@ import uuid
 from typing import Optional
 
 import aiohttp
+from app.services.workflow_persistence import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def _load_config():
             _endpoint = _normalize_endpoint(raw_endpoint)
             if raw_endpoint and raw_endpoint != _endpoint:
                 cfg["endpoint"] = _endpoint
-                CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False))
+                write_json_atomic(CONFIG_FILE, cfg)
             if _secret_id:
                 logger.info("工商 API 配置已加载")
     except Exception as e:
@@ -100,11 +101,11 @@ def set_config(secret_id: str, secret_key: str, endpoint: str = "") -> bool:
     _endpoint = _normalize_endpoint(endpoint)
     try:
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps({
+        write_json_atomic(CONFIG_FILE, {
             "secret_id": _secret_id,
             "secret_key": _secret_key,
             "endpoint": _endpoint,
-        }, ensure_ascii=False))
+        })
         return True
     except Exception as e:
         logger.error("保存工商 API 配置失败: %s", e)
@@ -118,9 +119,9 @@ def clear_config():
     _endpoint = DEFAULT_ENDPOINT
     try:
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps({"secret_id": "", "secret_key": "", "endpoint": DEFAULT_ENDPOINT}, ensure_ascii=False))
-    except Exception:
-        pass
+        write_json_atomic(CONFIG_FILE, {"secret_id": "", "secret_key": "", "endpoint": DEFAULT_ENDPOINT})
+    except OSError as e:
+        logger.warning("清除工商 API 配置失败: %s", e)
 
 
 # ═══════════════════════════════════════════════════════════
