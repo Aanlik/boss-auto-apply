@@ -1,581 +1,784 @@
-import { useEffect, useState } from "react";
-import { bossLogin, captureBossJobs, captureJobs, filterJobPool, listJobPool, addManualJob, deleteJob, clearAllJobs, enrichJobDetails } from "../lib/api";
-import type { JobPosting } from "../lib/types";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { listJobPool, getJobPoolQuality, listBossCities, listBossFilterOptions, captureBossJobs, bossLogin, bossLoginStatus, enrichJdDetails, deleteJob, deleteBatchJobs, tagJob, clearAllJobs, listCompanyBlacklist, addCompanyBlacklist, deleteCompanyBlacklist, exportCompanyBlacklist, importCompanyBlacklist, cleanupExpiredJobs, keepExpiredJobs, mergeDuplicateJobs, updateJobApplicationStatus, updateJobDecisionStatus } from "../lib/api";
+import type { BossCaptureFilters, BossFilterOptions, BossLoginStatus, CompanyBlacklistItem, JobApplicationStatus, JobDecisionStatus, JobPoolQuality, JobPosting } from "../lib/types";
+import { useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
+import { EmptyState, ErrorBanner } from "../components/SharedUI";
+import { CitySearchSelect } from "../components/CitySearchSelect";
+import { JobFilterPanel } from "../components/JobFilterPanel";
+import { JobCard } from "../components/JobCard";
+import { CompanyBlacklistPanel } from "../components/CompanyBlacklistPanel";
+import { buildCommonTags } from "../lib/jobTags";
+import { formatApiError } from "../lib/workflowInsights";
 
-interface JobsPageProps {
-  selectedJobId: string | null;
-  onSelectJob: (job: JobPosting) => void;
-}
+const HIDDEN_COMMON_TAGS_KEY = "boss-workbench-hidden-common-tags";
+const FALLBACK_CITY_OPTIONS = ["全国", "北京", "上海", "广州", "深圳", "杭州", "成都", "南京", "武汉", "西安", "郑州", "长沙", "苏州"];
+const FILTER_LABELS: Array<[keyof BossCaptureFilters, string]> = [
+  ["scale", "规模"],
+  ["stage", "融资"],
+  ["salary", "薪资"],
+  ["experience", "经验"],
+  ["degree", "学历"],
+  ["industry", "行业"],
+];
+const APPLICATION_STATUS_LABELS: Record<JobApplicationStatus, string> = {
+  pending: "待跟进",
+  greeted: "已打招呼",
+  applied: "已投递",
+  interviewing: "面试中",
+  rejected: "已拒绝",
+  abandoned: "已放弃",
+};
+const DECISION_STATUS_LABELS: Record<JobDecisionStatus, string> = {
+  undecided: "未决定",
+  recommended: "推荐投递",
+  watching: "观察",
+  abandoned: "放弃",
+  risky: "风险",
+};
+type QualityFilterKey = "" | "with_jd" | "missing_jd" | "suspected_expired" | "blacklisted" | "duplicates";
 
-/** JD 详情弹窗 */
-function JobDetailModal({ job, onClose }: { job: JobPosting; onClose: () => void }) {
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-panel modal-panel--wide" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <div className="stack">
-            <p className="page-kicker">岗位详情</p>
-            <h2 className="modal-title">{job.title}</h2>
-          </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
-            ✕
-          </button>
-        </div>
-        <div className="modal-body">
-          <div className="detail-grid">
-            <div className="detail-item">
-              <span className="detail-label">公司</span>
-              <span className="detail-value">{job.company}</span>
-            </div>
-            <div className="detail-item">
-              <span className="detail-label">城市</span>
-              <span className="detail-value">{job.city}</span>
-            </div>
-            <div className="detail-item">
-              <span className="detail-label">薪资</span>
-              <span className="detail-value">{job.salary}</span>
-            </div>
-            <div className="detail-item">
-              <span className="detail-label">来源</span>
-              <span className="detail-value">{job.source === "captured" ? "BOSS 抓取" : job.source === "manual" ? "手动录入" : job.source}</span>
-            </div>
-          </div>
+const QUALITY_FILTER_LABELS: Record<Exclude<QualityFilterKey, "">, string> = {
+  with_jd: "已获取 JD",
+  missing_jd: "缺少 JD",
+  suspected_expired: "疑似过期",
+  blacklisted: "黑名单命中",
+  duplicates: "重复岗位",
+};
 
-          {job.keywords && job.keywords.length > 0 && (
-            <div className="detail-section">
-              <h4 className="detail-section-title">关键词</h4>
-              <div className="job-tags">
-                {job.keywords.map((k: string) => (
-                  <span key={k} className="tag">{k}</span>
-                ))}
-              </div>
-            </div>
-          )}
+export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (page: string) => void; visible?: boolean }) {
+  const { selectedJobIds } = useWorkflowState();
+  const dispatch = useWorkflowDispatch();
 
-          <div className="detail-section">
-            <h4 className="detail-section-title">JD 描述</h4>
-            <div className="detail-jd">
-              {job.jd_text ? (
-                job.jd_text.split("\n").map((line, i) => (
-                  <p key={i} className={/^[\s]*$/.test(line) ? "detail-jd__spacer" : ""}>{line || "\u00A0"}</p>
-                ))
-              ) : (
-                <p className="text-muted">暂无详细 JD</p>
-              )}
-            </div>
-          </div>
+  // ---- 抓取参数 ----
+  const [keyword, setKeyword] = useState("产品经理");
+  const [city, setCity] = useState("全国");
+  const [cityOptions, setCityOptions] = useState<string[]>(FALLBACK_CITY_OPTIONS);
+  const [maxPages, setMaxPages] = useState(3);
+  const [captureFilters, setCaptureFilters] = useState<BossCaptureFilters>({});
+  const [filterOptions, setFilterOptions] = useState<BossFilterOptions>({
+    scale: [],
+    stage: [],
+    salary: [],
+    experience: [],
+    degree: [],
+    industry: [],
+  });
 
-          {job.structured_summary && (
-            <div className="detail-section">
-              <h4 className="detail-section-title">结构化摘要</h4>
-              <p>{job.structured_summary}</p>
-            </div>
-          )}
+  // ---- 筛选参数 ----
+  const [filterText, setFilterText] = useState("");
+  const [filterCity, setFilterCity] = useState("");
+  const [filterSalaryMin, setFilterSalaryMin] = useState("");
+  const [filterSalaryMax, setFilterSalaryMax] = useState("");
+  const [filterTags, setFilterTags] = useState("");
+  const [filterApplicationStatus, setFilterApplicationStatus] = useState("");
+  const [filterDecisionStatus, setFilterDecisionStatus] = useState("");
+  const [qualityFilter, setQualityFilter] = useState<QualityFilterKey>("");
 
-          {job.source_url && (
-            <div className="detail-section">
-              <a href={job.source_url} target="_blank" rel="noopener noreferrer" className="link-external">
-                在 Boss 直聘查看原岗位 →
-              </a>
-            </div>
-          )}
-        </div>
-        <div className="modal-footer">
-          <button type="button" className="button-secondary" onClick={onClose}>关闭</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export default function JobsPage({ selectedJobId, onSelectJob }: JobsPageProps) {
+  // ---- 数据状态 ----
   const [jobs, setJobs] = useState<JobPosting[]>([]);
-  const [total, setTotal] = useState(0);
-  const [keyword, setKeyword] = useState("");
-  const [cityFilter, setCityFilter] = useState("");
-  const [minSalary, setMinSalary] = useState("");
-  const [status, setStatus] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState("");
   const [error, setError] = useState("");
-
-  // Boss 抓取配置
-  const [showBoss, setShowBoss] = useState(false);
-  const [bossKeyword, setBossKeyword] = useState("Python");
-  const [bossCity, setBossCity] = useState("深圳");
-  const [bossPages, setBossPages] = useState("3");
-
-  // 手动录入
-  const [showManual, setShowManual] = useState(false);
-  const [manualTitle, setManualTitle] = useState("");
-  const [manualCompany, setManualCompany] = useState("");
-  const [manualCity, setManualCity] = useState("");
-  const [manualSalary, setManualSalary] = useState("");
-  const [manualJD, setManualJD] = useState("");
-
-  // JD 详情弹窗
-  const [detailJob, setDetailJob] = useState<JobPosting | null>(null);
-
-  // 确认清空
-  const [confirmClear, setConfirmClear] = useState(false);
-
-  async function loadJobs() {
-    setLoading(true);
-    setError("");
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [greetedStatus, setGreetedStatus] = useState<Record<string, boolean>>({});
+  const [customTags, setCustomTags] = useState<Record<string, string[]>>({});
+  const [tagInputs, setTagInputs] = useState<Record<string, string>>({});
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [loginStatus, setLoginStatus] = useState<BossLoginStatus | null>(null);
+  const [blacklist, setBlacklist] = useState<CompanyBlacklistItem[]>([]);
+  const [blacklistInput, setBlacklistInput] = useState("");
+  const [blacklistExpanded, setBlacklistExpanded] = useState(false);
+  const [quality, setQuality] = useState<JobPoolQuality | null>(null);
+  const [duplicatesExpanded, setDuplicatesExpanded] = useState(false);
+  const blacklistImportRef = useRef<HTMLInputElement | null>(null);
+  const [hiddenCommonTags, setHiddenCommonTags] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
     try {
-      const data = await listJobPool();
-      setJobs(data.jobs);
-      setTotal(data.total);
-      setStatus(data.total > 0 ? `共 ${data.total} 个岗位` : "岗位池为空");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "加载失败");
-    } finally {
-      setLoading(false);
+      const parsed = JSON.parse(window.localStorage.getItem(HIDDEN_COMMON_TAGS_KEY) || "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
     }
-  }
+  });
 
   useEffect(() => {
-    loadJobs();
-  }, []);
+    if (visible) {
+      loadCityOptions();
+      loadFilterOptions();
+      loadBlacklist();
+      loadJobs();
+      loadQuality();
+      // JD 抓取进行中不触发 checkStatus，防止抢占 Chrome 导致页面跳转
+      if (!loading || loading !== "enrich") checkStatus();
+    }
+  }, [visible]);
+
+  async function loadCityOptions() {
+    try {
+      const r = await listBossCities();
+      const names = (r.cities || []).map(c => c.name).filter(Boolean);
+      if (names.length > 0) setCityOptions(names);
+    } catch (err) {
+      console.warn("[jobs] 加载城市列表失败:", err);
+    }
+  }
+
+  async function loadFilterOptions() {
+    try {
+      setFilterOptions(await listBossFilterOptions());
+    } catch (err) {
+      console.warn("[jobs] 加载抓取筛选项失败:", err);
+    }
+  }
+
+  async function loadBlacklist() {
+    try {
+      const r = await listCompanyBlacklist();
+      setBlacklist(r.companies || []);
+    } catch (err) {
+      console.warn("[jobs] 加载企业黑名单失败:", err);
+    }
+  }
+
+  async function loadJobs() {
+    try {
+      const r = await listJobPool();
+      const all: JobPosting[] = r.jobs || [];
+      setJobs(all);
+      const g: Record<string, boolean> = {};
+      const t: Record<string, string[]> = {};
+      all.forEach((j) => {
+        if (j.greeted) g[j.id] = true;
+        if (j.tags?.length) t[j.id] = j.tags.filter(tag => !tag.startsWith("@"));
+      });
+      setGreetedStatus(g);
+      setCustomTags(t);
+    } catch (err) {
+      console.warn("[jobs] 加载岗位失败:", err);
+    }
+  }
+
+  async function loadQuality() {
+    try {
+      setQuality(await getJobPoolQuality());
+    } catch (err) {
+      console.warn("[jobs] 加载岗位质量摘要失败:", err);
+    }
+  }
+
+  async function checkStatus() {
+    try { const r = await bossLoginStatus(); setLoggedIn(r.logged_in); setLoginStatus(r); }
+    catch (err) { console.warn("[jobs] 检查登录状态失败:", err); }
+  }
+
+  async function onLogin() {
+    setLoading("login"); setError("");
+    try { const r = await bossLogin(); if (r.status === "ok") { setLoggedIn(true); await checkStatus(); } else setError(r.message || "登录失败"); }
+    catch (err) { setError(err instanceof Error ? err.message : "登录失败"); }
+    finally { setLoading(prev => prev === "login" ? "" : prev); }
+  }
 
   async function onCapture() {
-    setLoading(true);
-    setError("");
+    setLoading("capture"); setError("");
     try {
-      const data = await captureJobs();
-      setStatus(`示例数据 ${data.captured} 条，共 ${data.total} 条`);
-      await loadJobs();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "抓取失败");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onBossLogin() {
-    setLoading(true);
-    setError("");
-    setStatus("正在打开浏览器，请在弹出窗口中登录 Boss 直聘...");
-    try {
-      const result = await bossLogin();
-      if (result.status === "ok") {
-        setStatus("登录成功！现在可以开始抓取了");
-      } else if (result.status === "timeout") {
-        setStatus("登录超时，请重试");
-      } else {
-        setStatus(result.message || "登录完成");
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "登录失败");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onCaptureBoss() {
-    setLoading(true);
-    setError("");
-    try {
-      const data = await captureBossJobs({
-        keyword: bossKeyword,
-        city: bossCity,
-        max_pages: Number(bossPages),
+      await captureBossJobs({
+        keyword,
+        city: city === "全国" ? "" : city,
+        max_pages: maxPages,
+        filters: captureFilters,
       });
-      setStatus(`Boss 抓取 ${data.captured} 条，共 ${data.total} 条`);
-      setShowBoss(false);
       await loadJobs();
+      await loadQuality();
+    } catch (err) { setError(formatApiError(err) || "抓取失败"); }
+    finally { setLoading(prev => prev === "capture" ? "" : prev); }
+  }
+
+  async function onEnrichJD() {
+    setLoading("enrich"); setError("");
+    try {
+      await enrichJdDetails({ job_ids: selectedJobIds.length > 0 ? selectedJobIds : undefined, max_jobs: 30 });
+      await loadJobs();
+      await loadQuality();
+    } catch (err) { setError(formatApiError(err) || "JD抓取失败"); }
+    finally { setLoading(prev => prev === "enrich" ? "" : prev); }
+  }
+
+  async function addBlacklist(name: string) {
+    const companyName = name.trim();
+    if (!companyName) return;
+    try {
+      const r = await addCompanyBlacklist(companyName);
+      setBlacklist(r.companies || []);
+      setBlacklistInput("");
+      await loadJobs();
+      await loadQuality();
+      if (r.removed > 0) setError(`已加入黑名单，并自动过滤 ${r.removed} 个岗位`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Boss 抓取失败");
-    } finally {
-      setLoading(false);
+      setError(formatApiError(err) || "加入黑名单失败");
     }
   }
 
-  async function onFilter() {
-    setLoading(true);
-    setError("");
+  async function removeBlacklist(name: string) {
     try {
-      const data = await filterJobPool({
-        keywords: keyword ? [keyword] : [],
-        city: cityFilter || undefined,
-        min_salary: minSalary ? Number(minSalary) : undefined,
-      });
-      setJobs(data.jobs);
-      setTotal(data.total);
-      setStatus(`筛选出 ${data.total} 个岗位`);
+      const r = await deleteCompanyBlacklist(name);
+      setBlacklist(r.companies || []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "筛选失败");
-    } finally {
-      setLoading(false);
+      setError(err instanceof Error ? err.message : "删除黑名单失败");
     }
   }
 
-  async function onManualSubmit() {
-    if (!manualTitle || !manualCompany) {
-      setError("岗位名称和公司名称为必填");
-      return;
-    }
-    setLoading(true);
-    setError("");
+  function downloadJson(filename: string, payload: unknown) {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function onExportBlacklist() {
     try {
-      await addManualJob({
-        title: manualTitle,
-        company: manualCompany,
-        city: manualCity,
-        salary: manualSalary,
-        jd_text: manualJD,
-      });
-      setShowManual(false);
-      setManualTitle("");
-      setManualCompany("");
-      setManualCity("");
-      setManualSalary("");
-      setManualJD("");
-      await loadJobs();
-      setStatus("手动录入成功");
+      const data = await exportCompanyBlacklist();
+      downloadJson("company-blacklist.json", data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "录入失败");
-    } finally {
-      setLoading(false);
+      setError(err instanceof Error ? err.message : "导出黑名单失败");
     }
   }
 
-  async function onDeleteJob(jobId: string, e: React.MouseEvent) {
-    e.stopPropagation();
-    setLoading(true);
-    setError("");
+  async function onImportBlacklist(file?: File) {
+    if (!file) return;
     try {
-      const result = await deleteJob(jobId);
-      setStatus(`已删除，剩余 ${result.total} 个岗位`);
+      const payload = JSON.parse(await file.text());
+      const r = await importCompanyBlacklist(payload);
+      setBlacklist(r.companies || []);
       await loadJobs();
+      await loadQuality();
+      setError(`黑名单导入完成，共 ${r.total} 家，自动过滤 ${r.removed || 0} 个岗位`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "删除失败");
+      setError(err instanceof Error ? err.message : "导入黑名单失败");
     } finally {
-      setLoading(false);
+      if (blacklistImportRef.current) blacklistImportRef.current.value = "";
     }
   }
 
-  async function onEnrichDetails() {
-    setLoading(true);
-    setError("");
-    setStatus("正在从详情页补充 JD，请稍候...");
+  async function onCleanupExpired() {
+    const ids = expiredJobs.map(j => j.id);
+    if (ids.length === 0) return;
+    if (!confirm(`确定清理 ${ids.length} 个疑似过期岗位？`)) return;
     try {
-      const result = await enrichJobDetails(10);
-      setStatus(`已补充 ${result.enriched} 个岗位的 JD 描述`);
+      await cleanupExpiredJobs(ids);
+      dispatch(actions.setSelection(selectedJobIds.filter(id => !ids.includes(id))));
+      await loadJobs();
+      await loadQuality();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "清理过期岗位失败");
+    }
+  }
+
+  async function onKeepExpired() {
+    const ids = expiredJobs.map(j => j.id);
+    if (ids.length === 0) return;
+    try {
+      await keepExpiredJobs(ids);
+      await loadJobs();
+      await loadQuality();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保留岗位失败");
+    }
+  }
+
+  async function onMergeDuplicateGroup(jobIds: string[]) {
+    if (jobIds.length < 2) return;
+    if (!confirm(`确定合并这组 ${jobIds.length} 个重复岗位？系统会保留 JD 最完整的一条。`)) return;
+    try {
+      const r = await mergeDuplicateJobs(jobIds);
+      dispatch(actions.setSelection(selectedJobIds.filter(id => !r.removed.includes(id))));
+      await loadJobs();
+      await loadQuality();
+      setError(`重复岗位已合并，保留 ${r.kept}，删除 ${r.removed.length} 个`);
+    } catch (err) {
+      setError(formatApiError(err) || "合并重复岗位失败");
+    }
+  }
+
+  async function onUpdateApplicationStatus(job: JobPosting, status: JobApplicationStatus) {
+    try {
+      await updateJobApplicationStatus(job.id, status, job.application_note || "");
       await loadJobs();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "JD 补充失败");
-    } finally {
-      setLoading(false);
+      setError(formatApiError(err) || "更新求职状态失败");
+    }
+  }
+
+  async function onUpdateDecisionStatus(job: JobPosting, status: JobDecisionStatus) {
+    try {
+      await updateJobDecisionStatus(job.id, status);
+      await loadJobs();
+    } catch (err) {
+      setError(formatApiError(err) || "更新决策标签失败");
+    }
+  }
+
+  function toggleJob(id: string) { dispatch(actions.toggleJobSelection(id)); }
+  function selectAll() { dispatch(actions.selectAllJobs(filteredJobs.map(j => j.id))); }
+  function clearSel() { dispatch(actions.clearSelection()); }
+
+  async function onDeleteOne(id: string) {
+    if (!confirm("确定删除该岗位？")) return;
+    try {
+      await deleteJob(id);
+      if (selectedJobIds.includes(id)) toggleJob(id);
+      if (detailId === id) setDetailId(null);
+      await loadJobs();
+      await loadQuality();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除岗位失败");
+    }
+  }
+
+  async function onDeleteBatch() {
+    if (selectedJobIds.length === 0) return;
+    if (!confirm(`确定删除选中的 ${selectedJobIds.length} 个岗位？`)) return;
+    try {
+      await deleteBatchJobs(selectedJobIds);
+      clearSel();
+      setDetailId(null);
+      await loadJobs();
+      await loadQuality();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "批量删除失败");
     }
   }
 
   async function onClearAll() {
-    setLoading(true);
-    setError("");
+    if (!confirm(`确定清空全部 ${jobs.length} 个岗位？此操作不可撤销。`)) return;
     try {
-      const result = await clearAllJobs();
-      setStatus(`已清空 ${result.deleted} 个岗位`);
-      setConfirmClear(false);
+      await clearAllJobs();
+      clearSel();
+      setDetailId(null);
       await loadJobs();
+      await loadQuality();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "清空失败");
-    } finally {
-      setLoading(false);
+      setError(err instanceof Error ? err.message : "清空岗位失败");
     }
   }
 
-  const selectedJob = jobs.find((job) => job.id === selectedJobId);
-  const selectedCount = selectedJobId ? 1 : 0;
+  async function addCustomTag(jobId: string, tag: string) {
+    const cleanTag = tag.trim();
+    if (!cleanTag) return;
+    const current = customTags[jobId] || [];
+    const newTags = current.includes(cleanTag) ? current : [...current, cleanTag];
+    setCustomTags(prev => ({ ...prev, [jobId]: newTags }));
+    setHiddenCommonTags(prev => {
+      const next = prev.filter(t => t.toLowerCase() !== cleanTag.toLowerCase());
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(HIDDEN_COMMON_TAGS_KEY, JSON.stringify(next));
+      }
+      return next;
+    });
+    setTagInputs(prev => ({ ...prev, [jobId]: "" }));
+    try {
+      await tagJob(jobId, { tags: newTags });
+    } catch (err) {
+      setCustomTags(prev => ({ ...prev, [jobId]: current }));
+      setTagInputs(prev => ({ ...prev, [jobId]: cleanTag }));
+      setError(err instanceof Error ? err.message : "添加标签失败");
+    }
+  }
+
+  function hideCommonTag(tag: string) {
+    setHiddenCommonTags(prev => {
+      const next = [...new Set([...prev, tag])];
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(HIDDEN_COMMON_TAGS_KEY, JSON.stringify(next));
+      }
+      return next;
+    });
+    setFilterTags(prev => filterTagList.includes(tag.toLowerCase())
+      ? filterTagList.filter(t => t !== tag.toLowerCase()).join(", ")
+      : prev);
+  }
+
+  function clearCommonTags() {
+    setHiddenCommonTags(prev => {
+      const next = [...new Set([...prev, ...allTags])];
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(HIDDEN_COMMON_TAGS_KEY, JSON.stringify(next));
+      }
+      return next;
+    });
+    setFilterTags("");
+  }
+
+  // ---- 多维度过滤 ----
+  const filterTagList = useMemo(() => {
+    return filterTags.split(/[,，\s]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+  }, [filterTags]);
+
+  const filteredJobs = useMemo(() => {
+    const duplicateJobIds = new Set((quality?.duplicateGroups || []).flatMap(group => group.jobIds));
+    return jobs.filter(j => {
+      if (qualityFilter === "with_jd" && !(j.jd_text || "").trim()) return false;
+      if (qualityFilter === "missing_jd" && (j.jd_text || "").trim()) return false;
+      if (qualityFilter === "suspected_expired" && j.lifecycle_status !== "suspected_expired") return false;
+      if (qualityFilter === "blacklisted" && j.lifecycle_status !== "blacklisted") return false;
+      if (qualityFilter === "duplicates" && !duplicateJobIds.has(j.id)) return false;
+      if (filterText) {
+        const kw = filterText.toLowerCase();
+        const matchTitle = j.title.toLowerCase().includes(kw);
+        const matchCompany = j.company.toLowerCase().includes(kw);
+        const matchTags = (j.keywords || []).some(k => k.toLowerCase().includes(kw));
+        const matchJd = (j.jd_text || "").toLowerCase().includes(kw);
+        const matchCustom = (customTags[j.id] || []).some(t => t.toLowerCase().includes(kw));
+        if (!matchTitle && !matchCompany && !matchTags && !matchJd && !matchCustom) return false;
+      }
+      if (filterCity && (!j.city || !j.city.includes(filterCity))) return false;
+      if (filterSalaryMin) {
+        const min = parseInt(filterSalaryMin, 10);
+        if (!isNaN(min) && (j.salary_min || 0) < min) return false;
+      }
+      if (filterSalaryMax) {
+        const max = parseInt(filterSalaryMax, 10);
+        if (!isNaN(max) && (j.salary_max || 0) > max) return false;
+      }
+      if (filterTagList.length > 0) {
+        const jobTags = (j.keywords || []).map(k => k.toLowerCase());
+        const myTags = (customTags[j.id] || []).map(t => t.toLowerCase());
+        const allTags = [...jobTags, ...myTags];
+        const hasTag = filterTagList.some(t => allTags.some(at => at.includes(t)));
+        if (!hasTag) return false;
+      }
+      if (filterApplicationStatus) {
+        const status = j.application_status || (j.greeted ? "greeted" : "pending");
+        if (status !== filterApplicationStatus) return false;
+      }
+      if (filterDecisionStatus) {
+        const status = j.decision_status || "undecided";
+        if (status !== filterDecisionStatus) return false;
+      }
+      return true;
+    });
+  }, [jobs, quality, qualityFilter, filterText, filterCity, filterSalaryMin, filterSalaryMax, filterTagList, filterApplicationStatus, filterDecisionStatus, customTags]);
+
+  const cities = useMemo(() => [...new Set(jobs.map(j => j.city).filter(Boolean))].sort(), [jobs]);
+  const allTags = useMemo(() => buildCommonTags(jobs, hiddenCommonTags), [jobs, hiddenCommonTags]);
+  const expiredJobs = useMemo(() => jobs.filter(j => j.lifecycle_status === "suspected_expired"), [jobs]);
+
+  const selectedJobs = useMemo(() => jobs.filter(j => selectedJobIds.includes(j.id)), [jobs, selectedJobIds]);
 
   return (
     <section className="page-shell">
+      {/* ── 页头 ── */}
       <div className="page-heading">
         <div className="stack">
-          <p className="page-kicker">岗位池</p>
-          <h2 className="page-title">捕获、筛选并选定当前目标岗位</h2>
-          <p className="page-copy">
-            岗位可从 Boss 直聘实时抓取，也可手动录入。点击岗位卡片查看完整 JD，选定后进入后续流程。
-          </p>
+          <p className="page-kicker">岗位抓取</p>
+          <h2 className="page-title">BOSS 直聘岗位抓取与筛选</h2>
+          <p className="page-copy">登录后抓取岗位，多维度筛选，获取JD详情后进入尽调。</p>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span className={selectedJobIds.length > 0 ? "tag tag--active" : "tag"}>{selectedJobIds.length} 个已选</span>
+          {selectedJobIds.length > 0 && (
+            <button type="button" className="button-primary" onClick={() => onNavigate("diligence")}>开始尽调 →</button>
+          )}
         </div>
       </div>
 
-      <div className="page-body">
-        <div className="page-mainbar">
-          {/* 工具栏 */}
-          <div className="toolbar-strip">
-            <div className="toolbar-group">
-              <button
-                type="button"
-                className="button-primary"
-                disabled={loading}
-                onClick={() => setShowBoss(true)}
-              >
-                从 Boss 抓取
-              </button>
-              <button
-                type="button"
-                className="button-secondary"
-                disabled={loading}
-                onClick={onBossLogin}
-              >
-                登录 Boss 直聘
-              </button>
-              <button
-                type="button"
-                className="button-secondary"
-                disabled={loading}
-                onClick={() => setShowManual(true)}
-              >
-                + 手动录入
-              </button>
-              <button
-                type="button"
-                className="button-secondary"
-                disabled={loading}
-                onClick={onEnrichDetails}
-              >
-                补充 JD
-              </button>
-              <button
-                type="button"
-                className="button-secondary"
-                disabled={loading}
-                onClick={onCapture}
-              >
-                加载示例
-              </button>
+      {/* ── 错误 ── */}
+      {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}
+
+      {/* ── 已选岗位图集 ── */}
+      {selectedJobs.length > 0 && (
+        <div className="panel panel-strong">
+          <div className="panel-inner">
+            <div className="page-section__top" style={{ marginBottom: selectedJobs.length > 0 ? 10 : 0 }}>
+              <div className="page-kicker" style={{ marginBottom: 0 }}>当前已选 ({selectedJobs.length})</div>
+              <button type="button" className="button-quiet" onClick={clearSel}>清空选择</button>
             </div>
-            <div className="toolbar-group">
-              {confirmClear ? (
-                <>
-                  <span className="text-warning">确认清空全部 {total} 个岗位？</span>
-                  <button type="button" className="button-danger" disabled={loading} onClick={onClearAll}>
-                    确认清空
-                  </button>
-                  <button type="button" className="button-secondary" onClick={() => setConfirmClear(false)}>
-                    取消
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  className="button-secondary button-danger-outline"
-                  disabled={loading || total === 0}
-                  onClick={() => setConfirmClear(true)}
-                >
-                  清空全部
+            <div className="selected-mini-bar">
+              {selectedJobs.map(j => (
+                <div key={j.id} className="selected-mini-card" onClick={() => toggleJob(j.id)} title="点击取消选择">
+                  <span style={{ fontSize: 15, lineHeight: 1 }}>×</span>
+                  <span>{j.title}</span>
+                  <span style={{ color: "var(--text-muted)", fontSize: 10 }}>{j.company}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 抓取控制 ── */}
+      <div className="panel panel-strong">
+        <div className="panel-inner">
+          <div className="capture-panel-top">
+            <div>
+              <div className="page-kicker" style={{ marginBottom: 4 }}>抓取控制</div>
+              <p className="capture-panel-copy">先确认 BOSS 登录状态，再设置岗位条件并开始抓取。</p>
+            </div>
+            <span className={loggedIn ? "tag tag--green" : "tag tag--red"}>
+              {loggedIn ? "已登录" : "未登录"}
+            </span>
+          </div>
+
+          <div className="login-status-strip">
+            <div className="login-status-main">
+              <span className={loggedIn ? "login-dot login-dot--ok" : "login-dot login-dot--warn"} />
+              <p className="login-status-copy">
+                {loginStatus
+                  ? `${loginStatus.message}${loginStatus.action ? ` · ${loginStatus.action}` : ""}`
+                  : "尚未检测登录状态"}
+              </p>
+            </div>
+            <div className="login-status-actions">
+              {!loggedIn && (
+                <button type="button" className="button-primary" disabled={loading === "login"} onClick={onLogin}>
+                  {loading === "login" ? "登录中..." : "登录 BOSS"}
                 </button>
               )}
+              <button type="button" className="button-secondary" disabled={loading === "login"} onClick={checkStatus}>
+                重新检测
+              </button>
             </div>
           </div>
 
-          {/* Boss 抓取弹窗 */}
-          {showBoss && (
-            <div className="modal-overlay" onClick={() => setShowBoss(false)}>
-              <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
-                <div className="modal-header">
-                  <h3 className="modal-title">从 Boss 直聘抓取</h3>
-                  <button type="button" className="icon-button" onClick={() => setShowBoss(false)} aria-label="关闭">✕</button>
-                </div>
-                <div className="modal-body">
-                  <div className="form-group">
-                    <label className="form-label">搜索关键词</label>
-                    <input className="form-input" value={bossKeyword} onChange={(e) => setBossKeyword(e.target.value)} placeholder="如 Python、前端" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">城市</label>
-                    <select className="form-input" value={bossCity} onChange={(e) => setBossCity(e.target.value)}>
-                      {["深圳", "北京", "上海", "广州", "杭州", "成都", "南京", "武汉", "西安", "苏州", "郑州", "长沙", "重庆", "天津", "合肥", "济南", "青岛", "厦门", "福州", "东莞", "佛山", "珠海", "大连", "昆明", "贵阳", "南宁", "南昌", "石家庄", "太原", "沈阳", "哈尔滨", "长春", "兰州", "海口", "无锡", "宁波", "温州"].map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">最多页数（每页 30 条）</label>
-                    <select className="form-input" value={bossPages} onChange={(e) => setBossPages(e.target.value)}>
-                      {[1, 2, 3, 5, 10].map((n) => (
-                        <option key={n} value={n}>{n} 页</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <div className="modal-footer">
-                  <button type="button" className="button-secondary" onClick={() => setShowBoss(false)}>取消</button>
-                  <button type="button" className="button-primary" disabled={loading} onClick={onCaptureBoss}>
-                    {loading ? "抓取中..." : "开始抓取"}
-                  </button>
-                </div>
-              </div>
+          <div className="capture-grid">
+            <div className="field">
+              <label className="field-label">岗位关键词</label>
+              <input className="form-input form-input--inline" value={keyword} onChange={e => setKeyword(e.target.value)} placeholder="如: 产品经理" />
             </div>
-          )}
-
-          {/* 手动录入弹窗 */}
-          {showManual && (
-            <div className="modal-overlay" onClick={() => setShowManual(false)}>
-              <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
-                <div className="modal-header">
-                  <h3 className="modal-title">手动录入岗位</h3>
-                  <button type="button" className="icon-button" onClick={() => setShowManual(false)} aria-label="关闭">✕</button>
-                </div>
-                <div className="modal-body">
-                  <div className="form-group">
-                    <label className="form-label">岗位名称 *</label>
-                    <input className="form-input" value={manualTitle} onChange={(e) => setManualTitle(e.target.value)} placeholder="如 Python 后端工程师" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">公司名称 *</label>
-                    <input className="form-input" value={manualCompany} onChange={(e) => setManualCompany(e.target.value)} placeholder="如 A 科技有限公司" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">城市</label>
-                    <input className="form-input" value={manualCity} onChange={(e) => setManualCity(e.target.value)} placeholder="如 深圳" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">薪资</label>
-                    <input className="form-input" value={manualSalary} onChange={(e) => setManualSalary(e.target.value)} placeholder="如 20-30K" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">JD 描述</label>
-                    <textarea className="form-input form-textarea" rows={4} value={manualJD} onChange={(e) => setManualJD(e.target.value)} placeholder="输入岗位 JD 描述..." />
-                  </div>
-                </div>
-                <div className="modal-footer">
-                  <button type="button" className="button-secondary" onClick={() => setShowManual(false)}>取消</button>
-                  <button type="button" className="button-primary" disabled={loading} onClick={onManualSubmit}>
-                    {loading ? "提交中..." : "确认录入"}
-                  </button>
-                </div>
-              </div>
+            <div className="field">
+              <label className="field-label">城市</label>
+              <CitySearchSelect value={city} options={cityOptions} onChange={setCity} />
             </div>
-          )}
-
-          {/* 筛选栏 */}
-          <div className="toolbar-strip">
-            <div className="toolbar-group">
-              <input className="form-input form-input--inline" placeholder="按关键词筛选" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-              <input className="form-input form-input--inline" placeholder="按城市筛选" value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} />
-              <input className="form-input form-input--inline form-input--narrow" placeholder="薪资 ≥ K" value={minSalary} onChange={(e) => setMinSalary(e.target.value)} type="number" />
-              <button type="button" className="button-primary" disabled={loading} onClick={onFilter}>筛选</button>
-              <button type="button" className="button-secondary" disabled={loading} onClick={loadJobs}>重置</button>
+            <div className="field">
+              <label className="field-label">页数</label>
+              <select className="form-input form-input--inline" value={maxPages} onChange={e => setMaxPages(Number(e.target.value))}>
+                {[1,2,3,5,8,10].map(n => <option key={n} value={n}>{n} 页</option>)}
+              </select>
+            </div>
+            <div className="capture-actions">
+              <button type="button" className="button-primary" disabled={loading === "capture"} onClick={onCapture}>
+                {loading === "capture" ? "抓取中..." : "开始抓取"}
+              </button>
+              <button type="button" className="button-secondary" disabled={loading === "enrich"} onClick={onEnrichJD}>
+                {loading === "enrich" ? "获取中..." : "获取 JD 详情"}
+              </button>
             </div>
           </div>
 
-          {error && <div className="banner banner-error">{error}</div>}
-
-          {/* 岗位列表 */}
-          <section className="page-section">
-            <div className="page-section__top">
-              <div>
-                <div className="page-kicker">岗位列表</div>
-                <p className="workspace-target-meta">
-                  {loading ? "加载中..." : total > 0 ? `共 ${total} 条岗位` : "还没有岗位，请先抓取或录入。"}
-                </p>
+          <div className="capture-filter-grid" aria-label="高级筛选">
+            {FILTER_LABELS.map(([key, label]) => (
+              <div key={key} className="field">
+                <label className="field-label">{label}</label>
+                <select
+                  className="form-input form-input--inline"
+                  value={captureFilters[key] || ""}
+                  onChange={e => setCaptureFilters(prev => ({ ...prev, [key]: e.target.value || undefined }))}
+                >
+                  <option value="">不限</option>
+                  {(filterOptions[key] || []).filter(opt => opt.value !== "0").map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
               </div>
-            </div>
-
-            {total > 0 ? (
-              <div className="job-grid job-grid--compact">
-                {jobs.map((job) => (
-                  <article
-                    key={job.id}
-                    className={`job-card job-card--compact ${selectedJobId === job.id ? "job-card--selected" : ""}`}
-                    onClick={() => setDetailJob(job)}
-                    style={{ cursor: "pointer" }}
-                  >
-                    <div className="job-card__top">
-                      <div className="stack">
-                        <h3 className="job-card__title">{job.title}</h3>
-                        <p className="job-card__meta">{job.company} · {job.city} · {job.salary}</p>
-                      </div>
-                      <div className="job-card__actions">
-                        <button
-                          type="button"
-                          className="icon-button icon-button--sm"
-                          onClick={(e) => onDeleteJob(job.id, e)}
-                          aria-label={`删除 ${job.title}`}
-                          title="删除此岗位"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-                    <div className="job-tags">
-                      {selectedJobId === job.id ? <span className="tag tag--active">当前已选中</span> : null}
-                      <span className="tag tag--muted">
-                        {job.source === "captured" ? "BOSS 抓取" : job.source === "manual" ? "手动录入" : job.source}
-                      </span>
-                      {job.keywords?.slice(0, 3).map((k: string) => (
-                        <span key={k} className="tag">{k}</span>
-                      ))}
-                    </div>
-                    <p className="job-card__body">{job.structured_summary || (job.jd_text ? job.jd_text.split("\n").filter(l => l.trim()).slice(0, 2).join(" · ") : "")}</p>
-                    <div className="toolbar-row">
-                      <button
-                        type="button"
-                        className={selectedJobId === job.id ? "button-secondary" : "button-primary"}
-                        onClick={(e) => { e.stopPropagation(); onSelectJob(job); }}
-                      >
-                        {selectedJobId === job.id ? "已选为目标，点击切换" : "选为简历优化目标"}
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <div className="empty-state">
-                <strong>没有岗位</strong>
-                <p>点击「从 Boss 抓取」搜索真实岗位，或点击「加载示例数据」快速体验。</p>
-              </div>
-            )}
-          </section>
+            ))}
+          </div>
+          <CompanyBlacklistPanel
+            companies={blacklist}
+            inputValue={blacklistInput}
+            expanded={blacklistExpanded}
+            importInputRef={blacklistImportRef}
+            onInputChange={setBlacklistInput}
+            onAdd={addBlacklist}
+            onRemove={removeBlacklist}
+            onToggleExpanded={() => setBlacklistExpanded(prev => !prev)}
+            onExport={onExportBlacklist}
+            onImport={onImportBlacklist}
+          />
         </div>
-
-        {/* 右侧信息栏 */}
-        <aside className="workbench-rail" data-testid="job-summary-rail">
-          <div className="metric-grid">
-            <div className="metric-card">
-              <span className="metric-card__label">结果</span>
-              <span className="metric-card__value mono">{total}</span>
-            </div>
-            <div className="metric-card">
-              <span className="metric-card__label">目标</span>
-              <span className="metric-card__value mono">当前选中 {selectedCount} 个</span>
-            </div>
-            <div className="metric-card">
-              <span className="metric-card__label">薪资</span>
-              <span className="metric-card__value mono">{minSalary || "不限"}K+</span>
-            </div>
-          </div>
-          <div className="panel panel-muted">
-            <div className="panel-inner section-grid">
-              <div><div className="page-kicker">当前条件</div></div>
-              <div className="mini-list">
-                <div className="mini-row"><span>关键词</span><strong>{keyword || "未设置"}</strong></div>
-                <div className="mini-row"><span>城市</span><strong>{cityFilter || "不限"}</strong></div>
-                <div className="mini-row"><span>状态</span><strong>{status || "未操作"}</strong></div>
-              </div>
-            </div>
-          </div>
-          <div className="panel panel-muted">
-            <div className="panel-inner section-grid">
-              <div><div className="page-kicker">当前目标</div>
-                {selectedJob ? (
-                  <div className="stack">
-                    <h3 className="workspace-target-title">{selectedJob.title}</h3>
-                    <p className="workspace-target-meta">{selectedJob.company} · {selectedJob.city} · {selectedJob.salary}</p>
-                    <div className="job-tags">
-                      {selectedJob.keywords?.slice(0, 4).map((k: string) => <span key={k} className="tag">{k}</span>)}
-                    </div>
-                  </div>
-                ) : <p className="workspace-target-meta">还没有选中岗位。</p>}
-              </div>
-            </div>
-          </div>
-        </aside>
       </div>
 
-      {/* JD 详情弹窗 */}
-      {detailJob && <JobDetailModal job={detailJob} onClose={() => setDetailJob(null)} />}
+      {quality && (
+        <div className="panel panel-strong">
+          <div className="panel-inner">
+            <div className="page-section__top" style={{ marginBottom: 12 }}>
+              <div>
+                <div className="page-kicker" style={{ marginBottom: 4 }}>岗位池质量</div>
+                <p className="capture-panel-copy">点击卡片可直接筛出对应岗位，用于定位缺失 JD、重复、过期等数据问题。</p>
+              </div>
+              <div className="toolbar-strip">
+                {qualityFilter && (
+                  <span className="tag tag--active">
+                    当前筛选: {QUALITY_FILTER_LABELS[qualityFilter]}
+                  </span>
+                )}
+                {qualityFilter && (
+                  <button type="button" className="button-quiet" onClick={() => setQualityFilter("")}>清除质量筛选</button>
+                )}
+                {quality.duplicateGroups.length > 0 && (
+                  <button type="button" className="button-secondary" onClick={() => setDuplicatesExpanded(prev => !prev)}>
+                    {duplicatesExpanded ? "收起重复组" : `查看重复组 ${quality.duplicateGroups.length}`}
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="quality-metric-grid">
+              <button type="button" className={`quality-metric ${qualityFilter === "" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("")}>
+                <span>总岗位</span><strong>{quality.summary.total}</strong>
+              </button>
+              <button type="button" className={`quality-metric ${qualityFilter === "with_jd" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("with_jd")}>
+                <span>已获取 JD</span><strong>{quality.summary.with_jd}</strong>
+              </button>
+              <button type="button" className={`quality-metric ${qualityFilter === "missing_jd" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("missing_jd")}>
+                <span>缺少 JD</span><strong>{quality.summary.missing_jd}</strong>
+              </button>
+              <button type="button" className={`quality-metric ${qualityFilter === "suspected_expired" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("suspected_expired")}>
+                <span>疑似过期</span><strong>{quality.summary.suspected_expired}</strong>
+              </button>
+              <button type="button" className={`quality-metric ${qualityFilter === "blacklisted" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("blacklisted")}>
+                <span>黑名单命中</span><strong>{quality.summary.blacklisted}</strong>
+              </button>
+              <button type="button" className={`quality-metric ${qualityFilter === "duplicates" ? "quality-metric--active" : ""}`} onClick={() => setQualityFilter("duplicates")}>
+                <span>重复岗位</span><strong>{quality.summary.duplicate_jobs}</strong>
+              </button>
+            </div>
+            <div className="application-board">
+              {(Object.keys(APPLICATION_STATUS_LABELS) as JobApplicationStatus[]).map(status => (
+                <button
+                  key={status}
+                  type="button"
+                  className={`application-board__item ${filterApplicationStatus === status ? "application-board__item--active" : ""}`}
+                  onClick={() => setFilterApplicationStatus(filterApplicationStatus === status ? "" : status)}
+                >
+                  <span>{APPLICATION_STATUS_LABELS[status]}</span>
+                  <strong>{quality.summary.application_statuses?.[status] || 0}</strong>
+                </button>
+              ))}
+            </div>
+            {duplicatesExpanded && quality.duplicateGroups.length > 0 && (
+              <div className="duplicate-group-list">
+                {quality.duplicateGroups.slice(0, 8).map(group => (
+                  <div key={group.key} className="duplicate-group-item">
+                    <div>
+                      <strong>{group.company} · {group.title}</strong>
+                      <p>{group.city || "未知城市"} · {group.count} 个重复 · {group.withJd} 个已有 JD</p>
+                    </div>
+                    <button type="button" className="button-quiet" onClick={() => dispatch(actions.setSelection(group.jobIds))}>
+                      选中这组
+                    </button>
+                    <button type="button" className="button-secondary button-secondary--sm" onClick={() => onMergeDuplicateGroup(group.jobIds)}>
+                      合并这组
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {expiredJobs.length > 0 && (
+        <div className="panel panel-strong">
+          <div className="panel-inner">
+            <div className="toolbar-strip">
+              <span className="tag tag--red">疑似过期 {expiredJobs.length} 个</span>
+              <span className="text-muted" style={{ fontSize: 12 }}>这些岗位抓取时间超过 90 天，建议重新确认后再进入尽调。</span>
+              <button type="button" className="button-secondary" onClick={onKeepExpired}>本次保留</button>
+              <button type="button" className="button-quiet button-danger" onClick={onCleanupExpired}>清理疑似过期</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 筛选工具栏 ── */}
+      {jobs.length > 0 && (
+        <JobFilterPanel
+          totalJobs={jobs.length}
+          filteredJobs={filteredJobs.length}
+          filterText={filterText}
+          filterCity={filterCity}
+          filterSalaryMin={filterSalaryMin}
+          filterSalaryMax={filterSalaryMax}
+          filterTags={filterTags}
+          filterApplicationStatus={filterApplicationStatus}
+          filterDecisionStatus={filterDecisionStatus}
+          cities={cities}
+          commonTags={allTags}
+          filterTagList={filterTagList}
+          statusLabels={APPLICATION_STATUS_LABELS}
+          decisionLabels={DECISION_STATUS_LABELS}
+          selectedCount={selectedJobIds.length}
+          onFilterTextChange={setFilterText}
+          onFilterCityChange={setFilterCity}
+          onFilterSalaryMinChange={setFilterSalaryMin}
+          onFilterSalaryMaxChange={setFilterSalaryMax}
+          onFilterTagsChange={setFilterTags}
+          onFilterApplicationStatusChange={setFilterApplicationStatus}
+          onFilterDecisionStatusChange={setFilterDecisionStatus}
+          onHideCommonTag={hideCommonTag}
+          onClearCommonTags={clearCommonTags}
+          onSelectAllTags={() => setFilterTags(allTags.map(t => t.toLowerCase()).join(", "))}
+          onSelectAll={selectAll}
+          onClearSelection={clearSel}
+          onDeleteSelected={onDeleteBatch}
+          onClearAllJobs={onClearAll}
+        />
+      )}
+
+      {/* ── 岗位列表 ── */}
+      {jobs.length === 0 ? (
+        <div className="panel panel-strong">
+          <div className="panel-inner">
+            <EmptyState icon="💼" title="暂无岗位数据" desc="登录 BOSS 直聘后输入关键词和城市，点击「开始抓取」获取岗位。" />
+          </div>
+        </div>
+      ) : (
+        <ul className="list-reset job-grid">
+          {filteredJobs.map(job => {
+            const sel = selectedJobIds.includes(job.id);
+            const showDetail = detailId === job.id;
+            const tags = customTags[job.id] || [];
+            return (
+              <JobCard
+                key={job.id}
+                job={job}
+                selected={sel}
+                expanded={showDetail}
+                customTags={tags}
+                tagInput={tagInputs[job.id] || ""}
+                filterTagList={filterTagList}
+                greeted={Boolean(greetedStatus[job.id])}
+                statusLabels={APPLICATION_STATUS_LABELS}
+                decisionLabels={DECISION_STATUS_LABELS}
+                onToggleSelected={() => toggleJob(job.id)}
+                onToggleDetail={() => setDetailId(showDetail ? null : job.id)}
+                onStatusChange={(status) => onUpdateApplicationStatus(job, status)}
+                onDecisionChange={(status) => onUpdateDecisionStatus(job, status)}
+                onRemoveCustomTag={(tag) => {
+                  const newTags = tags.filter(x => x !== tag);
+                  setCustomTags(prev => ({ ...prev, [job.id]: newTags }));
+                  tagJob(job.id, { tags: newTags }).catch((e: unknown) => {
+                    setCustomTags(prev => ({ ...prev, [job.id]: tags }));
+                    setError(e instanceof Error ? e.message : "删除标签失败");
+                  });
+                }}
+                onTagInputChange={(value) => setTagInputs(prev => ({ ...prev, [job.id]: value }))}
+                onAddCustomTag={() => addCustomTag(job.id, tagInputs[job.id] || "")}
+                onToggleKeywordTag={(keyword) => {
+                  const current = filterTagList;
+                  setFilterTags(current.includes(keyword.toLowerCase())
+                    ? current.filter(x => x !== keyword.toLowerCase()).join(", ")
+                    : [...current, keyword.toLowerCase()].join(", "));
+                }}
+                onAddBlacklist={() => addBlacklist(job.company)}
+                onDelete={() => onDeleteOne(job.id)}
+              />
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 }

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import io
 import re
 from app.models.resume import ResumeProfile, WorkExperience, Education, Project
@@ -38,8 +39,8 @@ COMPANY_HINTS = re.compile(
     re.IGNORECASE,
 )
 DURATION_PATTERN = re.compile(
-    r"(\d{4}\.\d{1,2}|\d{4}-\d{1,2}|\d{4}/\d{1,2})\s*[-–—至到~]\s*"
-    r"(\d{4}\.\d{1,2}|\d{4}-\d{1,2}|\d{4}/\d{1,2}|至今|现在|Present)",
+    r"(\d{4}\.\d{1,2}|\d{4}-\d{1,2}|\d{4}/\d{1,2}|\d{4}年\d{1,2}月)\s*[-–—至到~]\s*"
+    r"(\d{4}\.\d{1,2}|\d{4}-\d{1,2}|\d{4}/\d{1,2}|\d{4}年\d{1,2}月|至今|现在|Present)",
 )
 SECTION_HEADERS = re.compile(
     r"^(?:##\s*)?"
@@ -71,6 +72,8 @@ def _extract_text_from_bytes(data: bytes, filename: str = "") -> str:
         content_type = "docx"
     elif name_lower.endswith(".doc"):
         content_type = "doc"
+    elif name_lower.endswith((".png", ".jpg", ".jpeg", ".webp")) or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"\xff\xd8":
+        content_type = "image"
 
     if content_type == "pdf":
         import pdfplumber
@@ -106,6 +109,15 @@ def _extract_text_from_bytes(data: bytes, filename: str = "") -> str:
         text = re.sub(r"\s+", " ", text)
         if _chinese_ratio(text) < _MIN_CHINESE_RATIO:
             raise ValueError(".doc 旧格式不支持解析，请将简历另存为 .docx 或 .txt 后重新上传")
+        return text
+    elif content_type == "image":
+        try:
+            from app.services.ai_client import ocr_image
+            text = ocr_image(data, filename)
+        except Exception as e:
+            raise ValueError(f"图片简历需要先配置支持视觉识别的 AI 模型，或改传 PDF/DOCX。OCR 失败: {str(e)[:120]}") from e
+        if not text.strip():
+            raise ValueError("图片 OCR 未识别到文字，请上传更清晰的图片或改传 PDF/DOCX")
         return text
     else:
         return data.decode("utf-8", errors="ignore")
@@ -195,6 +207,13 @@ def _extract_work_experience(lines: list[str]) -> list[WorkExperience]:
             if current:
                 if COMPANY_HINTS.search(line):
                     current.company = line.split("：", 1)[-1].split(":", 1)[-1].strip()
+                elif not current.company and "|" in line:
+                    parts = [p.strip() for p in line.split("|") if p.strip()]
+                    if len(parts) >= 2:
+                        current.company = parts[0]
+                        current.title = parts[1]
+                    else:
+                        current.title = parts[0]
                 elif not current.title and not current.company and len(_clean(line)) > 1:
                     current.title = _clean(line)
                 elif len(_clean(line)) > 1:
@@ -284,10 +303,16 @@ def _extract_education(lines: list[str]) -> list[Education]:
                 else:
                     current.institution = cleaned
             else:
-                if "学位" in cleaned or "本科" in cleaned or "硕士" in cleaned or "博士" in cleaned:
+                if "学位" in cleaned or "本科" in cleaned or "硕士" in cleaned or "博士" in cleaned or "大专" in cleaned or "中专" in cleaned:
                     current.degree = cleaned
                 elif "专业" in cleaned:
                     current.major = cleaned.replace("专业", "").strip()
+                elif re.search(r"\d{4}\.\d{1,2}|\d{4}-\d{1,2}|\d{4}/\d{1,2}", cleaned):
+                    # 日期行 → 毕业时间
+                    current.graduation = cleaned
+                elif not current.major:
+                    # 非日期行，且 major 尚未赋值 → 很可能是专业名
+                    current.major = cleaned
 
     if current and current.institution:
         education.append(current)
@@ -333,8 +358,16 @@ def _extract_location(text: str) -> str:
 def _extract_summary(lines: list[str]) -> str:
     for i, line in enumerate(lines[:20]):
         if re.search(r"个人总结|自我评价|summary|求职意向", line, re.IGNORECASE):
-            if i + 1 < len(lines):
-                return _clean(lines[i + 1])
+            parts = []
+            for j in range(i + 1, min(i + 4, len(lines))):
+                candidate = _clean(lines[j])
+                if not candidate:
+                    break
+                # 遇到下一个节标题则停止
+                if re.search(r"技能|工作经历|教育|项目|联系方式|个人信息", candidate, re.IGNORECASE):
+                    break
+                parts.append(candidate)
+            return "；".join(parts) if parts else ""
     return ""
 
 
@@ -383,32 +416,10 @@ def parse_resume_text(text: str) -> ResumeProfile:
         projects=projects,
     )
 
-    # AI 优先解析：先用 AI 获取结构化数据，正则结果用于补充 AI 未覆盖的字段
+    # AI 解析由后台异步完成（_bg_enrich），此处直接返回正则结果以保证快速响应
     import logging
     logger = logging.getLogger("resume_parser")
-    try:
-        ai_profile = _ai_parse_resume(text, ["全部字段"])
-        if ai_profile:
-            # AI 结果优先，正则补充 AI 未提取到的字段
-            profile = ResumeProfile(
-                name=ai_profile.name or profile.name,
-                title=ai_profile.title or profile.title,
-                phone=getattr(ai_profile, 'phone', '') or getattr(profile, 'phone', ''),
-                email=getattr(ai_profile, 'email', '') or getattr(profile, 'email', ''),
-                gender=getattr(ai_profile, 'gender', '') or getattr(profile, 'gender', ''),
-                birth=getattr(ai_profile, 'birth', '') or getattr(profile, 'birth', ''),
-                location=getattr(ai_profile, 'location', '') or getattr(profile, 'location', ''),
-                summary=ai_profile.summary or profile.summary,
-                skills=ai_profile.skills if ai_profile.skills else profile.skills,
-                target_titles=ai_profile.target_titles if ai_profile.target_titles else profile.target_titles,
-                work_experience=ai_profile.work_experience if ai_profile.work_experience else profile.work_experience,
-                education=ai_profile.education if ai_profile.education else profile.education,
-                projects=ai_profile.projects if ai_profile.projects else profile.projects,
-            )
-            logger.info("AI 优先解析完成")
-            return profile
-    except Exception as e:
-        logger.warning("AI 优先解析失败，使用正则结果: %s", e)
+    logger.info("正则解析完成，AI 补充解析将在后台异步进行")
 
     # 正则兜底：AI 完全不可用时仍用正则
     missing = []
@@ -423,7 +434,7 @@ def parse_resume_text(text: str) -> ResumeProfile:
 
 
 
-def _ai_parse_resume(text: str, fields_missing: list[str]) -> ResumeProfile | None:
+def ai_enrich_resume(text: str, fields_missing: list[str]) -> ResumeProfile | None:
     """当正则解析缺失关键字段时，用 AI 从原文提取结构化简历数据。"""
     import logging
     logger = logging.getLogger("resume_parser")
@@ -455,7 +466,7 @@ def _ai_parse_resume(text: str, fields_missing: list[str]) -> ResumeProfile | No
 只返回 JSON，不要解释。如果某字段确实没有，用空字符串/空数组。"""
 
     # 只传前 5000 字符，避免 tokens 过大
-    truncated = text[:5000]
+    truncated = text[:8000]
     user = f"以下是一份简历的原文，请提取结构化信息。缺失字段：{', '.join(fields_missing)}。\n\n简历原文：\n{truncated}"
 
     try:

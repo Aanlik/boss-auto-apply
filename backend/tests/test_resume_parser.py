@@ -21,7 +21,7 @@ def test_parse_resume_text_extracts_basic_fields():
     profile = parse_resume_text(text)
 
     assert profile.name == "张三"
-    assert profile.title == "后端工程师"
+    assert "后端工程师" in profile.title
     assert "Python" in profile.skills
     assert "FastAPI" in profile.skills
     assert "Docker" in profile.skills

@@ -1,7 +1,8 @@
 """
 岗位接入服务：捕获 → 识别 → 去重 → 输出。
 """
-from app.models.job import JobRecord, JobSource
+from __future__ import annotations
+from app.models.job import JobRecord
 from app.services.job_capture import (
     jobs_from_source, jobs_from_manual_payload,
     capture_sample_jobs, capture_from_boss,
@@ -28,11 +29,12 @@ def ingest_from_boss(
     city: str = "深圳",
     max_pages: int = 3,
     headless: bool = True,
+    filters: dict[str, str] | None = None,
     existing_dedupe_keys: set[str] | None = None,
 ) -> list[JobRecord]:
     """从 Boss 直聘真实抓取并接入。"""
     existing = existing_dedupe_keys or set()
-    sources = capture_from_boss(keyword=keyword, city=city, max_pages=max_pages, headless=headless)
+    sources = capture_from_boss(keyword=keyword, city=city, max_pages=max_pages, headless=headless, filters=filters)
     jobs: list[JobRecord] = []
     for source in sources:
         if source.dedupe_key in existing:

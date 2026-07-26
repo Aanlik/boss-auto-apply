@@ -1,11 +1,15 @@
 """
 Boss 直聘岗位抓取服务 — CDP + API 模式
-基于 eatmoreduck/boss-zhipin-scraper 的 CDP 架构：
+独立实现，参考 eatmoreduck/boss-zhipin-scraper 的 CDP 抓取思路，无运行时依赖：
   - 连接系统 Chrome 的 CDP 调试端口
   - 在页面中执行 JS 调 Boss 内部搜索 API
   - API 返回明文薪资数据，绕过字体反爬
 
-关键设计（对齐 eatmoreduck/boss-zhipin-scraper）：
+参考边界：
+  - 本模块不 import、不安装、不调用 boss-scraper-ref 目录或第三方项目包
+  - boss-scraper-ref 仅作为本地归档参考，不属于应用运行路径
+
+关键设计：
   1. flatten attach 后不显式调用 Page.enable / Runtime.enable
      （显式 enable 会订阅大量生命周期事件，send() 消费它们会破坏页面状态）
   2. 使用 Page.navigate + sleep 等待 SPA 页面加载
@@ -25,6 +29,8 @@ from urllib.parse import urlencode
 import requests
 import websocket
 
+from app.services.city_codes import load_city_codes, resolve_city_code
+
 logger = logging.getLogger("boss_scraper")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [BOSS] %(message)s", datefmt="%H:%M:%S")
 
@@ -34,21 +40,9 @@ CDP_PROFILE = str(DATA_DIR / "chrome_profile")
 CDP_PORT = 9222
 API_SEARCH = "/wapi/zpgeek/search/joblist.json"
 API_BASE = "https://www.zhipin.com"
+_detail_enrich_running = False
 
-CITY_CODES = {
-    "深圳": "101280600", "北京": "101010100", "上海": "101020100",
-    "广州": "101280100", "杭州": "101210100", "成都": "101270100",
-    "南京": "101190100", "武汉": "101200100", "西安": "101110100", "苏州": "101190400",
-    "郑州": "101180100", "长沙": "101250100", "重庆": "101040100",
-    "天津": "101030100", "合肥": "101220100", "济南": "101120100",
-    "青岛": "101120200", "厦门": "101230200", "福州": "101230100",
-    "东莞": "101281600", "佛山": "101280800", "珠海": "101280700",
-    "大连": "101070200", "昆明": "101290100", "贵阳": "101260100",
-    "南宁": "101300100", "南昌": "101240100", "石家庄": "101090100",
-    "太原": "101100100", "沈阳": "101070100", "哈尔滨": "101050100",
-    "长春": "101060100", "兰州": "101160100", "海口": "101310100",
-    "无锡": "101190200", "宁波": "101210400", "温州": "101210700",
-}
+CITY_CODES = load_city_codes()
 
 API_JS_TEMPLATE = """(function(){
     var xhr = new XMLHttpRequest();
@@ -177,19 +171,52 @@ def _chrome_running():
         return False
 
 
+def _find_chrome() -> str:
+    """跨平台查找 Chrome/Chromium 可执行文件。"""
+    import shutil as _shutil
+    candidates = []
+    system = sys.platform
+    if system == "darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+    elif system == "linux":
+        candidates = [
+            "google-chrome", "google-chrome-stable", "chromium",
+            "chromium-browser", "/usr/bin/google-chrome",
+        ]
+    elif system == "win32":
+        candidates = [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        ]
+    for c in candidates:
+        if c and (_shutil.which(c) or os.path.exists(c)):
+            return c
+    raise RuntimeError(
+        "未找到 Chrome/Chromium。请安装 Google Chrome。\n"
+        f"  系统: {system}\n"
+        f"  搜索路径: {candidates[:3]}"
+    )
+
 def _launch_chrome(url="about:blank"):
     os.makedirs(CDP_PROFILE, exist_ok=True)
     _stop_chrome()
     _time.sleep(1)
+    chrome = _find_chrome()
     subprocess.Popen(
         [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            chrome,
             f"--remote-debugging-port={CDP_PORT}",
             f"--user-data-dir={CDP_PROFILE}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-background-networking",
             "--disable-sync",
+            "--window-size=1440,900",
+            "--window-position=100,100",
+            "--disable-blink-features=AutomationControlled",
             "--remote-allow-origins=*",
             url,
         ],
@@ -204,13 +231,28 @@ def _launch_chrome(url="about:blank"):
 
 
 def _stop_chrome():
+    """仅停止我们启动的 CDP Chrome 进程（不影响用户正常 Chrome）。"""
     try:
-        subprocess.run(
-            ["pkill", "-f", f"remote-debugging-port={CDP_PORT}"],
-            timeout=5,
+        # macOS/Linux: 按端口精确匹配，避免误杀用户 Chrome
+        import signal as _signal
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{CDP_PORT}"],
+            capture_output=True, text=True, timeout=5,
         )
+        for pid_str in result.stdout.strip().split("\n"):
+            pid = pid_str.strip()
+            if pid:
+                try:
+                    os.kill(int(pid), _signal.SIGTERM)
+                except (OSError, ValueError):
+                    pass
     except Exception:
         pass
+    _time.sleep(0.5)
+    # 清除登录标记
+    session_file = Path(CDP_PROFILE) / ".boss_logged_in"
+    if session_file.exists():
+        session_file.unlink()
 
 
 # ============================================================
@@ -284,7 +326,7 @@ async def boss_login_and_save_session(headless=False):
 
     try:
         tid, sid = cdp.create_page()
-        cdp.navigate("https://www.zhipin.com/web/user/?ka=header-login", sid)
+        cdp.navigate("https://www.zhipin.com/web/user/?intent=0&ka=header-geek", sid)
 
         logger.info("请在浏览器中扫码登录，等待中...")
         started = _time.time()
@@ -300,6 +342,9 @@ async def boss_login_and_save_session(headless=False):
             result = _probe_login(cdp, sid)
             if result["status"] == "ok":
                 logger.info("登录成功！检测到明文薪资: %s", result.get("salary_sample"))
+                # 保存登录成功标记
+                session_file = Path(CDP_PROFILE) / ".boss_logged_in"
+                session_file.write_text(datetime.now(timezone.utc).isoformat())
                 cdp.send("Target.closeTarget", {"targetId": tid})
                 cdp.close()
                 return {"status": "ok", "message": f"登录成功（{result.get('salary_sample','')}）"}
@@ -324,12 +369,13 @@ async def boss_login_and_save_session(headless=False):
 # ============================================================
 #  API: 抓取
 # ============================================================
-async def scrape_boss_jobs(keyword="Python", city="深圳", max_pages=3, headless=True):
+async def scrape_boss_jobs(keyword="Python", city="深圳", max_pages=3, headless=True, filters=None):
     """CDP + API 模式抓取 Boss 岗位。"""
     import asyncio
 
     logger.info("=== 抓取: %s @ %s (最多 %d 页) ===", keyword, city, max_pages)
-    city_code = CITY_CODES.get(city, "101280600")
+    city_code = resolve_city_code(city)
+    filters = filters or {}
 
     if not _chrome_running():
         if not _launch_chrome():
@@ -342,7 +388,11 @@ async def scrape_boss_jobs(keyword="Python", city="深圳", max_pages=3, headles
         tid, sid = cdp.create_page()
 
         # 导航到搜索页
-        search_url = f"https://www.zhipin.com/web/geek/job?query={keyword}&city={city_code}"
+        base_params = {"query": keyword, "city": city_code}
+        for key, value in filters.items():
+            if value:
+                base_params[key] = value
+        search_url = f"https://www.zhipin.com/web/geek/job?{urlencode(base_params)}"
         cdp.navigate(search_url, sid)
 
         # 探测登录态
@@ -360,10 +410,14 @@ async def scrape_boss_jobs(keyword="Python", city="深圳", max_pages=3, headles
 
         for pg in range(1, max_pages + 1):
             logger.info("第 %d/%d 页...", pg, max_pages)
-            params = urlencode({
+            api_params = {
                 "scene": "1", "query": keyword, "city": city_code,
                 "page": pg, "pageSize": 30,
-            })
+            }
+            for key, value in filters.items():
+                if value:
+                    api_params[key] = value
+            params = urlencode(api_params)
             api_url = f"{API_BASE}{API_SEARCH}?{params}"
             js = API_JS_TEMPLATE.replace("__API_URL__", api_url)
 
@@ -432,10 +486,10 @@ def login_boss_sync(headless=False):
     return asyncio.run(boss_login_and_save_session(headless=headless))
 
 
-def scrape_jobs_sync(keyword="Python", city="深圳", max_pages=3, headless=True):
+def scrape_jobs_sync(keyword="Python", city="深圳", max_pages=3, headless=True, filters=None):
     import asyncio
     return asyncio.run(scrape_boss_jobs(
-        keyword=keyword, city=city, max_pages=max_pages, headless=headless
+        keyword=keyword, city=city, max_pages=max_pages, headless=headless, filters=filters
     ))
 
 
@@ -470,6 +524,7 @@ def scrape_job_detail(cdp, sid, job_url):
 
 def enrich_jobs_with_details(jobs, max_jobs=30):
     """为岗位列表补充详情页 JD（同步版本）。"""
+    global _detail_enrich_running
 
     if not _chrome_running():
         if not _launch_chrome():
@@ -478,11 +533,9 @@ def enrich_jobs_with_details(jobs, max_jobs=30):
     cdp = None
     tid = None
     try:
+        _detail_enrich_running = True
         cdp = CDPSession(CDP_PORT)
         tid, sid = cdp.create_page()
-
-        # 先导航到 Boss 保证 cookie 生效
-        cdp.navigate("https://www.zhipin.com", sid)
 
         # 筛选需要补充的岗位（兼容 dict 和 Pydantic model）
         to_process = []
@@ -509,6 +562,16 @@ def enrich_jobs_with_details(jobs, max_jobs=30):
                     else:
                         job["jd_text"] = detail["jd"]
 
+                    # 同步获取企业工商注册名称
+                    company_name = detail.get("company_name", "")
+                    if company_name and len(company_name) >= 3:
+                        if hasattr(job, 'tags'):
+                            job.company = company_name
+                            job.tags = [t for t in (job.tags or []) if not t.startswith("@")]
+                        elif isinstance(job, dict):
+                            job["company"] = company_name
+                            job["tags"] = [t for t in job.get("tags", []) if not t.startswith("@")]
+
                     if detail.get("jd_tags"):
                         existing = set(keywords or [])
                         new_tags = [t for t in detail["jd_tags"] if t not in existing and len(t) < 20]
@@ -528,7 +591,7 @@ def enrich_jobs_with_details(jobs, max_jobs=30):
                 _time.sleep(random.uniform(2, 4))
 
         logger.info("详情补充完成: %d/%d", enriched, len(to_process))
-        return jobs
+        return enriched
 
     finally:
         if tid and cdp:
@@ -541,3 +604,60 @@ def enrich_jobs_with_details(jobs, max_jobs=30):
                 cdp.close()
             except Exception:
                 pass
+        _detail_enrich_running = False
+
+
+def check_login_status() -> dict:
+    """检查 BOSS 直聘是否已登录。
+    
+    Chrome 运行时做一次轻量 API 探测验证 Cookie 有效性；
+    Chrome 未运行时退化为文件检查（避免冷启动延迟）。
+    """
+    session_file = Path(CDP_PROFILE) / ".boss_logged_in"
+    if not session_file.exists():
+        return {
+            "logged_in": False,
+            "reason": "not_logged_in",
+            "message": "未登录",
+            "action": "请点击「登录 Boss 直聘」并扫码登录",
+        }
+
+    if _detail_enrich_running:
+        return _session_file_status(session_file)
+
+    # Chrome 运行中 → 实际探测登录态，防止 Cookie 过期误报
+    if _chrome_running():
+        try:
+            cdp = CDPSession(CDP_PORT)
+            tid, sid = cdp.create_page()
+            cdp.navigate("https://www.zhipin.com", sid)
+            result = _probe_login(cdp, sid)
+            cdp.send("Target.closeTarget", {"targetId": tid})
+            cdp.close()
+            if result["status"] == "ok":
+                try:
+                    login_time = session_file.read_text().strip()
+                    return {"logged_in": True, "reason": "ok", "message": f"已登录 (登录时间: {login_time[:10]})", "action": ""}
+                except Exception:
+                    return {"logged_in": True, "reason": "ok", "message": "已登录", "action": ""}
+            # Cookie 已过期，清除标记
+            session_file.unlink()
+            logger.info("登录态已过期，清除标记文件")
+            reason = "restricted" if result.get("status") == "restricted" else "cookie_expired"
+            action = "疑似页面风控，请稍后重试" if reason == "restricted" else "Cookie 失效，请重新扫码登录"
+            return {"logged_in": False, "reason": reason, "message": result.get("message") or "登录已过期，请重新登录", "action": action}
+        except Exception as e:
+            logger.warning("登录态探测失败: %s，退化为文件检查", e)
+            status = _session_file_status(session_file)
+            return {**status, "reason": "network_failed", "action": "网络或 Chrome 调试端口异常，已按本地登录标记兜底"}
+
+    # Chrome 未运行或探测失败 → 退化为文件检查
+    return _session_file_status(session_file)
+
+
+def _session_file_status(session_file: Path) -> dict:
+    try:
+        login_time = session_file.read_text().strip()
+        return {"logged_in": True, "reason": "session_file", "message": f"已登录 (登录时间: {login_time[:10]})", "action": "Chrome 未运行时使用本地登录标记判断"}
+    except Exception:
+        return {"logged_in": False, "reason": "session_file_missing", "message": "未登录", "action": "请重新登录"}

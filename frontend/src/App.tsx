@@ -1,300 +1,239 @@
 import { useEffect, useMemo, useState } from "react";
+import { WorkflowProvider, useWorkflowState } from "./lib/store";
+import { listJobPool, listWorkflowTasks } from "./lib/api";
+import { buildRecoveryTasks, buildWorkflowTasks, buildWorkflowTodos } from "./lib/workflowInsights";
+import type { JobPosting, WorkflowRuntimeTask } from "./lib/types";
 import ResumesPage from "./pages/resumes";
 import JobsPage from "./pages/jobs";
 import DiligencePage from "./pages/diligence";
 import RankedJobsPage from "./pages/ranked-jobs";
-import MessagesPage from "./pages/messages";
-import InboxPage from "./pages/inbox";
-import type { JobPosting, WorkflowState, ProviderConfig, ProviderPreset } from "./lib/types";
-import { loadWorkflowState, saveWorkflowState } from "./lib/workflowState";
-import {
-  getProviderConfig,
-  getProviderPresets,
-  saveProviderConfig,
-  clearProviderConfig,
-  testProviderConnection,
-} from "./lib/api";
+import GreetingPage from "./pages/greeting";
+import SettingsPanel from "./components/SettingsPanel";
 
-type PageKey = "resumes" | "jobs" | "diligence" | "ranked" | "messages" | "inbox";
+type PageKey = "resumes" | "jobs" | "diligence" | "ranking" | "greeting";
 
 const pages: Array<{ key: PageKey; label: string }> = [
   { key: "resumes", label: "简历" },
   { key: "jobs", label: "岗位" },
   { key: "diligence", label: "尽调" },
-  { key: "ranked", label: "排序" },
-  { key: "messages", label: "话术" },
-  { key: "inbox", label: "发送箱" },
+  { key: "ranking", label: "排序" },
+  { key: "greeting", label: "打招呼" },
 ];
 
-export default function App() {
-  const [page, setPage] = useState<PageKey>("resumes");
-  const [workflow, setWorkflow] = useState<WorkflowState>(() => loadWorkflowState());
+const ACTIVE_PAGE_KEY = "boss-workbench-active-page";
 
-  // —— 设置面板状态 ——
+function getInitialPage(): PageKey {
+  if (typeof window === "undefined") return "resumes";
+  const saved = window.localStorage.getItem(ACTIVE_PAGE_KEY) as PageKey | null;
+  return pages.some(p => p.key === saved) ? saved : "resumes";
+}
+
+function AppShell() {
+  const [page, setPageState] = useState<PageKey>(getInitialPage);
   const [showSettings, setShowSettings] = useState(false);
-  const [presets, setPresets] = useState<Record<string, ProviderPreset>>({});
-  const [provider, setProvider] = useState("openai");
-  const [apiKeyInput, setApiKeyInput] = useState("");
-  const [baseUrlInput, setBaseUrlInput] = useState("");
-  const [modelInput, setModelInput] = useState("");
-  const [keyConfigured, setKeyConfigured] = useState(false);
-  const [keyMasked, setKeyMasked] = useState("");
-  const [keyStatus, setKeyStatus] = useState("");
-  const [keyTesting, setKeyTesting] = useState(false);
+  const state = useWorkflowState();
+  const [jobs, setJobs] = useState<JobPosting[]>([]);
+  const [runtimeTasks, setRuntimeTasks] = useState<WorkflowRuntimeTask[]>([]);
+
+  async function refreshJobsForWorkflow() {
+    try {
+      const result = await listJobPool();
+      setJobs(result.jobs || []);
+    } catch (err) {
+      console.warn("[app] 加载全流程岗位状态失败:", err);
+    }
+  }
+
+  async function refreshRuntimeTasks() {
+    try {
+      const result = await listWorkflowTasks();
+      setRuntimeTasks(result.tasks || []);
+    } catch (err) {
+      console.warn("[app] 加载任务状态失败:", err);
+    }
+  }
+
+  async function refreshGlobalStatus() {
+    await Promise.all([refreshJobsForWorkflow(), refreshRuntimeTasks()]);
+  }
 
   useEffect(() => {
-    saveWorkflowState(workflow);
-  }, [workflow]);
+    refreshGlobalStatus();
+    const timer = window.setInterval(refreshGlobalStatus, 10000);
+    const onFocus = () => refreshGlobalStatus();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
 
-  // 打开设置面板时加载配置
   useEffect(() => {
-    if (!showSettings) return;
-    // 加载供应商预设
-    getProviderPresets().then((r) => setPresets(r.presets)).catch(() => {});
-    // 加载当前配置
-    getProviderConfig().then((c: ProviderConfig) => {
-      setProvider(c.provider || "openai");
-      setKeyConfigured(c.configured);
-      setKeyMasked(c.masked);
-      setBaseUrlInput(c.base_url || "");
-      setModelInput(c.model || "");
-      setApiKeyInput("");
-    }).catch(() => {});
-  }, [showSettings]);
+    refreshGlobalStatus();
+  }, [page]);
 
-  // 切换供应商时自动填入默认 base_url 和 model
-  function onProviderChange(p: string) {
-    setProvider(p);
-    const preset = presets[p];
-    if (preset) {
-      setBaseUrlInput(preset.base_url || "");
-      setModelInput(preset.models?.[0] || "");
-    } else {
-      setBaseUrlInput("");
-      setModelInput("");
+  function setPage(pageKey: PageKey) {
+    setPageState(pageKey);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(ACTIVE_PAGE_KEY, pageKey);
     }
-    setApiKeyInput("");
-    setKeyStatus("");
-  }
-
-  async function onSaveKey() {
-    if (!apiKeyInput.trim()) return;
-    try {
-      await saveProviderConfig(provider, apiKeyInput.trim(), baseUrlInput, modelInput);
-      setKeyConfigured(true);
-      setKeyMasked(apiKeyInput.trim().slice(0, 7) + "****" + apiKeyInput.trim().slice(-4));
-      setApiKeyInput("");
-      setKeyStatus("已保存");
-    } catch (e) {
-      setKeyStatus(e instanceof Error ? e.message : "保存失败");
-    }
-  }
-
-  async function onDeleteKey() {
-    try {
-      await clearProviderConfig();
-      setKeyConfigured(false);
-      setKeyMasked("");
-      setKeyStatus("已清除");
-    } catch (e) {
-      setKeyStatus(e instanceof Error ? e.message : "清除失败");
-    }
-  }
-
-  async function onTestKey() {
-    setKeyTesting(true);
-    setKeyStatus("");
-    try {
-      const r = await testProviderConnection();
-      setKeyStatus(r.ok ? "✅ 连接成功" : `❌ ${r.message.slice(0, 100)}`);
-    } catch (e) {
-      setKeyStatus(e instanceof Error ? e.message : "测试失败");
-    } finally {
-      setKeyTesting(false);
-    }
-  }
-
-  const selectedJob = workflow.selectedJob;
-
-  const targetTitle = useMemo(() => {
-    if (!selectedJob) return "还没有选中目标岗位";
-    return selectedJob.title;
-  }, [selectedJob]);
-
-  function updateSelectedJob(job: JobPosting | null) {
-    setWorkflow((current) => ({ ...current, selectedJob: job }));
   }
 
   return (
-    <div className="workspace-shell" data-testid="workspace-shell">
-      <header className="workspace-header">
-        <div className="workspace-topline">
-          <div className="workspace-brand">
-            <div className="workspace-kicker">求职工作台</div>
-            <h1 className="workspace-title">BOSS 直聘自动求职工作台</h1>
-            <p className="workspace-subtitle">
-              先选岗位，再看简历、尽调、排序和话术。每一步都围着同一个目标岗位转，不再到处散。
-            </p>
-          </div>
-
-          <nav aria-label="主导航" className="workspace-nav" data-testid="workspace-rail">
-            {pages.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                className="workspace-tab"
-                onClick={() => setPage(item.key)}
-                aria-pressed={page === item.key}
-              >
-                {item.label}
-              </button>
-            ))}
-            <button
-              type="button"
-              className={`workspace-tab ${showSettings ? "workspace-tab--active" : ""}`}
-              onClick={() => setShowSettings(!showSettings)}
-              title="API 设置"
-              style={{ padding: "10px 12px" }}
-            >
-              ⚙
+    <div className="app-shell">
+      <nav className="app-nav">
+        <span className="app-logo">BOSS 求职工作台</span>
+        <div className="nav-links">
+          {pages.map(p => (
+            <button key={p.key} className={`nav-link ${page === p.key ? "nav-link--active" : ""}`}
+              onClick={() => {
+                setPage(p.key);
+              }}>
+              {p.label}
+              {p.key === "jobs" && state.selectedJobIds.length > 0 && (
+                <span className="nav-badge">{state.selectedJobIds.length}</span>
+              )}
             </button>
-          </nav>
+          ))}
         </div>
+        <button
+          className={`nav-link ${showSettings ? "nav-link--active" : ""}`}
+          onClick={() => setShowSettings(!showSettings)}
+        >
+          ⚙ 设置
+        </button>
+      </nav>
 
-      </header>
+      <SettingsPanel show={showSettings} onClose={() => setShowSettings(false)} />
+      <GlobalWorkflowStatus jobs={jobs} runtimeTasks={runtimeTasks} onRefresh={refreshGlobalStatus} onNavigate={setPage} />
 
-      {/* —— 设置面板 —— */}
-      {showSettings && (
-        <section className="settings-panel">
-          <div className="settings-panel__inner">
-            <h3 className="section-title-sm">🔑 AI 供应商设置</h3>
-            <p className="workspace-target-meta">
-              选择 AI 供应商并配置 API Key。Key 仅保存在本地，不会上传到任何第三方。
-            </p>
-
-            {/* 供应商选择 */}
-            <div className="settings-row">
-              <label className="settings-label">供应商</label>
-              <select
-                className="form-input form-input--inline"
-                value={provider}
-                onChange={(e) => onProviderChange(e.target.value)}
-              >
-                {Object.entries(presets).map(([k, v]) => (
-                  <option key={k} value={k}>{v.name}</option>
-                ))}
-                {Object.keys(presets).length === 0 && (
-                  <>
-                    <option value="openai">OpenAI</option>
-                    <option value="deepseek">DeepSeek</option>
-                    <option value="zhipu">智谱 GLM</option>
-                    <option value="moonshot">月之暗面 Moonshot</option>
-                    <option value="custom">自定义</option>
-                  </>
-                )}
-              </select>
-            </div>
-
-            {/* API Key */}
-            <div className="settings-row">
-              <label className="settings-label">API Key</label>
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flex: 1 }}>
-                <input
-                  className="form-input form-input--inline"
-                  type="password"
-                  placeholder="输入 API Key ..."
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && onSaveKey()}
-                />
-                <button type="button" className="button-primary" onClick={onSaveKey} disabled={!apiKeyInput.trim()}>
-                  保存
-                </button>
-                {keyConfigured && (
-                  <button type="button" className="button-secondary" onClick={onDeleteKey}>
-                    清除
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Base URL（自定义时显示） */}
-            <div className="settings-row">
-              <label className="settings-label">Base URL</label>
-              <input
-                className="form-input form-input--inline"
-                type="text"
-                placeholder={provider === "openai" ? "留空使用默认" : "https://api.example.com/v1"}
-                value={baseUrlInput}
-                onChange={(e) => setBaseUrlInput(e.target.value)}
-              />
-            </div>
-
-            {/* 模型选择 */}
-            <div className="settings-row">
-              <label className="settings-label">模型</label>
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flex: 1 }}>
-                {presets[provider]?.models?.length ? (
-                  <select
-                    className="form-input form-input--inline"
-                    value={modelInput}
-                    onChange={(e) => setModelInput(e.target.value)}
-                  >
-                    {presets[provider].models.map((m) => (
-                      <option key={m} value={m}>{m}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    className="form-input form-input--inline"
-                    type="text"
-                    placeholder="输入模型名，如 gpt-4o-mini"
-                    value={modelInput}
-                    onChange={(e) => setModelInput(e.target.value)}
-                  />
-                )}
-              </div>
-            </div>
-
-            {/* 状态栏 */}
-            {keyConfigured && (
-              <div className="settings-row" style={{ alignItems: "center" }}>
-                <span className="tag tag--active">已配置: {presets[provider]?.name || provider} · {keyMasked}</span>
-                <button type="button" className="button-secondary" onClick={onTestKey} disabled={keyTesting}>
-                  {keyTesting ? "测试中..." : "测试连接"}
-                </button>
-              </div>
-            )}
-
-            {keyStatus && (
-              <p className={`workspace-target-meta ${keyStatus.includes("✅") ? "status-line--success" : ""}`}>
-                {keyStatus}
-              </p>
-            )}
-          </div>
-        </section>
-      )}
-
-      <main className="workspace-stage" data-testid="workspace-stage">
-        <div style={{ display: page === "resumes" ? "block" : "none", overflow: "visible" }}>
-          <ResumesPage selectedJob={selectedJob} />
+      <main className="workspace-stage">
+        <div style={{ display: page === "resumes" ? "block" : "none" }}>
+          <ResumesPage />
         </div>
         <div style={{ display: page === "jobs" ? "block" : "none" }}>
-          <JobsPage selectedJobId={selectedJob?.id || null} onSelectJob={updateSelectedJob} />
+          <JobsPage onNavigate={(p) => setPage(p as PageKey)} visible={page === "jobs"} />
         </div>
         <div style={{ display: page === "diligence" ? "block" : "none" }}>
-          <DiligencePage />
+          <DiligencePage onNavigate={(p) => setPage(p as PageKey)} />
         </div>
-        <div style={{ display: page === "ranked" ? "block" : "none" }}>
-          <RankedJobsPage />
+        <div style={{ display: page === "ranking" ? "block" : "none" }}>
+          <RankedJobsPage onNavigate={(p) => setPage(p as PageKey)} />
         </div>
-        <div style={{ display: page === "messages" ? "block" : "none" }}>
-          <MessagesPage />
-        </div>
-        <div style={{ display: page === "inbox" ? "block" : "none" }}>
-          <InboxPage />
+        <div style={{ display: page === "greeting" ? "block" : "none" }}>
+          <GreetingPage />
         </div>
       </main>
     </div>
+  );
+}
+
+function GlobalWorkflowStatus({
+  jobs,
+  runtimeTasks,
+  onRefresh,
+  onNavigate,
+}: {
+  jobs: JobPosting[];
+  runtimeTasks: WorkflowRuntimeTask[];
+  onRefresh: () => void;
+  onNavigate: (page: PageKey) => void;
+}) {
+  const state = useWorkflowState();
+  const tasks = useMemo(() => buildWorkflowTasks({
+    jobs,
+    selectedJobIds: state.selectedJobIds,
+    diligenceReports: state.diligenceReports,
+    rankingResults: state.rankingResults,
+    greetingTexts: state.greetingTexts,
+  }), [jobs, state.selectedJobIds, state.diligenceReports, state.rankingResults, state.greetingTexts]);
+
+  const activeRuntimeTasks = runtimeTasks.filter(task => task.status === "running" || task.status === "queued").slice(0, 2);
+  const recoveryTasks = useMemo(() => buildRecoveryTasks(runtimeTasks).slice(0, 3), [runtimeTasks]);
+  const todos = useMemo(() => buildWorkflowTodos({
+    jobs,
+    selectedJobIds: state.selectedJobIds,
+    diligenceReports: state.diligenceReports,
+    rankingResults: state.rankingResults,
+    greetingTexts: state.greetingTexts,
+  }).slice(0, 3), [jobs, state.selectedJobIds, state.diligenceReports, state.rankingResults, state.greetingTexts]);
+  const hasRuntimePanel = activeRuntimeTasks.length > 0 || recoveryTasks.length > 0 || todos.length > 0;
+
+  function targetPage(taskType: string): PageKey {
+    if (taskType.includes("diligence")) return "diligence";
+    if (taskType.includes("ranking")) return "ranking";
+    if (taskType.includes("greeting")) return "greeting";
+    return "jobs";
+  }
+
+  return (
+    <section className="global-workflow-status" aria-label="全流程状态">
+      <div className={`global-workflow-status__inner${hasRuntimePanel ? " global-workflow-status__inner--with-recovery" : ""}`}>
+        <div className="global-workflow-status__title">
+          <span>全流程状态</span>
+          <small>岗位池到打招呼</small>
+        </div>
+        <div className="workflow-status-grid workflow-status-grid--compact">
+          {tasks.map(task => (
+            <div key={task.key} className={`workflow-status-card workflow-status-card--${task.status}`}>
+              <div className="workflow-status-card__top">
+                <span>{task.label}</span>
+                <strong>{task.done}/{task.total}</strong>
+              </div>
+              <div className="workflow-meter" aria-hidden="true">
+                <span style={{ width: `${task.total > 0 ? Math.min(100, Math.round((task.done / task.total) * 100)) : 0}%` }} />
+              </div>
+            </div>
+          ))}
+        </div>
+        {hasRuntimePanel && (
+          <div className="workflow-recovery-panel" aria-label="流程操作中心">
+            <div className="workflow-recovery-panel__top">
+              <strong>{recoveryTasks.length > 0 ? "失败恢复中心" : activeRuntimeTasks.length > 0 ? "任务执行中" : "今日待办"}</strong>
+              <button type="button" className="button-quiet button-compact" onClick={onRefresh}>刷新状态</button>
+            </div>
+            {activeRuntimeTasks.map(task => (
+              <div key={task.id} className="workflow-recovery-item workflow-recovery-item--running">
+                <span>{task.title}</span>
+                <small>{task.message || "正在处理..."}</small>
+              </div>
+            ))}
+            {recoveryTasks.map(task => {
+              const sourceTask = runtimeTasks.find(item => item.id === task.id);
+              return (
+                <div key={task.id} className="workflow-recovery-item">
+                  <span>{task.title}</span>
+                  <small>{task.message}</small>
+                  <em>{task.action}</em>
+                  {sourceTask && (
+                    <button type="button" className="button-secondary button-secondary--sm" onClick={() => onNavigate(targetPage(sourceTask.type))}>
+                      处理
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {todos.map(todo => (
+              <div key={todo.key} className="workflow-recovery-item workflow-todo-item">
+                <span>{todo.label}</span>
+                <small>{todo.description}</small>
+                <em>{todo.count} 项</em>
+                <button type="button" className="button-secondary button-secondary--sm" onClick={() => onNavigate(todo.page)}>
+                  {todo.action}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+export default function App() {
+  return (
+    <WorkflowProvider>
+      <AppShell />
+    </WorkflowProvider>
   );
 }

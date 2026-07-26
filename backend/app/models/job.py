@@ -1,4 +1,3 @@
-from datetime import datetime
 from pydantic import BaseModel, Field
 
 
@@ -17,6 +16,15 @@ class JobRecord(BaseModel):
     source_url: str = ""
     fetched_at: str = ""         # ISO 时间戳
     dedupe_key: str = ""         # 去重键：company+title+city 的小写哈希
+    greeted: bool = False        # 是否已打招呼
+    tags: list[str] = Field(default_factory=list)  # 自定义标签
+    lifecycle_status: str = "active"  # active / suspected_expired / blacklisted
+    expires_at: str = ""              # 疑似过期时间点
+    stale_reason: str = ""            # 疑似过期原因
+    application_status: str = "pending"  # pending / greeted / applied / interviewing / rejected / abandoned
+    application_note: str = ""
+    application_updated_at: str = ""
+    decision_status: str = "undecided"  # undecided / recommended / watching / abandoned / risky
 
 
 class JobSource(BaseModel):

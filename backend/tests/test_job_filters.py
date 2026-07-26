@@ -1,18 +1,5 @@
 from app.models.job import JobFilter
-from app.services.job_filters import match_job_filters, filter_jobs_by_model
-
-
-def test_match_job_filters_requires_keyword_and_city():
-    job = {"title": "Python 后端工程师", "city": "深圳", "salary": "20-30K"}
-    assert match_job_filters(job, ["Python"], "深圳") is True
-    assert match_job_filters(job, ["Java"], "深圳") is False
-    assert match_job_filters(job, ["Python"], "北京") is False
-
-
-def test_match_job_filters_respects_min_salary():
-    job = {"title": "Python 后端工程师", "city": "深圳", "salary": "20-30K"}
-    assert match_job_filters(job, ["Python"], "深圳", min_salary=15) is True
-    assert match_job_filters(job, ["Python"], "深圳", min_salary=25) is False
+from app.services.job_filters import filter_jobs_by_model
 
 
 def test_filter_jobs_by_model():

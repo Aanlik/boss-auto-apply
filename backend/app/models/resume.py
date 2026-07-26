@@ -34,6 +34,8 @@ class ResumeProfile(BaseModel):
     summary: str = ""
     skills: list[str] = Field(default_factory=list)
     target_titles: list[str] = Field(default_factory=list)
+    target_city: str = ""
+    salary_expectation: str = ""
     work_experience: list[WorkExperience] = Field(default_factory=list)
     education: list[Education] = Field(default_factory=list)
     projects: list[Project] = Field(default_factory=list)
@@ -41,7 +43,7 @@ class ResumeProfile(BaseModel):
 
 class ResumeEvaluation(BaseModel):
     """AI 对简历本身的评估"""
-    overall_score: int = 0          # 0-100
+    overall_score: int = Field(default=0, ge=0, le=100)  # 0-100
     strengths: list[str] = Field(default_factory=list)
     weaknesses: list[str] = Field(default_factory=list)
     missing_sections: list[str] = Field(default_factory=list)

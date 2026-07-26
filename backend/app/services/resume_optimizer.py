@@ -1,9 +1,11 @@
 """AI 驱动的简历优化服务 — 顶级简历顾问"""
 from app.models.resume import (
-    ResumeProfile, ResumeEvaluation, JDAnalysis,
     ResumeOptimizationResult, OptimizedExperience, OptimizedProject,
 )
+import re
+
 from app.services.ai_client import chat_json
+from app.services.resume_formatters import fmt_exp, fmt_edu, fmt_proj, fmt_chat
 
 SYSTEM_PROMPT = """你是顶级简历顾问，曾为 500+ 位 BAT/TMD 候选人优化简历，平均投递回复率提升 3 倍。你服务的候选人拿到了字节、腾讯、阿里的 offer。
 
@@ -48,6 +50,42 @@ STAR + 量化原则：
 只返回 JSON，不要解释，不要 markdown 包裹。"""
 
 
+def _clean_missing_skills(values) -> list[str]:
+    cleaned = []
+    empty_markers = ("无", "没有", "暂无", "完全匹配", "不缺", "无明显")
+    for value in values or []:
+        text = str(value).strip()
+        if not text:
+            continue
+        if any(marker in text for marker in empty_markers):
+            continue
+        cleaned.append(text)
+    return cleaned
+
+
+def _extract_jd_skills(jd_text: str) -> list[str]:
+    return [
+        s for s in _FALLBACK_SKILL_POOL
+        if re.search(rf"(?<![a-zA-Z]){re.escape(s)}(?![a-zA-Z])", jd_text or "", re.I)
+    ]
+
+
+def _merge_unique(*groups) -> list[str]:
+    result = []
+    seen = set()
+    for group in groups:
+        for item in group or []:
+            text = str(item).strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(text)
+    return result
+
+
 def optimize_resume(profile, evaluation, jd_analysis, job_title="", company="", jd_text="", chat_history=None):
     eval_text = ""
     if evaluation:
@@ -63,9 +101,9 @@ def optimize_resume(profile, evaluation, jd_analysis, job_title="", company="", 
 经验要求：{', '.join(jd_analysis.experience_requirements or ['未识别'])}
 核心总结：{jd_analysis.summary_text}"""
 
-    user = f"""=== 目标岗位 ===
+    chat_str = fmt_chat(chat_history)
+    base_prompt = f"""=== 目标岗位 ===
 {job_title} @ {company or '未知'}
-JD 描述：{jd_text[:2500]}
 
 {eval_text}
 {jd_block}
@@ -75,18 +113,22 @@ JD 描述：{jd_text[:2500]}
 联系方式：{getattr(profile, 'phone', '') or '无'} | {getattr(profile, 'email', '') or '无'}
 技能：{', '.join(profile.skills) if profile.skills else '未识别'}
 个人总结：{profile.summary or '无'}
+"""
+    # 动态分配剩余空间给简历详情和 JD
+    exp_str = fmt_exp(profile)
+    edu_str = fmt_edu(profile)
+    proj_str = fmt_proj(profile)
+    remaining = 6000 - len(base_prompt) - len(chat_str)
+    jd_part = jd_text[:max(800, remaining // 3)]
+    detail_limit = max(500, remaining - len(jd_part))
+    detail = f"工作经历：\n{exp_str[:detail_limit]}\n\n教育背景：\n{edu_str[:detail_limit//2]}\n\n项目经历：\n{proj_str[:detail_limit//2]}"
+    
+    user = f"""{base_prompt}JD 描述：{jd_part}
 
-工作经历：
-{_fmt_exp(profile)}
-
-教育背景：
-{_fmt_edu(profile)}
-
-项目经历：
-{_fmt_proj(profile)}
+{detail}
 
 对话上下文（用户补充要求）：
-{_fmt_chat(chat_history)}
+{chat_str}
 
 请生成针对该岗位的定制化完整简历。每段工作经历至少生成 2 条量化 bullets。"""
 
@@ -107,14 +149,21 @@ JD 描述：{jd_text[:2500]}
                     name=str(proj.get("name", "")), description=str(proj.get("description", "")),
                     technologies=[str(t) for t in (proj.get("technologies") or []) if t],
                 ))
+        resume_skill_keys = {str(s).lower() for s in (profile.skills or [])}
+        jd_skills = _extract_jd_skills(jd_text)
+        deterministic_matched = [s for s in jd_skills if s.lower() in resume_skill_keys]
+        deterministic_missing = [s for s in jd_skills if s.lower() not in resume_skill_keys]
+        matched_skills = _merge_unique(data.get("matched_skills"), deterministic_matched)
+        missing_skills = _merge_unique(_clean_missing_skills(data.get("missing_skills")), deterministic_missing)
+
         return ResumeOptimizationResult(
             summary=str(data.get("summary", "")),
             tailored_summary=str(data.get("tailored_summary", "")),
             skills_display=[str(s) for s in (data.get("skills_display") or []) if s],
             optimized_bullets=[str(b) for b in (data.get("optimized_bullets") or []) if b],
             work_experience=work_exp, projects=projects,
-            matched_skills=[str(s) for s in (data.get("matched_skills") or []) if s],
-            missing_skills=[str(s) for s in (data.get("missing_skills") or []) if s],
+            matched_skills=matched_skills,
+            missing_skills=missing_skills,
             section_advice=[str(a) for a in (data.get("section_advice") or []) if a],
             gap_strategies=[str(g) for g in (data.get("gap_strategies") or []) if g],
         )
@@ -122,13 +171,12 @@ JD 描述：{jd_text[:2500]}
         return _fallback(profile, jd_analysis, job_title, company, jd_text, str(e))
 
 
+# 技能池 — 从 resume_parser 共享
+from app.services.resume_parser import SKILL_POOL as _FALLBACK_SKILL_POOL
+
 def _fallback(profile, jd_analysis, job_title, company, jd_text, error):
-    import re
-    SKILL_POOL = ["Python","Java","JavaScript","TypeScript","Go","Rust","C++","React","Vue","Node.js",
-                   "Django","Flask","FastAPI","Spring Boot","Redis","MySQL","PostgreSQL","MongoDB",
-                   "Docker","Kubernetes","AWS","Azure","Git","Linux","SQL","GraphQL","Kafka","TensorFlow","PyTorch"]
     resume_skills = [s.lower() for s in profile.skills]
-    jd_skills = [s for s in SKILL_POOL if re.search(rf"(?<![a-zA-Z]){re.escape(s)}(?![a-zA-Z])", jd_text, re.I)]
+    jd_skills = _extract_jd_skills(jd_text)
     matched = [s for s in jd_skills if s.lower() in resume_skills]
     missing = [s for s in jd_skills if s.lower() not in resume_skills]
     fexp = []
@@ -146,21 +194,3 @@ def _fallback(profile, jd_analysis, job_title, company, jd_text, error):
         section_advice=["建议配置 AI Key 获得精准优化"],
         gap_strategies=[f"{s} 可通过在线课程补充" for s in missing[:3]],
     )
-
-
-def _fmt_chat(ch):
-    if not ch: return "无"
-    return "\n".join(f"{'用户' if m.get('role')=='user' else 'AI'}: {m.get('content','')[:200]}" for m in (ch or [])[-8:])
-
-
-def _fmt_exp(p): 
-    if not p.work_experience: return "无"
-    return "\n".join(f"- {e.title} @ {e.company} ({e.duration}): {e.description}" for e in p.work_experience)
-
-def _fmt_edu(p):
-    if not p.education: return "无"
-    return "\n".join(f"- {e.institution} | {e.degree} | {e.major} | {e.graduation}" for e in p.education)
-
-def _fmt_proj(p):
-    if not p.projects: return "无"
-    return "\n".join(f"- {x.name} ({', '.join(x.technologies)}): {x.description}" for x in p.projects)

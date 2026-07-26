@@ -1,195 +1,374 @@
-"""简历 PDF 生成器 — JadeAI 风格双栏模板，专业排版"""
+"""简历 PDF 生成器 — 支持长内容自然分页"""
 import io
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.lib.colors import HexColor
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle,
+    Paragraph, Spacer, HRFlowable,
+    BaseDocTemplate, Frame, PageTemplate,
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-pdfmetrics.registerFont(TTFont("Heiti", "/System/Library/Fonts/STHeiti Medium.ttc", subfontIndex=0))
-pdfmetrics.registerFont(TTFont("Songti", "/System/Library/Fonts/Supplemental/Songti.ttc", subfontIndex=0))
+# ── 跨平台中文字体自动发现 ──
+import glob as _glob, platform as _platform
 
-F_H = "Heiti"    # 标题
-F_B = "Songti"   # 正文
+_FONT_CANDIDATES = {
+    "ResumeSans": [
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\simhei.ttf",
+    ],
+}
 
-C_PRIMARY = HexColor("#1e3a5f")   # 深蓝主色
-C_ACCENT  = HexColor("#2b6cb0")   # 亮蓝强调
-C_BG      = HexColor("#f0f4f8")   # 侧栏底色
-C_DARK    = HexColor("#1a1a1a")
-C_BODY    = HexColor("#333333")
-C_MUTED   = HexColor("#777777")
-C_LINE    = HexColor("#d0d5dd")
+def _iter_font_candidates(candidates: list[str]):
+    for path in candidates:
+        for p in _glob.glob(path):
+            if p:
+                yield p
+    search_dirs = []
+    if _platform.system() == "Darwin":
+        search_dirs = ["/System/Library/Fonts", "/Library/Fonts"]
+    elif _platform.system() == "Linux":
+        search_dirs = ["/usr/share/fonts", "/usr/local/share/fonts"]
+    for d in search_dirs:
+        for p in _glob.glob(f"{d}/**/*.ttf", recursive=True) + _glob.glob(f"{d}/**/*.ttc", recursive=True):
+            yield p
+
+
+def _register_first_available_font(name: str, candidates: list[str]) -> str:
+    for path in _iter_font_candidates(candidates):
+        try:
+            pdfmetrics.registerFont(TTFont(name, path, subfontIndex=0))
+            return path
+        except Exception:
+            continue
+    raise RuntimeError("未找到可用中文字体")
+
+_sans_path = _register_first_available_font("ResumeSans", _FONT_CANDIDATES["ResumeSans"])
+
+F_H = "ResumeSans"
+F_B = "ResumeSans"
+
+C_PRIMARY = HexColor("#1f2937")
+C_ACCENT  = HexColor("#2563eb")
+C_BODY    = HexColor("#243041")
+C_MUTED   = HexColor("#667085")
+C_LINE    = HexColor("#d9e1ec")
 C_WHITE   = HexColor("#ffffff")
+C_SIDEBAR_BG = HexColor("#f3f6fb")
+C_SIDEBAR_TEXT = HexColor("#263142")
+C_SIDEBAR_MUTED = HexColor("#667085")
+C_BG      = HexColor("#ffffff")
+
+PDF_TEMPLATES = {
+    "modern": {"name": "续页单栏", "description": "第一页双栏，第二页起单栏，适合内容较多的岗位"},
+    "classic": {"name": "经典双栏", "description": "每页保留左侧栏，适合一页简历或信息较少的岗位"},
+    "ats": {"name": "紧凑 ATS", "description": "纯单栏，适合系统筛选和文本读取"},
+}
 
 PAGE_W, PAGE_H = A4
-SIDEBAR_W = 72*mm
+SIDEBAR_W = 58 * mm
+MAIN_LEFT = SIDEBAR_W + 15 * mm
+MAIN_RIGHT = 18 * mm
+MAIN_TOP = 17 * mm
+MAIN_BOTTOM = 16 * mm
+MAIN_W = PAGE_W - MAIN_LEFT - MAIN_RIGHT
+CONTINUATION_LEFT = 22 * mm
+CONTINUATION_RIGHT = 22 * mm
+CONTINUATION_W = PAGE_W - CONTINUATION_LEFT - CONTINUATION_RIGHT
 
 
-def export_resume_pdf(profile, optimization: dict, company: str, job_title: str) -> bytes:
-    buf = io.BytesIO()
+def _main_title(text):
+    return Paragraph(text, ParagraphStyle(
+        "MTitle", fontName=F_H, fontSize=11.8, leading=18,
+        textColor=C_ACCENT, spaceBefore=12, spaceAfter=6,
+        wordWrap="CJK"))
 
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=0, rightMargin=0,
-                            topMargin=0, bottomMargin=0,
-                            title=f"{profile.name or ''} 简历.pdf")
 
-    story = []
+def _body_style(name, **kwargs):
+    defaults = {
+        "fontName": F_B,
+        "fontSize": 9.8,
+        "leading": 17.2,
+        "textColor": C_BODY,
+        "spaceAfter": 3,
+        "wordWrap": "CJK",
+    }
+    defaults.update(kwargs)
+    return ParagraphStyle(name, **defaults)
 
-    # ═══════ 双栏布局：左侧主内容 + 右侧技能/信息栏 ═══════
-    main_data = []
-    sidebar_data = []
 
-    name = profile.name or "姓名"
+def _build_main(profile, optimization):
+    """构建右侧主内容（纯 flowable 列表）"""
+    items = []
 
-    # ── 侧栏 ──
-    sidebar_data.append(Spacer(1, 22*mm))
-    sidebar_data.append(Paragraph(name, ParagraphStyle(
-        "SideName", fontName=F_H, fontSize=18, leading=24, textColor=C_WHITE, spaceAfter=6)))
-    sidebar_data.append(HRFlowable(width="60%", thickness=1.5, color=C_ACCENT, spaceAfter=10))
-
-    # 联系方式
-    contacts = []
-    if hasattr(profile, 'phone') and profile.phone:
-        contacts.append(("📞", profile.phone))
-    if hasattr(profile, 'email') and profile.email:
-        contacts.append(("✉", profile.email))
-    if hasattr(profile, 'location') and profile.location:
-        contacts.append(("📍", profile.location))
-    if hasattr(profile, 'birth') and profile.birth:
-        contacts.append(("🎂", profile.birth))
-    if hasattr(profile, 'gender') and profile.gender:
-        contacts.append(("👤", profile.gender))
-
-    if contacts:
-        sidebar_data.append(_side_title("联系方式"))
-        for icon, val in contacts:
-            sidebar_data.append(Paragraph(f"{icon} <font color='#c0d0e0'>{val}</font>",
-                ParagraphStyle("SContact", fontName=F_B, fontSize=8.5, leading=14, textColor=C_WHITE, spaceAfter=2)))
-
-    # 技能
-    skills = optimization.get("skills_display") or profile.skills or []
-    if skills:
-        sidebar_data.append(Spacer(1, 6))
-        sidebar_data.append(_side_title("专业技能"))
-        for s in skills[:12]:
-            sidebar_data.append(Paragraph(f"▸ {s}",
-                ParagraphStyle("SSkill", fontName=F_B, fontSize=9, leading=15, textColor=C_WHITE, spaceAfter=1)))
-
-    # 教育
-    if profile.education:
-        sidebar_data.append(Spacer(1, 6))
-        sidebar_data.append(_side_title("教育背景"))
-        for edu in profile.education:
-            sidebar_data.append(Paragraph(edu.institution or "",
-                ParagraphStyle("SEdu1", fontName=F_H, fontSize=9, leading=14, textColor=C_WHITE, spaceAfter=1)))
-            parts = [p for p in [edu.degree, edu.major, edu.graduation] if p]
-            if parts:
-                sidebar_data.append(Paragraph("<font color='#b0c4de'>" + " · ".join(parts) + "</font>",
-                    ParagraphStyle("SEdu2", fontName=F_B, fontSize=8, leading=12, textColor=HexColor("#b0c4de"), spaceAfter=4)))
-
-    # ── 主内容区 ──
-    main_data.append(Spacer(1, 20*mm))
-    main_data.append(Paragraph(name, ParagraphStyle(
-        "MName", fontName=F_H, fontSize=26, leading=32, textColor=C_PRIMARY, spaceAfter=2)))
-    if job_title:
-        main_data.append(Paragraph(f"求职意向：{job_title}",
-            ParagraphStyle("MTitle", fontName=F_H, fontSize=12, leading=18, textColor=C_ACCENT, spaceAfter=4)))
-    main_data.append(HRFlowable(width="100%", thickness=1.2, color=C_PRIMARY, spaceAfter=10))
+    # HR 栏：目标岗位
+    title = profile.title or ""
+    if title:
+        items.append(Paragraph(
+            f"<font color='#2b6cb0'>{title}</font>",
+            ParagraphStyle("MTarget", fontName=F_H, fontSize=15.4, leading=22,
+                           textColor=C_ACCENT, spaceAfter=4, wordWrap="CJK")))
+        items.append(HRFlowable(width="100%", thickness=0.9, color=C_LINE, spaceAfter=10))
 
     # 个人总结
     summary = optimization.get("tailored_summary") or profile.summary or ""
     if summary:
-        main_data.append(_main_title("个人总结"))
-        main_data.append(Paragraph(summary, ParagraphStyle(
-            "MSummary", fontName=F_B, fontSize=10.5, leading=18, textColor=C_BODY, firstLineIndent=21, spaceAfter=10)))
+        items.append(_main_title("个人总结"))
+        items.append(Paragraph(summary, ParagraphStyle(
+            "MSummary", fontName=F_B, fontSize=10, leading=17.8,
+            textColor=C_BODY, firstLineIndent=20, spaceAfter=10,
+            wordWrap="CJK")))
 
     # 工作经历
     opt_exp = optimization.get("work_experience") or []
     if opt_exp:
-        main_data.append(_main_title("工作经历"))
+        items.append(_main_title("工作经历"))
         for exp in opt_exp:
-            d = exp if isinstance(exp, dict) else {"company": getattr(exp,"company",""), "title": getattr(exp,"title",""), "duration": getattr(exp,"duration",""), "bullets": getattr(exp,"bullets",[])}
-            h = f"<b>{d.get('title','')}</b>"
-            if d.get('company'):
-                h += f" ｜ {d['company']}"
-            if d.get('duration'):
+            d = exp if isinstance(exp, dict) else {
+                "company": getattr(exp, "company", ""),
+                "title": getattr(exp, "title", ""),
+                "duration": getattr(exp, "duration", ""),
+                "bullets": getattr(exp, "bullets", []),
+            }
+            h = f"<b>{d.get('title', '')}</b>"
+            if d.get("company"):
+                h += f" | {d['company']}"
+            if d.get("duration"):
                 h += f"  <font color='#777'>{d['duration']}</font>"
-            main_data.append(Paragraph(h, ParagraphStyle("MExpH", fontName=F_H, fontSize=11, leading=18, textColor=C_PRIMARY, spaceBefore=8, spaceAfter=3)))
-            for b in (d.get('bullets') or []):
+            items.append(Paragraph(h, ParagraphStyle(
+                "MExpH", fontName=F_H, fontSize=10.5, leading=17.2,
+                textColor=C_PRIMARY, spaceBefore=8, spaceAfter=3,
+                wordWrap="CJK")))
+            for b in (d.get("bullets") or []):
                 if b and str(b).strip():
-                    main_data.append(Paragraph(f"• {str(b).strip()}",
-                        ParagraphStyle("MBullet", fontName=F_B, fontSize=10, leading=17, textColor=C_BODY, leftIndent=16, spaceAfter=2)))
-            main_data.append(Spacer(1, 4))
+                    items.append(Paragraph(
+                        f"- {str(b).strip()}",
+                        _body_style("MBullet", leftIndent=16, spaceAfter=3)))
+            items.append(Spacer(1, 5))
     elif profile.work_experience:
-        main_data.append(_main_title("工作经历"))
+        items.append(_main_title("工作经历"))
         for e in profile.work_experience:
-            h = f"<b>{e.title or ''}</b> ｜ {e.company or ''}  <font color='#777'>{e.duration or ''}</font>"
-            main_data.append(Paragraph(h, ParagraphStyle("MExpH", fontName=F_H, fontSize=11, leading=18, textColor=C_PRIMARY, spaceBefore=6, spaceAfter=3)))
+            h = f"<b>{e.title or ''}</b> | {e.company or ''}  <font color='#777'>{e.duration or ''}</font>"
+            items.append(Paragraph(h, ParagraphStyle(
+                "MExpH", fontName=F_H, fontSize=10.5, leading=17.2,
+                textColor=C_PRIMARY, spaceBefore=7, spaceAfter=3,
+                wordWrap="CJK")))
             if e.description:
-                main_data.append(Paragraph(f"• {e.description}", ParagraphStyle("MBullet", fontName=F_B, fontSize=10, leading=17, textColor=C_BODY, leftIndent=16, spaceAfter=2)))
-            main_data.append(Spacer(1, 4))
+                items.append(Paragraph(
+                    f"- {e.description}",
+                    _body_style("MBullet", leftIndent=16, spaceAfter=2)))
+            items.append(Spacer(1, 5))
 
     # 项目经历
     all_proj = (optimization.get("projects") or []) or (profile.projects or [])
     if all_proj:
-        main_data.append(_main_title("项目经历"))
+        items.append(_main_title("项目经历"))
         for proj in all_proj:
-            d = proj if isinstance(proj, dict) else {"name": getattr(proj,"name",""), "description": getattr(proj,"description",""), "technologies": getattr(proj,"technologies",[])}
-            tn = " · ".join(d.get('technologies') or [])
-            h = f"<b>{d.get('name','')}</b>"
+            d = proj if isinstance(proj, dict) else {
+                "name": getattr(proj, "name", ""),
+                "description": getattr(proj, "description", ""),
+                "technologies": getattr(proj, "technologies", []),
+            }
+            tn = " / ".join(d.get("technologies") or [])
+            h = f"<b>{d.get('name', '')}</b>"
             if tn:
                 h += f"  <font color='#2b6cb0'>[{tn}]</font>"
-            main_data.append(Paragraph(h, ParagraphStyle("MProjH", fontName=F_H, fontSize=11, leading=18, textColor=C_PRIMARY, spaceBefore=6, spaceAfter=3)))
-            if d.get('description'):
-                main_data.append(Paragraph(d['description'], ParagraphStyle("MProjD", fontName=F_B, fontSize=10, leading=17, textColor=C_BODY, leftIndent=16, spaceAfter=4)))
+            items.append(Paragraph(h, ParagraphStyle(
+                "MProjH", fontName=F_H, fontSize=10.5, leading=17.2,
+                textColor=C_PRIMARY, spaceBefore=7, spaceAfter=3,
+                wordWrap="CJK")))
+            if d.get("description"):
+                items.append(Paragraph(
+                    d["description"],
+                    _body_style("MProjD", leftIndent=16, spaceAfter=5)))
 
-    # ═══════ 构建双栏表格 ═══════
-    sidebar_height = max(len(sidebar_data) * 18, 600)
-    main_height = max(len(main_data) * 18, 600)
+    return items
 
-    sidebar_cell = Table([[sidebar_data]], colWidths=[SIDEBAR_W], rowHeights=[sidebar_height])
-    sidebar_cell.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,-1), C_PRIMARY),
-        ("LEFTPADDING", (0,0), (-1,-1), 8*mm),
-        ("RIGHTPADDING", (0,0), (-1,-1), 4*mm),
-        ("TOPPADDING", (0,0), (-1,-1), 0),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 0),
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-    ]))
 
-    main_cell = Table([[main_data]], colWidths=[PAGE_W - SIDEBAR_W], rowHeights=[main_height])
-    main_cell.setStyle(TableStyle([
-        ("LEFTPADDING", (0,0), (-1,-1), 10*mm),
-        ("RIGHTPADDING", (0,0), (-1,-1), 10*mm),
-        ("TOPPADDING", (0,0), (-1,-1), 0),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 0),
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-    ]))
+def _wrap_text(text, width, font_name, font_size):
+    lines = []
+    line = ""
+    for char in str(text or "").replace("\n", " "):
+        candidate = line + char
+        if pdfmetrics.stringWidth(candidate, font_name, font_size) <= width:
+            line = candidate
+        else:
+            if line:
+                lines.append(line)
+            line = char
+    if line:
+        lines.append(line)
+    return lines
 
-    full_table = Table([[sidebar_cell, main_cell]], colWidths=[SIDEBAR_W, PAGE_W - SIDEBAR_W])
-    full_table.setStyle(TableStyle([
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING", (0,0), (-1,-1), 0),
-        ("RIGHTPADDING", (0,0), (-1,-1), 0),
-        ("TOPPADDING", (0,0), (-1,-1), 0),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 0),
-    ]))
-    story.append(full_table)
 
-    doc.build(story)
+def _draw_wrapped(canvas, text, x, y, width, font_name, font_size, leading, color, max_lines=None):
+    canvas.setFillColor(color)
+    canvas.setFont(font_name, font_size)
+    lines = _wrap_text(text, width, font_name, font_size)
+    if max_lines:
+        lines = lines[:max_lines]
+    for line in lines:
+        if y < 18 * mm:
+            break
+        canvas.drawString(x, y, line)
+        y -= leading
+    return y
+
+
+def _draw_sidebar_title(canvas, text, x, y, width):
+    canvas.setFillColor(C_ACCENT)
+    canvas.setFont(F_H, 8.2)
+    canvas.drawString(x, y, text)
+    canvas.setStrokeColor(C_LINE)
+    canvas.setLineWidth(0.35)
+    canvas.line(x, y - 2.5 * mm, x + width, y - 2.5 * mm)
+    return y - 6.5 * mm
+
+
+def _draw_sidebar(canvas, doc, profile, optimization):
+    canvas.saveState()
+    canvas.setFillColor(C_BG)
+    canvas.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+    canvas.setFillColor(C_SIDEBAR_BG)
+    canvas.rect(0, 0, SIDEBAR_W, PAGE_H, fill=1, stroke=0)
+    canvas.setFillColor(C_ACCENT)
+    canvas.rect(0, 0, 2.4 * mm, PAGE_H, fill=1, stroke=0)
+
+    x = 8.5 * mm
+    width = SIDEBAR_W - 15 * mm
+    y = PAGE_H - 19 * mm
+
+    y = _draw_wrapped(canvas, profile.name or "姓名", x, y, width, F_H, 19, 7 * mm, C_PRIMARY, max_lines=2)
+    if profile.title:
+        y -= 0.6 * mm
+        y = _draw_wrapped(canvas, profile.title, x, y, width, F_B, 9.3, 4.8 * mm, C_MUTED, max_lines=2)
+
+    y -= 7 * mm
+    y = _draw_sidebar_title(canvas, "联系方式", x, y, width)
+    contacts = []
+    if profile.phone:
+        contacts.append(f"电话 {profile.phone}")
+    if profile.email:
+        contacts.append(f"邮箱 {profile.email}")
+    if profile.location:
+        contacts.append(f"城市 {profile.location}")
+    if profile.gender:
+        contacts.append(f"性别 {profile.gender}")
+    if profile.birth:
+        contacts.append(f"出生 {profile.birth}")
+    for contact in contacts or ["联系方式待补充"]:
+        y = _draw_wrapped(canvas, contact, x, y, width, F_B, 7.9, 4.1 * mm, C_SIDEBAR_TEXT, max_lines=2)
+
+    skills = optimization.get("skills_display") or profile.skills or []
+    if skills:
+        y -= 5 * mm
+        y = _draw_sidebar_title(canvas, "专业技能", x, y, width)
+        for skill in skills[:14]:
+            y = _draw_wrapped(canvas, f"- {skill}", x, y, width, F_B, 8, 4.2 * mm, C_SIDEBAR_TEXT, max_lines=2)
+
+    if profile.education:
+        y -= 5 * mm
+        y = _draw_sidebar_title(canvas, "教育背景", x, y, width)
+        for edu in profile.education[:3]:
+            school = getattr(edu, "institution", "") or ""
+            degree = " ".join(
+                part for part in [
+                    getattr(edu, "degree", "") or "",
+                    getattr(edu, "major", "") or "",
+                ] if part
+            )
+            graduation = getattr(edu, "graduation", "") or ""
+            if school:
+                y = _draw_wrapped(canvas, school, x, y, width, F_H, 8.2, 4.3 * mm, C_SIDEBAR_TEXT, max_lines=2)
+            if degree:
+                y = _draw_wrapped(canvas, degree, x, y, width, F_B, 7.7, 4 * mm, C_SIDEBAR_MUTED, max_lines=2)
+            if graduation:
+                y = _draw_wrapped(canvas, graduation, x, y, width, F_B, 7.5, 3.8 * mm, C_SIDEBAR_MUTED, max_lines=1)
+            y -= 2 * mm
+
+    canvas.setFillColor(C_MUTED)
+    canvas.setFont(F_B, 7.2)
+    canvas.drawString(x, 10 * mm, f"第 {doc.page} 页")
+    canvas.restoreState()
+
+
+def _draw_continuation_page(canvas, doc):
+    canvas.saveState()
+    canvas.setFillColor(C_BG)
+    canvas.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+    canvas.setStrokeColor(C_LINE)
+    canvas.setLineWidth(0.35)
+    canvas.line(CONTINUATION_LEFT, PAGE_H - 13 * mm, PAGE_W - CONTINUATION_RIGHT, PAGE_H - 13 * mm)
+    canvas.setFillColor(C_MUTED)
+    canvas.setFont(F_B, 7.2)
+    canvas.drawRightString(PAGE_W - CONTINUATION_RIGHT, 10 * mm, f"第 {doc.page} 页")
+    canvas.restoreState()
+
+
+def export_resume_pdf(profile, optimization: dict, company: str, job_title: str, template: str = "modern") -> bytes:
+    """生成可自然分页的专业双栏 PDF 简历。"""
+    buf = io.BytesIO()
+    template = template if template in PDF_TEMPLATES else "modern"
+
+    main_items = _build_main(profile, optimization or {})
+    if not main_items:
+        main_items = [Paragraph("暂无简历内容", _body_style("Empty"))]
+
+    doc = BaseDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=0, rightMargin=0,
+        topMargin=0, bottomMargin=0,
+        title=f"{profile.name or ''} 简历.pdf",
+    )
+    first_frame = Frame(
+        MAIN_LEFT, MAIN_BOTTOM, MAIN_W, PAGE_H - MAIN_TOP - MAIN_BOTTOM,
+        id="main", leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
+    )
+    continuation_frame = Frame(
+        CONTINUATION_LEFT, MAIN_BOTTOM, CONTINUATION_W, PAGE_H - MAIN_TOP - MAIN_BOTTOM,
+        id="continuation", leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
+    )
+    if template == "classic":
+        doc.addPageTemplates([
+            PageTemplate(
+                id="ResumeTemplate",
+                frames=[first_frame],
+                onPage=lambda canvas, current_doc: _draw_sidebar(canvas, current_doc, profile, optimization or {}),
+            )
+        ])
+    elif template == "ats":
+        doc.addPageTemplates([
+            PageTemplate(
+                id="ResumeTemplate",
+                frames=[continuation_frame],
+                onPage=_draw_continuation_page,
+            )
+        ])
+    else:
+        doc.addPageTemplates([
+            PageTemplate(
+                id="ResumeTemplate",
+                frames=[first_frame],
+                onPage=lambda canvas, current_doc: _draw_sidebar(canvas, current_doc, profile, optimization or {}),
+                autoNextPageTemplate="ResumeContinuation",
+            ),
+            PageTemplate(
+                id="ResumeContinuation",
+                frames=[continuation_frame],
+                onPage=_draw_continuation_page,
+            ),
+        ])
+    doc.build(main_items)
     buf.seek(0)
     return buf.getvalue()
-
-
-def _side_title(text):
-    return Paragraph(text, ParagraphStyle("STitle", fontName=F_H, fontSize=10.5, leading=16,
-                                           textColor=C_WHITE, spaceBefore=8, spaceAfter=4,
-                                           borderPadding=(0,0,2,0)))
-
-
-def _main_title(text):
-    return Paragraph(text, ParagraphStyle("MTitle", fontName=F_H, fontSize=13, leading=20,
-                                           textColor=C_PRIMARY, spaceBefore=12, spaceAfter=6))

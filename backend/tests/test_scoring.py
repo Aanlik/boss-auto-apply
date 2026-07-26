@@ -1,19 +1,60 @@
-from app.services.scoring import rank_jobs, score_job
+import asyncio
+from app.services.scoring import analyze_jd_for_matching, match_resume_to_job, rank_jobs_ai
 
 
-def test_score_job_combines_match_risk_and_outlook():
+def test_analyze_jd_fallback():
+    """Verifies JD analysis fallback when AI is unavailable."""
+    job = {"title": "Python 后端工程师", "company": "A公司", "jd_text": "需要Python和FastAPI"}
+    result = asyncio.run(analyze_jd_for_matching(job))
+    assert isinstance(result, dict)
+    assert "core_requirements" in result
+
+
+def test_match_resume_to_job_fallback():
+    """Verifies resume matching fallback when AI is unavailable."""
+    resume = {"skills": ["Python"], "name": "张三"}
     job = {"title": "Python 后端工程师", "company": "A公司"}
-    resume = {"skills": ["Python"]}
-    scored = score_job(job, resume, {"risk": "low", "outlook": "positive"})
-    assert scored.total_score > 0
-    assert scored.match_score > 0
+    jd_analysis = {"core_requirements": ["Python"]}
+    result = asyncio.run(match_resume_to_job(resume, job, jd_analysis))
+    assert isinstance(result, dict)
+    assert "match_score" in result
 
 
-def test_rank_jobs_sorts_highest_first():
-    jobs = [
-        {"title": "Java 后端工程师", "company": "A公司"},
-        {"title": "Python 后端工程师", "company": "B公司"},
-    ]
-    resume = {"skills": ["Python"]}
-    ranked = rank_jobs(jobs, resume, {"B公司": {"risk": "low", "outlook": "positive"}})
-    assert ranked[0]["title"] == "Python 后端工程师"
+def test_rank_jobs_uses_company_key_before_company_name(monkeypatch):
+    import app.services.scoring as scoring
+
+    async def fake_jd(job):
+        return {"core_requirements": ["Python"]}
+
+    async def fake_match(resume, job, jd_analysis):
+        return {
+            "match_score": 80,
+            "highlights": ["Python"],
+            "gaps": [],
+            "recommendation": "recommend",
+            "reason": "匹配",
+        }
+
+    monkeypatch.setattr(scoring, "analyze_jd_for_matching", fake_jd)
+    monkeypatch.setattr(scoring, "match_resume_to_job", fake_match)
+
+    jobs = [{
+        "id": "job-1",
+        "title": "后端工程师",
+        "company": "示例科技",
+        "company_key": "91410100TEST",
+        "salary": "15-25K",
+    }]
+    diligence = {
+        "示例科技有限公司": {
+            "companyName": "示例科技有限公司",
+            "sourceCompanyName": "示例科技",
+            "companyKey": "91410100TEST",
+            "companyScore": 90,
+        }
+    }
+
+    ranked = asyncio.run(rank_jobs_ai(jobs, {"skills": ["Python"]}, diligence))
+
+    assert ranked[0]["companyScore"] == 90
+    assert ranked[0]["companyKey"] == "91410100TEST"

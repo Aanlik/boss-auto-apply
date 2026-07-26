@@ -1,5 +1,0 @@
-张三
-Python 后端工程师
-3 年后端开发经验
-技能: Python, FastAPI, SQLAlchemy, SQL
-项目: 支付系统、订单服务

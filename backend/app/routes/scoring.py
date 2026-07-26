@@ -1,22 +1,73 @@
-from fastapi import APIRouter
-
-from app.services.scoring import rank_jobs, score_job
+from fastapi import APIRouter, HTTPException
+from app.services.scoring import RANKING_SETTINGS_FILE, load_ranking_weights, rank_jobs_ai, save_ranking_weights
+from app.services.workflow_persistence import load_rankings, save_rankings
+from app.services.workflow_tasks import complete_task, fail_task, start_task
 
 router = APIRouter(prefix="/api/scoring", tags=["scoring"])
 
 
-@router.post("/score")
-def score_job_endpoint(payload: dict) -> dict:
-    job = payload.get("job", {})
-    resume = payload.get("resume", {})
-    diligence = payload.get("diligence", {})
-    scored = score_job(job, resume, diligence)
-    return scored.model_dump()
+@router.get("/rankings")
+def get_rankings() -> dict:
+    return {"rankings": load_rankings()}
+
+
+@router.get("/weights")
+def get_ranking_weights() -> dict:
+    return {"weights": load_ranking_weights()}
+
+
+@router.post("/weights")
+def set_ranking_weights(payload: dict) -> dict:
+    return {"weights": save_ranking_weights(payload)}
 
 
 @router.post("/rank")
-def rank_jobs_endpoint(payload: dict) -> dict:
-    jobs = payload.get("jobs", [])
+async def rank_jobs_endpoint(payload: dict) -> dict:
+    """
+    综合排序
+    输入: { job_ids, resume, diligence_reports }
+    输出: { rankings: [...] }
+    """
+    job_ids = payload.get("job_ids", [])
     resume = payload.get("resume", {})
-    diligences = payload.get("diligences", {})
-    return {"jobs": rank_jobs(jobs, resume, diligences)}
+    diligence_reports = payload.get("diligence_reports", {})
+
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="没有岗位 ID")
+
+    if not resume:
+        raise HTTPException(status_code=400, detail="缺少简历数据")
+
+    # 从岗位池中获取岗位详情
+    from app.routes.jobs import _all_jobs
+    all_jobs = _all_jobs()
+    jobs_map = {j.id: j.model_dump() for j in all_jobs if hasattr(j, 'id')}
+    
+    # 兼容 dict 和 Pydantic model
+    if not jobs_map:
+        # 回退：尝试直接使用 id 列表从 _all_jobs 的简化版
+        job_list = []
+        for j in all_jobs:
+            try:
+                d = j.model_dump() if hasattr(j, 'model_dump') else j
+                if d.get("id") in job_ids:
+                    job_list.append(d)
+            except Exception:
+                if isinstance(j, dict) and j.get("id") in job_ids:
+                    job_list.append(j)
+    else:
+        job_list = [jobs_map[jid] for jid in job_ids if jid in jobs_map]
+
+    if not job_list:
+        # 回退: 使用 payload 中的 simplified 数据
+        raise HTTPException(status_code=404, detail="无法找到岗位详情")
+
+    task = start_task("ranking", "综合排序", total=len(job_list), payload={"job_ids": job_ids})
+    try:
+        rankings = await rank_jobs_ai(job_list, resume, diligence_reports, payload.get("weights"))
+        save_rankings(rankings)
+        complete_task(task["id"], done=len(rankings), message=f"综合排序完成，生成 {len(rankings)} 个结果")
+        return {"rankings": rankings}
+    except Exception as e:
+        fail_task(task["id"], str(e), "RANKING_FAILED", "检查简历、尽调报告和 AI 配置后重试")
+        raise

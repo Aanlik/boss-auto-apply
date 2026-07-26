@@ -2,6 +2,8 @@
 岗位捕获服务。
 提供：示例数据、手动录入、Boss 直聘真实抓取。
 """
+from __future__ import annotations
+
 from datetime import datetime, timezone
 import hashlib
 from app.models.job import JobRecord, JobSource
@@ -92,11 +94,12 @@ def capture_from_boss(
     city: str = "深圳",
     max_pages: int = 3,
     headless: bool = True,
+    filters: dict[str, str] | None = None,
 ) -> list[JobSource]:
     """从 Boss 直聘真实抓取岗位。scrape_jobs_sync 返回 dict 列表。"""
     from app.services.boss_scraper import scrape_jobs_sync
 
-    jobs = scrape_jobs_sync(keyword=keyword, city=city, max_pages=max_pages, headless=headless)
+    jobs = scrape_jobs_sync(keyword=keyword, city=city, max_pages=max_pages, headless=headless, filters=filters)
     now = datetime.now(timezone.utc).isoformat()
     sources: list[JobSource] = []
 
@@ -109,7 +112,7 @@ def capture_from_boss(
         jd_text = job.get("jd_text", "") if isinstance(job, dict) else getattr(job, "jd_text", "")
         tags = job.get("keywords", []) if isinstance(job, dict) else getattr(job, "tags", [])
 
-        source_id = hashlib.md5(src_url.encode()).hexdigest()[:12] if src_url else f"boss-captured-{i}"
+        source_id = hashlib.md5((src_url or f"no-url-{i}-{company}").encode()).hexdigest()[:12]
         dedupe_key = _make_dedupe_key(company, title, city_val)
 
         sources.append(JobSource(
@@ -137,6 +140,9 @@ def capture_from_boss(
 def jobs_from_source(source: JobSource) -> JobRecord:
     """从 JobSource 构造 JobRecord。"""
     raw = source.raw_payload
+    captured_keywords = raw.get("keywords")
+    if captured_keywords is None:
+        captured_keywords = raw.get("tags", [])
     return JobRecord(
         id=raw.get("id", source.source_id),
         title=raw.get("title", ""),
@@ -144,6 +150,7 @@ def jobs_from_source(source: JobSource) -> JobRecord:
         city=raw.get("city", ""),
         salary=raw.get("salary", ""),
         jd_text=raw.get("jd_text", ""),
+        keywords=list(captured_keywords or []),
         source=source.source_type,
         source_url=raw.get("source_url", ""),
         fetched_at=source.fetched_at,

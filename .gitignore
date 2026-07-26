@@ -7,10 +7,23 @@ __pycache__/
 .superpowers/
 *.log
 tmp/
+tmp-*.png
+/package.json
+/package-lock.json
 data/chrome_profile/
 data/uploads/
 data/resumes/
 data/api_key.json
+data/baidu_config.json
+data/business_info_config.json
 data/boss_session.json
 data/provider.json
+data/diligence/
+data/greetings/
+data/jobs/
+data/rankings/
+
+# 本地参考仓库，仅用于人工对照，不属于本项目源码或运行依赖。
 boss-scraper-ref/
+docs/superpowers/
+docs/workflow-diagram.html

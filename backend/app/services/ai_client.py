@@ -1,6 +1,8 @@
+from __future__ import annotations
 """AI 调用封装 — 支持多供应商、自定义 Base URL、模型选择"""
 import json
 import os
+import base64
 import logging
 from pathlib import Path
 from openai import OpenAI
@@ -188,3 +190,66 @@ def chat_json(system: str, user: str, model: str | None = None, temperature: flo
     except json.JSONDecodeError:
         logger.warning("AI 返回非 JSON: %s", str(text)[:200] if text else "None")
         return {"error": "AI 返回格式异常", "raw": str(text)[:500] if text else ""}
+
+
+def ocr_image(image_bytes: bytes, filename: str = "") -> str:
+    """通过 AI Vision API 从图片中提取文本（OCR）。"""
+    import mimetypes
+    mime = mimetypes.guess_type(filename)[0] or "image/png"
+    if mime not in ("image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"):
+        mime = "image/png"
+
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    data_url = f"data:{mime};base64,{b64}"
+
+    client = get_client()
+    model = get_model()
+
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": (
+                    "请精确提取这张简历图片中的所有文字内容。"
+                    "保持原文格式、分段和标点。不要添加任何解释或问候语，只输出提取的文本。"
+                    "如果图片中是中文简历，请以中文输出。"
+                )},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }],
+        temperature=0.1,
+        max_tokens=4096,
+    )
+    return resp.choices[0].message.content or ""
+
+
+async def ocr_image_async(image_bytes: bytes, filename: str = "") -> str:
+    """异步版本 — 通过 AI Vision API 从图片中提取文本（OCR）。"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, ocr_image, image_bytes, filename)
+
+
+async def chat(prompt: str, temperature: float = 0.3, max_tokens: int = 2000) -> str:
+    """简单对话接口 — 发送单条 prompt，返回文本"""
+    client = get_client()
+    model = get_model()
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return resp.choices[0].message.content or ""
+
+
+def get_ai_client():
+    """返回可用于调用的 AI 客户端对象"""
+    return _AIClient()
+
+
+class _AIClient:
+    """AI 客户端包装器，提供 chat 方法"""
+    async def chat(self, prompt: str, temperature: float = 0.3, max_tokens: int = 2000) -> str:
+        return await chat(prompt, temperature, max_tokens)

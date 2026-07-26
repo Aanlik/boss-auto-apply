@@ -5,12 +5,12 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.routes.diligence import router as diligence_router
+from app.routes.greetings import router as greetings_router
 from app.routes.jobs import router as jobs_router
-from app.routes.messages import router as messages_router
-from app.routes.send_inbox import router as send_inbox_router
 from app.routes.resumes import router as resumes_router
 from app.routes.scoring import router as scoring_router
 from app.routes.settings import router as settings_router
+from app.routes.workflow import router as workflow_router
 
 app = FastAPI(title="BOSS Workbench")
 
@@ -19,9 +19,24 @@ app.include_router(resumes_router)
 app.include_router(jobs_router)
 app.include_router(diligence_router)
 app.include_router(scoring_router)
-app.include_router(messages_router)
-app.include_router(send_inbox_router)
 app.include_router(settings_router)
+app.include_router(greetings_router)
+app.include_router(workflow_router)
+
+# ── 禁用静态文件缓存（开发阶段） ──
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+app.add_middleware(NoCacheStaticMiddleware)
+
 
 
 @app.get("/health")

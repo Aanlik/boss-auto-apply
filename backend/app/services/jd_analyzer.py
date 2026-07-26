@@ -1,6 +1,7 @@
 """AI 岗位 JD 分析服务 — 专业招聘视角"""
 from app.models.resume import JDAnalysis
 from app.services.ai_client import chat_json
+from app.services.resume_formatters import fmt_chat
 
 SYSTEM_PROMPT = """你是一位在头部互联网公司有 10 年经验的技术招聘经理（TA Manager），面过 3000+ 候选人，经手过 500+ 个 JD。
 
@@ -24,22 +25,16 @@ SYSTEM_PROMPT = """你是一位在头部互联网公司有 10 年经验的技术
 只返回 JSON，不要解释，不要 markdown。"""
 
 
-def _fmt_chat(chat_history):
-    if not chat_history: return "无"
-    return "\n".join(f"{'用户' if m.get('role')=='user' else 'AI'}: {m.get('content','')[:200]}" for m in (chat_history or [])[-8:])
-
-
 def analyze_jd(job_title: str, company: str, jd_text: str, chat_history=None) -> JDAnalysis:
+    chat_str = f"\n对话上下文：\n{fmt_chat(chat_history)}"
+    jd_limit = max(800, 5000 - len(chat_str))
     user = f"""分析以下岗位 JD：
 
 岗位：{job_title}
 公司：{company or '未知'}
-JD 原文：
-{jd_text[:3000]}
-
-对话上下文：
-{_fmt_chat(chat_history)}
-"""
+JD 原文（前 {jd_limit} 字）：
+{jd_text[:jd_limit]}
+{chat_str}"""
     try:
         data = chat_json(SYSTEM_PROMPT, user)
         return JDAnalysis(
