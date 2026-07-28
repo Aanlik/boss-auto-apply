@@ -114,7 +114,7 @@ function AppShell() {
   return (
     <div className="app-shell">
       <nav className="app-nav">
-        <span className="app-logo">BOSS 求职工作台</span>
+        <span className="app-logo">boss 直聘求职端自动化</span>
         <div className="nav-links">
           {pages.map(p => (
             <button key={p.key} className={`nav-link ${page === p.key ? "nav-link--active" : ""}`}

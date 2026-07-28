@@ -1,4 +1,4 @@
-# BOSS 求职工作台
+# boss 直聘求职端自动化
 
 一个本地运行的求职流程工作台，用来管理简历、岗位池、公司尽调、岗位排序、打招呼话术、AI 深度报告和上线前维护检查。
 
@@ -102,7 +102,7 @@ python3 scripts/build_desktop.py dmg
 打包后会生成 macOS 安装包：
 
 ```text
-release/desktop/BOSS 求职工作台-1.0.0-arm64.dmg
+release/desktop/boss 直聘求职端自动化-1.0.0-arm64.dmg
 ```
 
 桌面端会内置前端页面、后端服务、Python 运行环境、运行依赖和 Chromium 浏览器运行时；用户数据会写入系统应用数据目录，不会把开发目录里的 `data/` 测试数据打进安装包。BOSS 登录、抓取和受控自动沟通会优先使用安装包内置浏览器，不要求普通用户额外安装 Python、Node、pnpm 或 Chrome。后端以目录式运行包封装，避免每次启动都解压单文件运行环境。

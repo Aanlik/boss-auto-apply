@@ -2,7 +2,7 @@
   "name": "boss-workbench-desktop",
   "version": "1.0.0",
   "private": true,
-  "description": "BOSS 求职工作台桌面端",
+  "description": "boss 直聘求职端自动化桌面端",
   "main": "desktop/main.cjs",
   "scripts": {
     "desktop:build": "python3 scripts/build_desktop.py",
@@ -11,7 +11,7 @@
   },
   "build": {
     "appId": "com.bossworkbench.desktop",
-    "productName": "BOSS 求职工作台",
+    "productName": "boss 直聘求职端自动化",
     "asar": true,
     "files": [
       "desktop/**/*",

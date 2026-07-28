@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("核心工作台入口可打开并显示流程状态", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByText("BOSS 求职工作台")).toBeVisible();
+  await expect(page.getByText("boss 直聘求职端自动化")).toBeVisible();
   await expect(page.getByText("全流程状态")).toBeVisible();
   await page.getByRole("button", { name: "仪表盘" }).click();
   await expect(page.getByText("求职流程仪表盘")).toBeVisible();
