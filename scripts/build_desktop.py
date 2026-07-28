@@ -118,25 +118,42 @@ def build_browser_runtime() -> None:
     )
 
 
-def build_electron(target: str) -> None:
+def current_platform_target() -> str:
+    if sys.platform == "darwin":
+        return "mac"
+    if sys.platform == "win32":
+        return "win"
+    return "linux"
+
+
+def build_electron(target: str, arch: str = "") -> None:
     install_command = ["pnpm", "install", "--frozen-lockfile"] if (ROOT / "pnpm-lock.yaml").exists() else ["pnpm", "install", "--no-frozen-lockfile"]
     run(install_command, cwd=ROOT)
     env = {"CSC_IDENTITY_AUTO_DISCOVERY": "false"}
-    if target == "dmg":
-        run(["pnpm", "exec", "electron-builder", "--mac", "dmg"], cwd=ROOT, env=env)
+    arch_args = [f"--{arch}"] if arch in {"x64", "arm64"} else []
+    if target in {"dir", "mac-dir"}:
+        run(["pnpm", "exec", "electron-builder", "--mac", "dir", *arch_args], cwd=ROOT, env=env)
+    elif target in {"dmg", "mac", "mac-dmg"}:
+        run(["pnpm", "exec", "electron-builder", "--mac", "dmg", *arch_args], cwd=ROOT, env=env)
+    elif target in {"win", "windows"}:
+        run(["pnpm", "exec", "electron-builder", "--win", "nsis", *arch_args], cwd=ROOT, env=env)
+    elif target == "linux":
+        run(["pnpm", "exec", "electron-builder", "--linux", "AppImage", "deb", *arch_args], cwd=ROOT, env=env)
     else:
-        run(["pnpm", "exec", "electron-builder", "--mac", "dir"], cwd=ROOT, env=env)
+        raise ValueError(f"未知桌面端打包目标: {target}")
 
 
 def main() -> int:
-    target = sys.argv[1] if len(sys.argv) > 1 else "dir"
-    if target not in {"dir", "dmg"}:
-        print("用法: python3 scripts/build_desktop.py [dir|dmg]")
+    target = sys.argv[1] if len(sys.argv) > 1 else current_platform_target()
+    arch = sys.argv[2] if len(sys.argv) > 2 else ""
+    valid_targets = {"dir", "mac-dir", "dmg", "mac", "mac-dmg", "win", "windows", "linux"}
+    if target not in valid_targets:
+        print("用法: python3 scripts/build_desktop.py [mac|mac-dmg|win|linux|dir] [x64|arm64]")
         return 2
     build_frontend()
     build_backend()
     build_browser_runtime()
-    build_electron(target)
+    build_electron(target, arch)
     print("\n桌面端打包完成。")
     return 0
 

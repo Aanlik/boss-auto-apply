@@ -96,7 +96,7 @@ python3 scripts/release_check.py --dry-run
 桌面端打包：
 
 ```bash
-python3 scripts/build_desktop.py dmg
+python3 scripts/build_desktop.py mac
 ```
 
 打包后会生成 macOS 安装包：
@@ -106,6 +106,23 @@ release/desktop/boss 直聘求职端自动化-1.0.0-arm64.dmg
 ```
 
 桌面端会内置前端页面、后端服务、Python 运行环境、运行依赖和 Chromium 浏览器运行时；用户数据会写入系统应用数据目录，不会把开发目录里的 `data/` 测试数据打进安装包。BOSS 登录、抓取和受控自动沟通会优先使用安装包内置浏览器，不要求普通用户额外安装 Python、Node、pnpm 或 Chrome。后端以目录式运行包封装，避免每次启动都解压单文件运行环境。
+
+## GitHub 自动打包
+
+项目已接入 GitHub Actions 桌面端自动打包：
+
+- 首次打包：在 GitHub Actions 中手动运行 `Desktop Release`。
+- 后续发版：创建并推送版本标签，例如 `v1.0.1`，会自动打包并上传 GitHub Release。
+- 构建矩阵：macOS Intel、macOS Apple Silicon、Windows x64、Linux x64。
+
+发版命令示例：
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+手动触发会生成预发布版本；版本标签触发会生成正式 Release。macOS 当前为未签名安装包，首次打开可能出现系统安全提示；后续如需正式分发，可接入 Apple Developer 签名、公证和 Windows 代码签名。
 
 ## 推荐使用流程
 

@@ -1,0 +1,166 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "手动打包使用的 Release 标签，留空则使用 manual-提交号"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test before packaging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install backend dependencies
+        run: python -m pip install -e ./backend pytest
+
+      - name: Run backend tests
+        working-directory: backend
+        run: pytest -q
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Run frontend validation
+        working-directory: frontend
+        run: pnpm validate
+
+  package:
+    name: Build ${{ matrix.name }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Intel
+            os: macos-13
+            target: mac
+            arch: x64
+            artifact: macos-x64
+          - name: macOS Apple Silicon
+            os: macos-14-arm64
+            target: mac
+            arch: arm64
+            artifact: macos-arm64
+          - name: Windows x64
+            os: windows-latest
+            target: win
+            arch: x64
+            artifact: windows-x64
+          - name: Linux x64
+            os: ubuntu-latest
+            target: linux
+            arch: x64
+            artifact: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools rpm
+
+      - name: Install backend package
+        run: python -m pip install -e ./backend
+
+      - name: Build desktop package
+        run: python scripts/build_desktop.py ${{ matrix.target }} ${{ matrix.arch }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.artifact }}
+          path: |
+            release/desktop/**/*.dmg
+            release/desktop/**/*.zip
+            release/desktop/**/*.exe
+            release/desktop/**/*.msi
+            release/desktop/**/*.AppImage
+            release/desktop/**/*.deb
+            release/desktop/**/*.rpm
+            release/desktop/**/*.blockmap
+            release/desktop/latest*.yml
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            prerelease="false"
+          elif [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            tag="${{ github.event.inputs.release_tag }}"
+            prerelease="true"
+          else
+            tag="manual-${GITHUB_SHA::7}"
+            prerelease="true"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: packaged-artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: boss 直聘求职端自动化 ${{ steps.release.outputs.tag }}
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          generate_release_notes: true
+          files: packaged-artifacts/**/*
