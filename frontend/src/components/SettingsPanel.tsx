@@ -199,57 +199,84 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
   }
 
   async function refreshMaintenance() {
-    try {
-      const [preview, storage, logs, preflight, checkSuite, guard, rules, manifest, notes, acceptance, suite, snapshot, records, audit, privacy, cleanupPreview, diagnostics, dependencyDryRun, pdfVisual, aiProfile, wizard, deleted] = await Promise.all([
-        getRetentionPreview(),
-        getStorageStatus(),
-        getMaintenanceLogs("", 8),
-        getReleasePreflight(),
-        getReleaseCheckSuite(),
-        getProductionGuard(),
-        getRetentionRules(),
-        getReleaseManifest(),
-        getReleaseNotes(),
-        getReleaseAcceptanceChecklist(),
-        getReleaseAcceptanceSuite(),
-        getReleaseVersionSnapshot(),
-        listReleaseRecords(),
-        getSecurityAudit(),
-        getPrivacyScan(),
-        getCleanupDryRun(),
-        getDiagnosticCenter(),
-        runDependencyAudit(true),
-        getPdfVisualRegression(),
-        getAiPreferenceProfile(),
-        getStorageMigrationWizard(),
-        listDeletedJobs(),
-      ]);
-      setRetentionPreview(preview);
-      setStorageStatus(storage);
-      setMaintenanceLogs(logs.events || []);
-      setReleasePreflight(preflight);
-      setReleaseCheckSuite(checkSuite);
-      setProductionGuard(guard);
-      setRetentionRules(rules);
-      setReleaseManifest(manifest);
-      setReleaseNotes(notes);
-      setReleaseAcceptance(acceptance);
-      setReleaseSuite(suite);
-      setVersionSnapshot(snapshot);
-      setReleaseRecords(records.records || []);
-      setSecurityAudit(audit);
-      setPrivacyScan(privacy);
-      setCleanupDryRun(cleanupPreview);
-      setDiagnosticCenter(diagnostics);
-      setDependencyAudit(dependencyDryRun);
-      setPdfVisualRegression(pdfVisual);
-      setAiPreferenceProfile(aiProfile);
-      setStorageWizard(wizard);
-      setDeletedJobs((deleted.jobs || []).slice(0, 6));
-      getApiLogs("", 8).then(r => setApiLogs(r.logs || [])).catch(() => {});
-    } catch (e) {
-      setMaintenanceStatus(e instanceof Error ? e.message : "维护状态加载失败");
-    }
+    const loaders = [
+      getRetentionPreview(),
+      getStorageStatus(),
+      getMaintenanceLogs("", 8),
+      getReleasePreflight(),
+      getReleaseCheckSuite(),
+      getProductionGuard(),
+      getRetentionRules(),
+      getReleaseManifest(),
+      getReleaseNotes(),
+      getReleaseAcceptanceChecklist(),
+      getReleaseAcceptanceSuite(),
+      getReleaseVersionSnapshot(),
+      listReleaseRecords(),
+      getSecurityAudit(),
+      getPrivacyScan(),
+      getCleanupDryRun(),
+      getDiagnosticCenter(),
+      runDependencyAudit(true),
+      getPdfVisualRegression(),
+      getAiPreferenceProfile(),
+      getStorageMigrationWizard(),
+      listDeletedJobs(),
+    ] as const;
+    const results = await Promise.allSettled(loaders);
+    const rejected = results.filter(item => item.status === "rejected");
+    const valueAt = <T,>(index: number): T | null => {
+      const result = results[index];
+      return result?.status === "fulfilled" ? (result.value as T) : null;
+    };
+
+    const preview = valueAt<NonNullable<typeof retentionPreview>>(0);
+    const storage = valueAt<StorageStatus>(1);
+    const logs = valueAt<{ events?: MaintenanceLogEvent[] }>(2);
+    const preflight = valueAt<ReleasePreflight>(3);
+    const checkSuite = valueAt<ReleaseCheckSuite>(4);
+    const guard = valueAt<typeof productionGuard>(5);
+    const rules = valueAt<NonNullable<typeof retentionRules>>(6);
+    const manifest = valueAt<ReleaseManifest>(7);
+    const notes = valueAt<ReleaseNotes>(8);
+    const acceptance = valueAt<ReleaseAcceptanceChecklist>(9);
+    const suite = valueAt<ReleaseAcceptanceSuite>(10);
+    const snapshot = valueAt<ReleaseVersionSnapshot>(11);
+    const records = valueAt<{ records?: ReleaseRecord[] }>(12);
+    const audit = valueAt<SecurityAudit>(13);
+    const privacy = valueAt<PrivacyScan>(14);
+    const cleanupPreview = valueAt<CleanupDryRun>(15);
+    const diagnostics = valueAt<DiagnosticCenter>(16);
+    const dependencyDryRun = valueAt<DependencyAudit>(17);
+    const pdfVisual = valueAt<PdfVisualRegression>(18);
+    const aiProfile = valueAt<AiPreferenceProfile>(19);
+    const wizard = valueAt<StorageMigrationWizard>(20);
+    const deleted = valueAt<{ jobs?: Array<{ id: string; deletedAt: string; job: { title?: string; company?: string } }> }>(21);
+
+    if (preview) setRetentionPreview(preview);
+    if (storage) setStorageStatus(storage);
+    if (logs) setMaintenanceLogs(logs.events || []);
+    if (preflight) setReleasePreflight(preflight);
+    if (checkSuite) setReleaseCheckSuite(checkSuite);
+    if (guard) setProductionGuard(guard);
+    if (rules) setRetentionRules(rules);
+    if (manifest) setReleaseManifest(manifest);
+    if (notes) setReleaseNotes(notes);
+    if (acceptance) setReleaseAcceptance(acceptance);
+    if (suite) setReleaseSuite(suite);
+    if (snapshot) setVersionSnapshot(snapshot);
+    if (records) setReleaseRecords(records.records || []);
+    if (audit) setSecurityAudit(audit);
+    if (privacy) setPrivacyScan(privacy);
+    if (cleanupPreview) setCleanupDryRun(cleanupPreview);
+    if (diagnostics) setDiagnosticCenter(diagnostics);
+    if (dependencyDryRun) setDependencyAudit(dependencyDryRun);
+    if (pdfVisual) setPdfVisualRegression(pdfVisual);
+    if (aiProfile) setAiPreferenceProfile(aiProfile);
+    if (wizard) setStorageWizard(wizard);
+    if (deleted) setDeletedJobs((deleted.jobs || []).slice(0, 6));
+    setMaintenanceStatus(rejected.length > 0 ? `部分维护检查暂不可用：${rejected.length} 项` : "");
+    getApiLogs("", 8).then(r => setApiLogs(r.logs || [])).catch(() => {});
   }
 
   async function onSavePreferences() {
