@@ -77,12 +77,12 @@ jobs:
       matrix:
         include:
           - name: macOS Intel
-            os: macos-13
+            os: macos-26-intel
             target: mac
             arch: x64
             artifact: macos-x64
           - name: macOS Apple Silicon
-            os: macos-14-arm64
+            os: macos-26
             target: mac
             arch: arm64
             artifact: macos-arm64
