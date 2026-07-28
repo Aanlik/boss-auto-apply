@@ -58,3 +58,24 @@ def test_rank_jobs_uses_company_key_before_company_name(monkeypatch):
 
     assert ranked[0]["companyScore"] == 90
     assert ranked[0]["companyKey"] == "91410100TEST"
+
+
+def test_ranking_feedback_adjusts_weights_toward_company_risk(tmp_path, monkeypatch):
+    import app.services.scoring as scoring
+    from app.services import feedback_store, workflow_persistence
+
+    monkeypatch.setattr(workflow_persistence, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(scoring, "RANKING_SETTINGS_FILE", tmp_path / "rankings" / "settings.json")
+    feedback_store.save_feedback(
+        "ranking",
+        "job-risky",
+        False,
+        context={"weightPreference": "company", "reason": "公司风险应该更重要"},
+    )
+
+    weights = scoring.load_feedback_adjusted_weights({"company_weight": 0.4, "match_weight": 0.6})
+
+    assert weights["feedbackAdjusted"] is True
+    assert weights["company_weight"] > 0.4
+    assert weights["match_weight"] < 0.6
+    assert any("公司风险" in item for item in weights["feedbackSignals"])

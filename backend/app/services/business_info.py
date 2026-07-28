@@ -19,13 +19,16 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 import os
 from pathlib import Path
 import uuid
 from typing import Optional
 
 import aiohttp
+from app.services.external_service import ProviderFailure, async_run_with_resilience
 from app.services.workflow_persistence import write_json_atomic
+from app.services.secret_store import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +74,22 @@ def _load_config():
     try:
         if CONFIG_FILE.exists():
             cfg = json.loads(CONFIG_FILE.read_text())
-            _secret_id = cfg.get("secret_id", "") or os.environ.get("TENCENT_SECRET_ID", "")
-            _secret_key = cfg.get("secret_key", "") or os.environ.get("TENCENT_SECRET_KEY", "")
+            secret_id = cfg.get("secret_id", "")
+            secret_key = cfg.get("secret_key", "")
+            encrypted_id = cfg.get("secret_id_encrypted", "")
+            encrypted_key = cfg.get("secret_key_encrypted", "")
+            if encrypted_id:
+                secret_id = decrypt_secret(encrypted_id)
+            if encrypted_key:
+                secret_key = decrypt_secret(encrypted_key)
+            if (secret_id or secret_key) and (not encrypted_id or not encrypted_key):
+                cfg["secret_id_encrypted"] = encrypt_secret(secret_id)
+                cfg["secret_key_encrypted"] = encrypt_secret(secret_key)
+                cfg["secret_id"] = ""
+                cfg["secret_key"] = ""
+                write_json_atomic(CONFIG_FILE, cfg)
+            _secret_id = secret_id or os.environ.get("TENCENT_SECRET_ID", "")
+            _secret_key = secret_key or os.environ.get("TENCENT_SECRET_KEY", "")
             raw_endpoint = cfg.get("endpoint", "")
             _endpoint = _normalize_endpoint(raw_endpoint)
             if raw_endpoint and raw_endpoint != _endpoint:
@@ -102,8 +119,10 @@ def set_config(secret_id: str, secret_key: str, endpoint: str = "") -> bool:
     try:
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(CONFIG_FILE, {
-            "secret_id": _secret_id,
-            "secret_key": _secret_key,
+            "secret_id": "",
+            "secret_key": "",
+            "secret_id_encrypted": encrypt_secret(_secret_id),
+            "secret_key_encrypted": encrypt_secret(_secret_key),
             "endpoint": _endpoint,
         })
         return True
@@ -191,19 +210,49 @@ async def query_business_info(company_name: str) -> dict:
 
 
 async def _call_api(company_name: str) -> dict:
+    try:
+        return await async_run_with_resilience(
+            "business",
+            lambda: _call_api_once(company_name),
+            max_attempts=3,
+            base_delay=0.25,
+            circuit_threshold=3,
+        )
+    except ProviderFailure as exc:
+        return {
+            "companyName": company_name,
+            "error": str(exc),
+            "errorMeta": exc.public_payload(),
+        }
+
+
+async def _call_api_once(company_name: str) -> dict:
     """调用腾讯云市场工商信息 API。"""
     endpoint = _normalize_endpoint(_endpoint)
     headers = _build_cloudmarket_headers()
     params = {"keyword": company_name}
+    started = time.time()
 
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(endpoint, params=params, headers=headers) as resp:
             status = resp.status
             body = await resp.text()
+            try:
+                from app.services.maintenance_service import log_api_call
+                log_api_call("business", "POST", endpoint, status, int((time.time() - started) * 1000), {"company": company_name})
+            except Exception:
+                pass
 
             if status != 200:
                 logger.warning("工商 API HTTP %d: %s", status, body[:300])
+                if status == 429 or status >= 500:
+                    raise ProviderFailure(
+                        "business",
+                        "rate_limit" if status == 429 else "provider",
+                        _format_cloudmarket_error(status, body),
+                        status_code=status,
+                    )
                 return {
                     "companyName": company_name,
                     "error": _format_cloudmarket_error(status, body),

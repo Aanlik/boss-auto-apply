@@ -1,14 +1,18 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
+import csv
+import hashlib
+import io
 import logging
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 import json
 from pathlib import Path
 
 from app.models.job import JobRecord, JobFilter
-from app.services.workflow_persistence import write_json_atomic
+from app.services.workflow_persistence import _read_json, write_json_atomic
 from app.services.city_codes import list_city_options
 from app.services.boss_filter_options import list_filter_options, normalize_capture_filters
 from app.services.company_blacklist import (
@@ -24,6 +28,8 @@ from app.services.job_ingest import (
     ingest_sample_jobs, ingest_manual_job, ingest_from_boss, normalize_job,
 )
 from app.services.workflow_tasks import complete_task, fail_task, partial_fail_task, start_task
+from app.services.maintenance_service import active_store, log_api_call, log_event
+from app.services.runtime_mode import is_demo_allowed
 
 logger = logging.getLogger("jobs_route")
 
@@ -37,6 +43,8 @@ DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 JOBS_DIR = DATA_DIR / "jobs"
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_FILE = JOBS_DIR / "jobs.json"
+DELETED_JOBS_FILE = JOBS_DIR / "deleted_jobs.json"
+SEARCH_PRESETS_FILE = JOBS_DIR / "search_presets.json"
 
 
 # ---------- 内存存储 ----------
@@ -48,8 +56,49 @@ def _save_jobs():
     data = {jid: job.model_dump() for jid, job in _job_store.items()}
     try:
         write_json_atomic(JOBS_FILE, data)
+        if active_store() == "sqlite":
+            from app.services import job_sqlite_store
+            job_sqlite_store.save_jobs(_job_store)
     except OSError as e:
         logger.error("保存岗位数据失败: %s", e)
+
+
+def _archive_jobs(job_ids: list[str]) -> int:
+    archived = _read_json(DELETED_JOBS_FILE, {})
+    if not isinstance(archived, dict):
+        archived = {}
+    count = 0
+    for job_id in job_ids:
+        job = _job_store.get(job_id)
+        if job is None:
+            continue
+        archived[job_id] = {
+            "deletedAt": datetime.now().isoformat(),
+            "job": job.model_dump(),
+        }
+        count += 1
+    if count:
+        write_json_atomic(DELETED_JOBS_FILE, archived)
+    return count
+
+
+def _restore_jobs(job_ids: list[str]) -> int:
+    archived = _read_json(DELETED_JOBS_FILE, {})
+    if not isinstance(archived, dict):
+        return 0
+    restored = 0
+    remaining = dict(archived)
+    for job_id in job_ids:
+        item = archived.get(job_id)
+        if not isinstance(item, dict) or not isinstance(item.get("job"), dict):
+            continue
+        _job_store[job_id] = JobRecord.model_validate(item["job"])
+        remaining.pop(job_id, None)
+        restored += 1
+    if restored:
+        write_json_atomic(DELETED_JOBS_FILE, remaining)
+        _save_jobs()
+    return restored
 
 
 def _load_jobs():
@@ -89,6 +138,20 @@ def _load_jobs():
 
 # 模块加载时恢复数据
 _load_jobs()
+
+
+def _load_search_presets() -> list[dict]:
+    try:
+        if not SEARCH_PRESETS_FILE.exists():
+            return []
+        data = json.loads(SEARCH_PRESETS_FILE.read_text())
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _save_search_presets(presets: list[dict]) -> None:
+    write_json_atomic(SEARCH_PRESETS_FILE, presets[-50:])
 
 
 def _all_jobs() -> list[JobRecord]:
@@ -192,9 +255,47 @@ def _job_quality_report() -> dict:
     blacklisted = sum(1 for job in jobs if job.lifecycle_status == "blacklisted" or is_company_blacklisted(job.company))
     duplicate_jobs = sum(group["count"] for group in duplicate_groups)
     application_statuses = {status: 0 for status in APPLICATION_STATUSES}
+    batch_index: dict[str, dict] = {}
     for job in jobs:
         status = job.application_status if job.application_status in APPLICATION_STATUSES else "pending"
         application_statuses[status] += 1
+        batch_id = job.capture_batch_id or "manual"
+        batch = batch_index.setdefault(
+            batch_id,
+            {
+                "id": batch_id,
+                "keyword": job.capture_keyword,
+                "city": job.capture_city,
+                "filters": job.capture_filters or {},
+                "capturedAt": job.captured_at or job.fetched_at,
+                "total": 0,
+                "with_jd": 0,
+                "missing_jd": 0,
+                "blacklisted": 0,
+                "suspected_expired": 0,
+            },
+        )
+        batch["total"] += 1
+        if (job.jd_text or "").strip():
+            batch["with_jd"] += 1
+        else:
+            batch["missing_jd"] += 1
+        if job.lifecycle_status == "blacklisted" or is_company_blacklisted(job.company):
+            batch["blacklisted"] += 1
+        if job.lifecycle_status == "suspected_expired":
+            batch["suspected_expired"] += 1
+        if job.captured_at and (not batch.get("capturedAt") or job.captured_at > batch["capturedAt"]):
+            batch["capturedAt"] = job.captured_at
+    batches = sorted(
+        batch_index.values(),
+        key=lambda item: (item.get("capturedAt") or "", item.get("id") or ""),
+        reverse=True,
+    )
+    for batch in batches:
+        total = batch["total"] or 1
+        batch["jd_completion_rate"] = round(batch["with_jd"] / total * 100)
+        batch["stale_rate"] = round((batch["suspected_expired"] + batch["blacklisted"]) / total * 100)
+        batch["risk_rate"] = round(batch["blacklisted"] / total * 100)
     return {
         "summary": {
             "total": len(jobs),
@@ -205,8 +306,10 @@ def _job_quality_report() -> dict:
             "duplicate_groups": len(duplicate_groups),
             "duplicate_jobs": duplicate_jobs,
             "application_statuses": application_statuses,
+            "batch_count": len(batch_index),
         },
         "duplicateGroups": duplicate_groups,
+        "batches": batches,
     }
 
 
@@ -232,15 +335,94 @@ def job_pool_quality() -> dict:
     return _job_quality_report()
 
 
+@router.get("/export")
+def export_jobs(format: str = "json"):
+    jobs = [job.model_dump() for job in _all_jobs()]
+    if format == "json":
+        return {
+            "jobs": jobs,
+            "total": len(jobs),
+            "quality": _job_quality_report(),
+            "exportedAt": datetime.now().isoformat(),
+        }
+    if format == "csv":
+        output = io.StringIO()
+        fields = [
+            "id",
+            "title",
+            "company",
+            "city",
+            "salary",
+            "source",
+            "source_url",
+            "capture_batch_id",
+            "capture_keyword",
+            "capture_city",
+            "captured_at",
+            "application_status",
+            "decision_status",
+            "lifecycle_status",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(jobs)
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="jobs.csv"'},
+        )
+    raise HTTPException(status_code=400, detail="导出格式必须是 json/csv")
+
+
 @router.get("/cities")
 def list_job_cities() -> dict:
     cities = list_city_options()
     return {"cities": cities, "total": len(cities)}
 
 
+@router.get("/search-presets")
+def list_search_presets() -> dict:
+    presets = sorted(_load_search_presets(), key=lambda item: item.get("updatedAt", ""), reverse=True)
+    return {"presets": presets, "total": len(presets)}
+
+
+@router.post("/search-presets")
+def save_search_preset(payload: dict) -> dict:
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="预设名称不能为空")
+    now = datetime.now().isoformat()
+    preset_id = str(payload.get("id") or "").strip() or uuid4().hex
+    preset = {
+        "id": preset_id,
+        "name": name,
+        "keyword": str(payload.get("keyword") or "").strip(),
+        "city": str(payload.get("city") or "").strip(),
+        "max_pages": max(1, min(int(payload.get("max_pages") or 3), 10)),
+        "filters": payload.get("filters") if isinstance(payload.get("filters"), dict) else {},
+        "job_filters": payload.get("job_filters") if isinstance(payload.get("job_filters"), dict) else {},
+        "createdAt": str(payload.get("createdAt") or now),
+        "updatedAt": now,
+    }
+    presets = [item for item in _load_search_presets() if item.get("id") != preset_id]
+    presets.append(preset)
+    _save_search_presets(presets)
+    return {"preset": preset, "total": len(presets)}
+
+
+@router.delete("/search-presets/{preset_id}")
+def delete_search_preset(preset_id: str) -> dict:
+    presets = _load_search_presets()
+    next_presets = [item for item in presets if item.get("id") != preset_id]
+    _save_search_presets(next_presets)
+    return {"deleted": preset_id, "total": len(next_presets)}
+
+
 @router.post("/capture")
 def capture_sample() -> dict:
     """从示例数据抓取岗位。"""
+    if not is_demo_allowed():
+        raise HTTPException(status_code=403, detail="示例抓取仅在 demo/test 模式可用，生产模式请使用 BOSS 真实抓取或手动录入")
     existing = _dedupe_keys()
     try:
         new_jobs = ingest_sample_jobs(existing_dedupe_keys=existing)
@@ -273,13 +455,29 @@ def enrich_jd_details(payload: dict) -> dict:
     jobs_to_enrich = [_job_store[jid] for jid in job_ids if jid in _job_store]
     if not jobs_to_enrich:
         jobs_to_enrich = list(_job_store.values())
-    task = start_task("jd_enrich", "获取 JD 详情", total=min(len(jobs_to_enrich), max_jobs), payload={"job_ids": job_ids, "max_jobs": max_jobs})
+    task = start_task(
+        "jd_enrich",
+        "获取 JD 详情",
+        total=min(len(jobs_to_enrich), max_jobs),
+        payload={"job_ids": job_ids, "max_jobs": max_jobs},
+        idempotency_key=f"jd_enrich:{','.join(sorted(job.id for job in jobs_to_enrich))}:{max_jobs}",
+    )
     
     try:
+        start_time = datetime.now()
         enriched = enrich_jobs_with_details(jobs_to_enrich, max_jobs=max_jobs)
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
         removed_duplicates = _dedupe_store()
         removed = _apply_blacklist_to_store()
         _save_jobs()
+        for job in jobs_to_enrich[:max_jobs]:
+            log_api_call("boss_detail", "GET", job.source_url or "https://www.zhipin.com/job_detail/", 200, duration_ms, {
+                "scope": "detail",
+                "jobId": job.id,
+                "company": job.company,
+                "title": job.title,
+                "hasJd": bool((job.jd_text or "").strip()),
+            })
         message = f"JD 详情补充完成，成功 {int(enriched or 0)} 个"
         if removed_duplicates:
             message += f"，重复过滤 {removed_duplicates} 个"
@@ -303,6 +501,21 @@ def enrich_jd_details(payload: dict) -> dict:
         raise HTTPException(status_code=500, detail=f"JD 补充失败: {e}")
 
 
+@router.post("/enrich-jd/retry-failed/{task_id}")
+def retry_failed_jd_details(task_id: str) -> dict:
+    from app.services.workflow_tasks import get_task
+
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+    job_ids = payload.get("failed_job_ids") or payload.get("job_ids") or []
+    if not isinstance(job_ids, list) or not job_ids:
+        raise HTTPException(status_code=400, detail="任务中没有可重试的岗位 ID")
+    result = enrich_jd_details({"job_ids": job_ids, "max_jobs": int(payload.get("max_jobs") or len(job_ids))})
+    return {**result, "job_ids": [str(item) for item in job_ids]}
+
+
 @router.get("/capture/boss/status")
 def boss_login_status() -> dict:
     """检查 BOSS 直聘登录状态。"""
@@ -323,10 +536,19 @@ def capture_from_boss_endpoint(payload: dict) -> dict:
     max_pages = min(int(payload.get("max_pages", 3)), 10)
     headless = payload.get("headless", True)
     filters = normalize_capture_filters(payload.get("filters"))
-    task = start_task("job_capture", "BOSS 岗位抓取", total=max_pages, payload={"keyword": keyword, "city": city, "filters": filters})
+    batch_id = uuid4().hex
+    captured_at = datetime.now().isoformat()
+    task = start_task(
+        "job_capture",
+        "BOSS 岗位抓取",
+        total=max_pages,
+        payload={"keyword": keyword, "city": city, "filters": filters, "capture_batch_id": batch_id},
+        idempotency_key=f"job_capture:{keyword}:{city}:{max_pages}:{json.dumps(filters, ensure_ascii=False, sort_keys=True)}",
+    )
 
     existing = _dedupe_keys()
     try:
+        start_time = datetime.now()
         new_jobs = ingest_from_boss(
             keyword=keyword,
             city=city,
@@ -335,24 +557,66 @@ def capture_from_boss_endpoint(payload: dict) -> dict:
             filters=filters,
             existing_dedupe_keys=existing,
         )
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
     except RuntimeError as e:
+        log_api_call("boss_capture", "GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json", 401, 0, {
+            "scope": "summary",
+            "keyword": keyword,
+            "city": city,
+            "pages": max_pages,
+            "error": str(e)[:200],
+        })
         fail_task(task["id"], str(e), "BOSS_CAPTURE_FAILED", "重新登录 BOSS 或稍后重试")
         raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
+        log_api_call("boss_capture", "GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json", 500, 0, {
+            "scope": "summary",
+            "keyword": keyword,
+            "city": city,
+            "pages": max_pages,
+            "error": str(e)[:200],
+        })
         fail_task(task["id"], str(e), "BOSS_CAPTURE_FAILED", "检查网络和 BOSS 页面状态后重试")
         raise HTTPException(status_code=500, detail=f"Boss 抓取失败: {e}")
 
     new_jobs, removed_duplicates = _dedupe_new_jobs(new_jobs, existing)
     new_jobs, removed_jobs = filter_blacklisted_jobs(new_jobs)
+    per_page = max(1, round(len(new_jobs) / max_pages)) if max_pages else len(new_jobs)
+    for page in range(1, max_pages + 1):
+        page_count = len(new_jobs[(page - 1) * per_page: page * per_page]) if per_page else 0
+        log_api_call("boss_capture", "GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json", 200, duration_ms, {
+            "scope": "page",
+            "page": page,
+            "keyword": keyword,
+            "city": city,
+            "filters": filters,
+            "captured": page_count,
+            "captureBatchId": batch_id,
+        })
     for job in removed_jobs:
         job.lifecycle_status = "blacklisted"
         job.stale_reason = "企业在黑名单中，已隐藏"
     new_jobs = [*new_jobs, *removed_jobs]
     for job in new_jobs:
+        job.capture_batch_id = batch_id
+        job.capture_keyword = keyword
+        job.capture_city = city
+        job.capture_filters = filters
+        job.captured_at = captured_at
         _job_store[job.id] = job
     _save_jobs()
 
     message = f"岗位抓取完成，新增 {len(new_jobs)} 个"
+    log_api_call("boss_capture", "GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json", 200, duration_ms, {
+        "scope": "summary",
+        "keyword": keyword,
+        "city": city,
+        "pages": max_pages,
+        "captured": len(new_jobs),
+        "removedDuplicates": removed_duplicates,
+        "removedByBlacklist": len(removed_jobs),
+        "captureBatchId": batch_id,
+    })
     complete_task(task["id"], done=max_pages, message=message)
     return {
         "captured": len(new_jobs),
@@ -360,6 +624,7 @@ def capture_from_boss_endpoint(payload: dict) -> dict:
         "keyword": keyword,
         "city": city,
         "filters": filters,
+        "capture_batch_id": batch_id,
         "removed_duplicates": removed_duplicates,
         "removed_by_blacklist": len(removed_jobs),
     }
@@ -412,6 +677,7 @@ def add_company_blacklist(payload: CompanyBlacklistRequest) -> dict:
     except ValueError:
         raise HTTPException(status_code=400, detail="缺少公司名称")
     removed = _apply_blacklist_to_store()
+    log_event("warning", "blacklist", f"企业加入黑名单: {payload.company_name}", {"company": payload.company_name, "hiddenJobs": removed})
     return {"companies": companies, "total": len(companies), "removed": removed}
 
 
@@ -419,6 +685,7 @@ def add_company_blacklist(payload: CompanyBlacklistRequest) -> dict:
 def delete_company_blacklist(payload: CompanyBlacklistRequest) -> dict:
     companies = remove_company_from_blacklist(payload.company_name)
     restored = _restore_unblacklisted_jobs()
+    log_event("info", "blacklist", f"企业移出黑名单: {payload.company_name}", {"company": payload.company_name, "restoredJobs": restored})
     return {"companies": companies, "total": len(companies), "restored": restored}
 
 
@@ -453,6 +720,131 @@ def import_company_blacklist(payload: dict) -> dict:
 
 class JobIdsRequest(BaseModel):
     job_ids: list[str] = Field(default_factory=list)
+
+
+def _parse_import_items(payload: dict) -> list[dict]:
+    raw_items = payload.get("items")
+    if isinstance(raw_items, list):
+        return [item for item in raw_items if isinstance(item, dict)]
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            data = json.loads(text)
+            return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            return []
+    reader = csv.DictReader(io.StringIO(text))
+    return [dict(row) for row in reader]
+
+
+def _import_job_from_item(item: dict, index: int) -> tuple[JobRecord | None, str]:
+    title = str(item.get("title") or item.get("岗位") or item.get("职位") or "").strip()
+    company = str(item.get("company") or item.get("公司") or item.get("企业") or "").strip()
+    city = str(item.get("city") or item.get("城市") or "").strip()
+    if not title or not company:
+        return None, "缺少岗位名称或公司名称"
+    seed = "|".join([
+        str(item.get("id") or ""),
+        title,
+        company,
+        city,
+        str(item.get("source_url") or item.get("url") or item.get("链接") or ""),
+        str(index),
+    ])
+    job_id = str(item.get("id") or "").strip() or f"import-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:12]}"
+    job = JobRecord(
+        id=job_id,
+        title=title,
+        company=company,
+        city=city,
+        salary=str(item.get("salary") or item.get("薪资") or "").strip(),
+        jd_text=str(item.get("jd_text") or item.get("jd") or item.get("JD") or item.get("岗位描述") or "").strip(),
+        source=str(item.get("source") or "imported"),
+        source_url=str(item.get("source_url") or item.get("url") or item.get("链接") or "").strip(),
+        fetched_at=str(item.get("fetched_at") or datetime.now().isoformat()),
+        tags=[str(tag).strip() for tag in (item.get("tags") if isinstance(item.get("tags"), list) else []) if str(tag).strip()],
+    )
+    _refresh_job_dedupe_key(job)
+    return job, ""
+
+
+def _import_wizard_preview(payload: dict) -> dict:
+    items = _parse_import_items(payload)
+    existing_keys = _dedupe_keys()
+    seen_keys: set[str] = set()
+    creates = []
+    duplicates = []
+    invalid = []
+    for index, item in enumerate(items):
+        job, reason = _import_job_from_item(item, index)
+        if not job:
+            invalid.append({"index": index, "reason": reason})
+            continue
+        key = job.dedupe_key
+        if key in existing_keys or key in seen_keys or job.id in _job_store:
+            duplicates.append({"index": index, "jobId": job.id, "company": job.company, "title": job.title, "city": job.city})
+            continue
+        seen_keys.add(key)
+        creates.append(job)
+    return {
+        "kind": "jobs_import_wizard",
+        "summary": {
+            "total": len(items),
+            "creates": len(creates),
+            "duplicates": len(duplicates),
+            "invalid": len(invalid),
+        },
+        "creates": [job.model_dump() for job in creates[:20]],
+        "duplicates": duplicates[:20],
+        "invalid": invalid[:20],
+        "message": f"可新增 {len(creates)} 条，重复 {len(duplicates)} 条，无效 {len(invalid)} 条",
+    }
+
+
+@router.post("/import-wizard/preview")
+def preview_jobs_import(payload: dict) -> dict:
+    return _import_wizard_preview(payload)
+
+
+@router.post("/import-wizard/apply")
+def apply_jobs_import(payload: dict) -> dict:
+    preview = _import_wizard_preview(payload)
+    created = preview["creates"]
+    for item in created:
+        job = JobRecord.model_validate(item)
+        job.source = "imported"
+        _job_store[job.id] = job
+    if created:
+        _save_jobs()
+    log_event("info", "jobs_import", f"岗位导入完成：新增 {len(created)} 条", {"preview": preview["summary"]})
+    return {
+        "imported": len(created),
+        "skipped": int(preview["summary"]["duplicates"]) + int(preview["summary"]["invalid"]),
+        "total": len(_job_store),
+        "preview": preview,
+    }
+
+
+@router.get("/import-wizard/template")
+def download_jobs_import_template() -> Response:
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=["title", "company", "city", "salary", "source_url", "jd_text"])
+    writer.writeheader()
+    writer.writerow({
+        "title": "产品经理",
+        "company": "示例科技有限公司",
+        "city": "上海",
+        "salary": "20-30K",
+        "source_url": "https://www.zhipin.com/job_detail/example.html",
+        "jd_text": "负责产品规划、需求分析和跨团队协作。",
+    })
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="jobs-import-template.csv"'},
+    )
 
 
 def _status_rank(status: str) -> int:
@@ -502,6 +894,7 @@ def merge_duplicate_jobs(payload: JobIdsRequest) -> dict:
         del _job_store[jid]
         removed.append(jid)
     _save_jobs()
+    log_event("info", "job_merge", f"合并重复岗位，保留 {keeper.id}", {"kept": keeper.id, "removed": removed})
     return {"kept": keeper.id, "removed": removed, "job": keeper.model_dump(), "total": len(_job_store)}
 
 
@@ -517,6 +910,7 @@ def cleanup_expired_jobs(payload: JobIdsRequest | None = None) -> dict:
         del _job_store[jid]
         deleted += 1
     _save_jobs()
+    log_event("warning", "job_delete", f"删除疑似过期岗位 {deleted} 个", {"jobIds": list(target_ids), "deleted": deleted})
     return {"deleted": deleted, "total": len(_job_store)}
 
 
@@ -534,6 +928,7 @@ def keep_expired_jobs(payload: JobIdsRequest | None = None) -> dict:
         job.stale_reason = ""
         updated += 1
     _save_jobs()
+    log_event("info", "job_keep", f"恢复疑似过期岗位 {updated} 个", {"jobIds": list(target_ids), "updated": updated})
     return {"updated": updated, "total": len(_job_store)}
 
 
@@ -577,6 +972,99 @@ class JobDecisionRequest(BaseModel):
     status: str
 
 
+def _append_job_history(job: JobRecord, kind: str, value: str, previous: str = "", note: str = "") -> dict:
+    entry = {
+        "kind": kind,
+        "status": value,
+        "previous": previous,
+        "note": note,
+        "at": datetime.now().isoformat(),
+    }
+    job.status_history = [*(job.status_history or []), entry][-100:]
+    return entry
+
+
+@router.get("/{job_id}/history")
+def get_job_history(job_id: str) -> dict:
+    if job_id not in _job_store:
+        raise HTTPException(status_code=404, detail="岗位不存在")
+    return {"job_id": job_id, "history": _job_store[job_id].status_history or []}
+
+
+@router.get("/application-timeline")
+def application_timeline(limit: int = 50) -> dict:
+    events: list[dict] = []
+    summary = {status: 0 for status in APPLICATION_STATUSES}
+    for job in _all_jobs():
+        status = job.application_status if job.application_status in APPLICATION_STATUSES else "pending"
+        summary[status] += 1
+        for entry in job.status_history or []:
+            if entry.get("kind") != "application":
+                continue
+            events.append({
+                "jobId": job.id,
+                "title": job.title,
+                "company": job.company,
+                "city": job.city,
+                "status": entry.get("status") or "",
+                "previous": entry.get("previous") or "",
+                "note": entry.get("note") or "",
+                "at": entry.get("at") or "",
+            })
+    events.sort(key=lambda item: item.get("at") or "", reverse=True)
+    return {
+        "summary": summary,
+        "events": events[: max(1, min(int(limit or 50), 200))],
+        "total": len(events),
+    }
+
+
+@router.get("/application-board")
+def application_crm_board() -> dict:
+    labels = {
+        "pending": "待处理",
+        "greeted": "已打招呼",
+        "applied": "已投递",
+        "interviewing": "面试中",
+        "rejected": "已拒绝",
+        "abandoned": "已放弃",
+    }
+    columns = {
+        key: {"key": key, "label": label, "count": 0, "jobs": []}
+        for key, label in labels.items()
+    }
+    for job in _all_jobs():
+        status = job.application_status if job.application_status in columns else "pending"
+        item = {
+            "id": job.id,
+            "title": job.title,
+            "company": job.company,
+            "city": job.city,
+            "salary": job.salary,
+            "decisionStatus": job.decision_status,
+            "updatedAt": job.application_updated_at or job.fetched_at,
+            "note": job.application_note,
+        }
+        columns[status]["jobs"].append(item)
+        columns[status]["count"] += 1
+    for column in columns.values():
+        column["jobs"] = sorted(column["jobs"], key=lambda item: str(item.get("updatedAt") or ""), reverse=True)[:20]
+    return {
+        "summary": {"total": sum(column["count"] for column in columns.values())},
+        "columns": columns,
+        "generatedAt": datetime.now().isoformat(),
+    }
+
+
+@router.post("/application-board/move")
+def move_application_board_job(payload: JobStatusRequest) -> dict:
+    updated = update_job_status(payload)
+    return {
+        **updated,
+        "board": application_crm_board(),
+    }
+
+
 @router.post("/status")
 def update_job_status(payload: JobStatusRequest) -> dict:
     if payload.job_id not in _job_store:
@@ -585,11 +1073,14 @@ def update_job_status(payload: JobStatusRequest) -> dict:
     if status not in APPLICATION_STATUSES:
         raise HTTPException(status_code=400, detail="未知求职状态")
     job = _job_store[payload.job_id]
+    previous = job.application_status
     job.application_status = status
     job.application_note = payload.note.strip()
     job.application_updated_at = datetime.now().isoformat()
     job.greeted = status in {"greeted", "applied", "interviewing"}
+    entry = _append_job_history(job, "application", status, previous, job.application_note)
     _save_jobs()
+    log_event("info", "job_status", f"岗位状态从 {previous} 变更为 {status}", {"jobId": job.id, "company": job.company, "entry": entry})
     return {
         "job_id": payload.job_id,
         "application_status": job.application_status,
@@ -607,8 +1098,11 @@ def update_job_decision(payload: JobDecisionRequest) -> dict:
     if status not in DECISION_STATUSES:
         raise HTTPException(status_code=400, detail="未知决策标签")
     job = _job_store[payload.job_id]
+    previous = job.decision_status
     job.decision_status = status
+    entry = _append_job_history(job, "decision", status, previous)
     _save_jobs()
+    log_event("info", "job_decision", f"岗位决策从 {previous} 变更为 {status}", {"jobId": job.id, "company": job.company, "entry": entry})
     return {
         "job_id": payload.job_id,
         "decision_status": job.decision_status,
@@ -619,15 +1113,102 @@ def update_job_decision(payload: JobDecisionRequest) -> dict:
 class BatchDeleteRequest(BaseModel):
     job_ids: list[str]
 
+
+@router.post("/compare")
+def compare_jobs(payload: BatchDeleteRequest) -> dict:
+    job_ids = list(dict.fromkeys(payload.job_ids))
+    if len(job_ids) < 2 or len(job_ids) > 5:
+        raise HTTPException(status_code=400, detail="岗位对比需要选择 2-5 个岗位")
+    jobs = [_job_store[job_id] for job_id in job_ids if job_id in _job_store]
+    if len(jobs) != len(job_ids):
+        raise HTTPException(status_code=404, detail="部分岗位不存在")
+    comparison = {
+        "salary": [{"id": job.id, "value": job.salary, "min": job.salary_min, "max": job.salary_max} for job in jobs],
+        "jd_quality": [{"id": job.id, "value": 100 if (job.jd_text or "").strip() else 0} for job in jobs],
+        "lifecycle": [{"id": job.id, "value": job.lifecycle_status} for job in jobs],
+        "application": [{"id": job.id, "value": job.application_status} for job in jobs],
+        "decision": [{"id": job.id, "value": job.decision_status} for job in jobs],
+    }
+    return {"jobs": [job.model_dump() for job in jobs], "comparison": comparison}
+
+
+@router.get("/funnel")
+def application_funnel() -> dict:
+    jobs = _all_jobs()
+    total = len(jobs)
+    contacted_statuses = {"greeted", "applied", "interviewing", "rejected"}
+    contacted = sum(1 for job in jobs if job.application_status in contacted_statuses)
+    interviewed = sum(1 for job in jobs if job.application_status == "interviewing")
+    rejected = sum(1 for job in jobs if job.application_status == "rejected")
+    recommended = sum(1 for job in jobs if job.decision_status == "recommended")
+    status_counts = {status: 0 for status in APPLICATION_STATUSES}
+    batch_index: dict[str, dict] = {}
+    for job in jobs:
+        status = job.application_status if job.application_status in APPLICATION_STATUSES else "pending"
+        status_counts[status] += 1
+        batch_id = job.capture_batch_id or "manual"
+        batch = batch_index.setdefault(batch_id, {
+            "id": batch_id,
+            "total": 0,
+            "contacted": 0,
+            "interviewing": 0,
+            "recommended": 0,
+            "risky": 0,
+        })
+        batch["total"] += 1
+        if status in contacted_statuses:
+            batch["contacted"] += 1
+        if status == "interviewing":
+            batch["interviewing"] += 1
+        if job.decision_status == "recommended":
+            batch["recommended"] += 1
+        if job.decision_status == "risky" or job.lifecycle_status == "blacklisted":
+            batch["risky"] += 1
+    batches = []
+    for batch in batch_index.values():
+        base = batch["total"] or 1
+        batch["contactRate"] = round(batch["contacted"] / base * 100)
+        batch["interviewRate"] = round(batch["interviewing"] / base * 100)
+        batch["recommendRate"] = round(batch["recommended"] / base * 100)
+        batches.append(batch)
+    batches.sort(key=lambda item: (item["interviewRate"], item["recommendRate"], item["total"]), reverse=True)
+    recommendations = []
+    if total and contacted == 0:
+        recommendations.append("先完成第一批打招呼，系统才能形成真实转化复盘。")
+    if total and recommended / total < 0.25:
+        recommendations.append("推荐岗位占比较低，建议调整关键词、城市或筛选条件。")
+    if contacted and interviewed == 0:
+        recommendations.append("已触达但暂无面试，建议复查简历关键词和招呼语针对性。")
+    if rejected > interviewed and rejected >= 2:
+        recommendations.append("拒绝数高于面试数，建议降低风险岗位权重或收紧筛选条件。")
+    return {
+        "summary": {
+            "total": total,
+            "contacted": contacted,
+            "interviewing": interviewed,
+            "rejected": rejected,
+            "recommended": recommended,
+            "contactRate": round(contacted / total * 100) if total else 0,
+            "interviewRate": round(interviewed / total * 100) if total else 0,
+            "rejectionRate": round(rejected / total * 100) if total else 0,
+        },
+        "statusCounts": status_counts,
+        "batches": batches,
+        "recommendations": recommendations or ["当前求职漏斗健康，继续跟进推荐岗位。"],
+    }
+
 @router.delete("/batch")
 def delete_batch_jobs(payload: BatchDeleteRequest) -> dict:
     """批量删除岗位。"""
+    target_ids = [jid for jid in payload.job_ids if jid in _job_store]
+    _archive_jobs(target_ids)
     deleted = 0
     for jid in payload.job_ids:
         if jid in _job_store:
             del _job_store[jid]
             deleted += 1
     _save_jobs()
+    log_event("warning", "job_delete", f"批量删除岗位 {deleted} 个", {"jobIds": payload.job_ids, "deleted": deleted})
     return {"deleted": deleted, "total": len(_job_store)}
 
 
@@ -636,8 +1217,10 @@ def delete_job(job_id: str) -> dict:
     """删除单个岗位。"""
     if job_id not in _job_store:
         raise HTTPException(status_code=404, detail=f"岗位 {job_id} 不存在")
+    _archive_jobs([job_id])
     del _job_store[job_id]
     _save_jobs()
+    log_event("warning", "job_delete", f"删除岗位 {job_id}", {"jobId": job_id})
     return {"deleted": job_id, "total": len(_job_store)}
 
 
@@ -645,6 +1228,29 @@ def delete_job(job_id: str) -> dict:
 def clear_all_jobs() -> dict:
     """清空全部岗位。"""
     count = len(_job_store)
+    _archive_jobs(list(_job_store))
     _job_store.clear()
     _save_jobs()
+    log_event("error", "job_delete", f"清空全部岗位 {count} 个", {"deleted": count})
     return {"deleted": count, "total": 0}
+
+
+@router.post("/restore")
+def restore_deleted_jobs(payload: JobIdsRequest) -> dict:
+    restored = _restore_jobs(payload.job_ids)
+    log_event("info", "job_restore", f"恢复岗位 {restored} 个", {"jobIds": payload.job_ids, "restored": restored})
+    return {"restored": restored, "total": len(_job_store)}
+
+
+@router.get("/deleted")
+def list_deleted_jobs() -> dict:
+    archived = _read_json(DELETED_JOBS_FILE, {})
+    if not isinstance(archived, dict):
+        archived = {}
+    items = [
+        {"id": job_id, "deletedAt": item.get("deletedAt", ""), "job": item.get("job", {})}
+        for job_id, item in archived.items()
+        if isinstance(item, dict)
+    ]
+    items.sort(key=lambda item: item.get("deletedAt", ""), reverse=True)
+    return {"jobs": items, "total": len(items)}

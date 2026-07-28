@@ -143,6 +143,11 @@ describe("buildDiligenceEvidence", () => {
     expect(evidence.risk).toContain("列入经营异常");
     expect(evidence.searchLinks).toEqual(["https://example.com/news"]);
     expect(evidence.aiSignals).toEqual(["正面: 口碑稳定", "负面: 投诉较多"]);
+    expect(evidence.sourceTrust).toEqual([
+      { label: "工商 API", level: "high", description: "工商登记、司法风险和经营异常来自结构化接口，适合作为事实依据。" },
+      { label: "搜索证据", level: "medium", description: "搜索链接用于交叉验证舆情，需要人工打开复核发布时间和来源。" },
+      { label: "AI 归纳", level: "assistive", description: "AI 只负责压缩和解释信号，不能替代原始证据。" },
+    ]);
   });
 });
 

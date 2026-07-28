@@ -39,6 +39,12 @@ def _write_json(path: Path, payload: Any) -> None:
     write_json_atomic(path, payload)
 
 
+def _active_store() -> str:
+    cfg = _read_json(DATA_DIR / "storage" / "config.json", {})
+    store = str((cfg if isinstance(cfg, dict) else {}).get("activeStore") or "json").lower()
+    return "sqlite" if store == "sqlite" else "json"
+
+
 def _slug(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value).strip("_") or "unknown"
 
@@ -64,10 +70,19 @@ def save_diligence_report(report: dict) -> dict:
         "completedAt": report.get("completedAt") or datetime.now(timezone.utc).isoformat(),
     }
     _write_json(DATA_DIR / "diligence" / f"{_slug(company)}.json", saved)
+    if _active_store() == "sqlite":
+        from app.services import sqlite_kv_store
+        sqlite_kv_store.put("diligence", _company_key(saved), saved)
+        sqlite_kv_store.put("diligence_by_name", str(saved.get("companyName") or company), saved)
     return saved
 
 
 def load_diligence_reports() -> dict[str, dict]:
+    if _active_store() == "sqlite":
+        from app.services import sqlite_kv_store
+        stored = sqlite_kv_store.all("diligence_by_name")
+        if stored:
+            return {str(key): value for key, value in stored.items() if isinstance(value, dict)}
     root = DATA_DIR / "diligence"
     reports: dict[str, dict] = {}
     if not root.exists():
@@ -104,10 +119,18 @@ def find_diligence_report(identifier: str) -> dict | None:
 
 def save_rankings(rankings: list[dict]) -> list[dict]:
     _write_json(DATA_DIR / "rankings" / "latest.json", rankings)
+    if _active_store() == "sqlite":
+        from app.services import sqlite_kv_store
+        sqlite_kv_store.put("rankings", "latest", rankings)
     return rankings
 
 
 def load_rankings() -> list[dict]:
+    if _active_store() == "sqlite":
+        from app.services import sqlite_kv_store
+        stored = sqlite_kv_store.get("rankings", "latest", [])
+        if isinstance(stored, list):
+            return stored
     data = _read_json(DATA_DIR / "rankings" / "latest.json", [])
     return data if isinstance(data, list) else []
 
@@ -122,7 +145,7 @@ def load_greetings() -> dict[str, str]:
     return data if isinstance(data, dict) else {}
 
 
-def save_send_record(job_id: str, status: str, note: str = "") -> dict:
+def save_send_record(job_id: str, status: str, note: str = "", message: str = "", dry_run: bool = False) -> dict:
     if not job_id:
         raise ValueError("job_id is required")
     records = load_send_records()
@@ -133,6 +156,8 @@ def save_send_record(job_id: str, status: str, note: str = "") -> dict:
         "jobId": job_id,
         "status": status,
         "note": note,
+        "message": message,
+        "dryRun": dry_run,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
     records = [record for record in records if record.get("jobId") != job_id] + [record]

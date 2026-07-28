@@ -171,6 +171,11 @@ export function buildDiligenceEvidence(report: DiligenceReport): {
   risk: string[];
   searchLinks: string[];
   aiSignals: string[];
+  sourceTrust: Array<{
+    label: string;
+    level: "high" | "medium" | "assistive";
+    description: string;
+  }>;
 } {
   const businessInfo = report.businessInfo as BusinessInfo | undefined;
   const business: string[] = [];
@@ -205,5 +210,22 @@ export function buildDiligenceEvidence(report: DiligenceReport): {
     risk,
     searchLinks: report.sentiment?.evidenceLinks || [],
     aiSignals,
+    sourceTrust: [
+      {
+        label: "工商 API",
+        level: "high",
+        description: "工商登记、司法风险和经营异常来自结构化接口，适合作为事实依据。",
+      },
+      {
+        label: "搜索证据",
+        level: "medium",
+        description: "搜索链接用于交叉验证舆情，需要人工打开复核发布时间和来源。",
+      },
+      {
+        label: "AI 归纳",
+        level: "assistive",
+        description: "AI 只负责压缩和解释信号，不能替代原始证据。",
+      },
+    ],
   };
 }

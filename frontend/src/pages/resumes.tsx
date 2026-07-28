@@ -2,8 +2,9 @@ import { useState, useEffect, useRef, useCallback, type ChangeEvent } from "reac
 import {
   parseResumeFile, evaluateResume, listUploadedFiles, reEnrichResume,
   deleteUploadedFile, loadResume, getActiveResume, updateProfile
+  , listResumeVersions, saveResumeVersion, compareResumeVersions, listPdfTemplates, getPdfPreviewOptions
 } from "../lib/api";
-import type { UploadedFile, ResumeProfile, ResumeEvaluation } from "../lib/types";
+import type { UploadedFile, ResumeProfile, ResumeEvaluation, ResumeVersion } from "../lib/types";
 import { useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
 import ChatPanel from "../components/ChatPanel";
 import { ErrorBanner } from "../components/SharedUI";
@@ -37,6 +38,11 @@ export default function ResumesPage() {
   const [error, setError] = useState("");
   const [evalFailed, setEvalFailed] = useState(false);
   const [parseStatus, setParseStatus] = useState("");
+  const [versions, setVersions] = useState<ResumeVersion[]>([]);
+  const [versionSummary, setVersionSummary] = useState<string[]>([]);
+  const [pdfTemplates, setPdfTemplates] = useState<Record<string, { name: string; description: string; font: string; density: string; bestFor: string[]; layout: string }>>({});
+  const [pdfDensityOptions, setPdfDensityOptions] = useState<Array<{ key: string; label: string; description: string }>>([]);
+  const [pdfDensity, setPdfDensity] = useState("balanced");
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadIdRef = useRef(0);
@@ -71,6 +77,13 @@ export default function ResumesPage() {
       }
     }).catch(() => {});
     listUploadedFiles().then(r => { if (!c && r.files?.length > 0) setFiles(r.files); }).catch(() => {});
+    listResumeVersions().then(r => { if (!c) setVersions(r.versions || []); }).catch(() => {});
+    Promise.all([listPdfTemplates(), getPdfPreviewOptions()]).then(([templates, options]) => {
+      if (c) return;
+      setPdfTemplates(options.templates || templates.templates || {});
+      setPdfDensityOptions(options.densityOptions || []);
+      setPdfDensity(options.defaultDensity || "balanced");
+    }).catch(() => {});
     return () => { c = true; };
   }, []);
 
@@ -129,6 +142,7 @@ export default function ResumesPage() {
       setDisplayName(files.find(f => f.id === id)?.filename || id);
       if (d.eval) setEvaluation(d.eval as ResumeEvaluation);
       if (d.parse_status === "pending_ai") setParseStatus("pending_ai"); else setParseStatus("");
+      listResumeVersions().then(r => setVersions(r.versions || [])).catch(() => {});
     } catch (err) { if (loadIdRef.current === lid) setError(err instanceof Error ? err.message : "加载失败"); }
     finally { if (loadIdRef.current === lid) setSwitching(false); }
   }
@@ -185,6 +199,26 @@ export default function ResumesPage() {
     try { await reEnrichResume(); } catch (err) { setError(err instanceof Error ? err.message : "重新解析失败"); setParseStatus(""); }
   }
 
+  async function onSaveVersion() {
+    if (!profile) return;
+    try {
+      const r = await saveResumeVersion({ label: `手动保存 ${new Date().toLocaleString("zh-CN")}`, profile });
+      setVersions(r.versions || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存版本失败");
+    }
+  }
+
+  async function onCompareVersions() {
+    if (versions.length < 2) return;
+    try {
+      const result = await compareResumeVersions({ from_index: 0, to_index: versions.length - 1 });
+      setVersionSummary(result.summary || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "版本对比失败");
+    }
+  }
+
   const busy = parsing || switching;
   const comp = parseCompleteness(profile);
 
@@ -212,9 +246,70 @@ export default function ResumesPage() {
             </button>
           )}
           {comp && <span className="tag">{comp}</span>}
+          {profile && (
+            <>
+              <button type="button" className="button-secondary" onClick={onSaveVersion} style={{ fontSize: 12 }}>保存版本</button>
+              <button type="button" className="button-quiet" onClick={onCompareVersions} disabled={versions.length < 2} style={{ fontSize: 12 }}>对比版本</button>
+              {versions.length > 0 && <span className="tag tag--muted">版本 {versions.length}</span>}
+            </>
+          )}
           {switching && <span className="text-muted" style={{ fontSize: 12 }}>切换中…</span>}
         </div>
       </div>
+
+      {versionSummary.length > 0 && (
+        <div className="panel panel-strong" style={{ marginBottom: 12 }}>
+          <div className="panel-inner">
+            <div className="page-kicker" style={{ marginBottom: 8 }}>版本对比</div>
+            <div className="job-tags">
+              {versionSummary.map(item => <span key={item} className="tag tag--active">{item}</span>)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {Object.keys(pdfTemplates).length > 0 && (
+        <div className="panel panel-strong" style={{ marginBottom: 12 }}>
+          <div className="panel-inner">
+            <div className="page-section__top" style={{ marginBottom: 8 }}>
+              <div>
+                <div className="page-kicker">PDF 模板</div>
+                <p className="capture-panel-copy">按岗位类型选择合适版式，导出时会自动使用推荐模板。</p>
+              </div>
+            </div>
+            <div className="pdf-template-grid">
+              {Object.entries(pdfTemplates).map(([key, tpl]) => (
+                <div key={key} className="pdf-template-card">
+                  <strong>{tpl.name}</strong>
+                  <p>{tpl.description}</p>
+                  <div className="job-tags">
+                    <span className="tag tag--muted">{tpl.density}</span>
+                    <span className="tag tag--muted">{tpl.layout}</span>
+                    {tpl.bestFor.slice(0, 3).map(item => <span key={item} className="tag">{item}</span>)}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {pdfDensityOptions.length > 0 && (
+              <div className="pdf-density-strip">
+                <span>字体密度</span>
+                {pdfDensityOptions.map(option => (
+                  <button
+                    type="button"
+                    key={option.key}
+                    className={pdfDensity === option.key ? "tag tag--active" : "tag tag--muted"}
+                    onClick={() => setPdfDensity(option.key)}
+                    title={option.description}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+                <small>{pdfDensityOptions.find(item => item.key === pdfDensity)?.description || "导出 PDF 前可先预览版式。"}</small>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {!profile ? (
         <div className="panel panel-strong" style={{ cursor: "pointer" }} onClick={() => fileInputRef.current?.click()}>

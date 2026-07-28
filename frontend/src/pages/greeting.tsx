@@ -2,16 +2,39 @@ import { useState, useEffect } from "react";
 import {
   listJobPool as poolJobs,
   analyzeJD,
+  checkGreetingSelectorHealth,
   aiOptimizeResume,
+  controlGreetingSend,
+  dryRunGreetings,
   exportResumePdf,
+  getGreetingAutoSendSettings,
+  getGreetingAcceptancePlan,
+  getGreetingAcceptanceRecords,
+  getGreetingCandidates,
+  getGreetingFollowups,
+  getGreetingFinalConfirmation,
+  getGreetingFrequencyProfiles,
+  getGreetingProgress,
+  getGreetingReplies,
+  getGreetingRecoveryPanel,
+  getGreetingStats,
+  getGreetingSafetySummary,
 	  tagJob,
 	  confirmSendRecord,
 	  updateSendRecord,
   getGreetingDrafts,
   getSendRecords,
+  saveGreetingAcceptanceRecord,
   saveGreetingDrafts,
+  saveGreetingReply,
+  saveGreetingAutoSendSettings,
+  sendGreetingConfirmations,
+  preflightGreetings,
+  validateGreetingMessages,
+  recommendPdfTemplate,
+  previewResumePdf,
 } from "../lib/api";
-import type { JobPosting } from "../lib/types";
+import type { GreetingAcceptancePlan, GreetingAcceptanceRecord, GreetingCandidateResponse, GreetingDryRunResponse, GreetingFinalConfirmation, GreetingFollowups, GreetingFrequencyProfile, GreetingPreflight, GreetingProgress, GreetingRecoveryPanel, GreetingReplyRecord, GreetingSafetySummary, GreetingSelectorHealth, GreetingSendResponse, GreetingStats, GreetingValidationResult, JobPosting } from "../lib/types";
 import { useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
 import ChatPanel from "../components/ChatPanel";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
@@ -28,6 +51,36 @@ export default function GreetingPage() {
   const [tagInputs, setTagInputs] = useState<Record<string, string>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [pdfTemplate, setPdfTemplate] = useState<"modern" | "classic" | "ats">("modern");
+  const [pdfDensity] = useState("balanced");
+  const [pdfTemplateReason, setPdfTemplateReason] = useState("");
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState("");
+  const [pdfPreviewTitle, setPdfPreviewTitle] = useState("");
+  const [candidateResult, setCandidateResult] = useState<GreetingCandidateResponse | null>(null);
+  const [dryRunResult, setDryRunResult] = useState<GreetingDryRunResponse | null>(null);
+  const [sendResult, setSendResult] = useState<GreetingSendResponse | null>(null);
+  const [validationResults, setValidationResults] = useState<Record<string, GreetingValidationResult>>({});
+  const [workbenchLoading, setWorkbenchLoading] = useState("");
+  const [autoBatchLimit, setAutoBatchLimit] = useState(3);
+  const [autoDailyLimit, setAutoDailyLimit] = useState(15);
+  const [autoIntervalSeconds, setAutoIntervalSeconds] = useState(8);
+  const [autoSendEnabled, setAutoSendEnabled] = useState(false);
+  const [grayModeEnabled, setGrayModeEnabled] = useState(true);
+  const [frequencyProfiles, setFrequencyProfiles] = useState<GreetingFrequencyProfile[]>([]);
+  const [preflightResult, setPreflightResult] = useState<GreetingPreflight | null>(null);
+  const [progress, setProgress] = useState<GreetingProgress | null>(null);
+  const [greetingStats, setGreetingStats] = useState<GreetingStats | null>(null);
+  const [safetySummary, setSafetySummary] = useState<GreetingSafetySummary | null>(null);
+  const [selectorHealth, setSelectorHealth] = useState<GreetingSelectorHealth | null>(null);
+  const [acceptancePlan, setAcceptancePlan] = useState<GreetingAcceptancePlan | null>(null);
+  const [acceptanceRecords, setAcceptanceRecords] = useState<GreetingAcceptanceRecord[]>([]);
+  const [replyRecords, setReplyRecords] = useState<GreetingReplyRecord[]>([]);
+  const [followups, setFollowups] = useState<GreetingFollowups | null>(null);
+  const [recoveryPanel, setRecoveryPanel] = useState<GreetingRecoveryPanel | null>(null);
+  const [finalConfirmation, setFinalConfirmation] = useState<GreetingFinalConfirmation | null>(null);
+
+  useEffect(() => () => {
+    if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
+  }, [pdfPreviewUrl]);
 
   useEffect(() => {
     poolJobs().then(r => {
@@ -61,6 +114,37 @@ export default function GreetingPage() {
       })
       .catch(() => {});
   }, [dispatch]);
+
+  useEffect(() => {
+    Promise.all([
+      getGreetingAutoSendSettings(),
+      getGreetingFrequencyProfiles(),
+      getGreetingProgress(),
+      getGreetingStats(),
+      getGreetingSafetySummary(),
+      getGreetingFollowups(),
+      getGreetingRecoveryPanel(),
+      getGreetingAcceptanceRecords(),
+      getGreetingReplies(),
+    ]).then(([settingsResult, profilesResult, progressResult, statsResult, safetyResult, followupResult, recoveryResult, acceptanceResult, repliesResult]) => {
+      setAutoSendEnabled(!!settingsResult.settings.auto_send_enabled);
+      setGrayModeEnabled(settingsResult.settings.gray_mode_enabled !== false);
+      setFrequencyProfiles(profilesResult.profiles || settingsResult.profiles || []);
+      setProgress(progressResult);
+      setGreetingStats(statsResult);
+      setSafetySummary(safetyResult);
+      setFollowups(followupResult);
+      setRecoveryPanel(recoveryResult);
+      setAcceptanceRecords(acceptanceResult.records || []);
+      setReplyRecords(repliesResult.records || []);
+    }).catch((err) => {
+      console.warn("[greeting] 加载自动发送设置失败:", err);
+    });
+    const timer = window.setInterval(() => {
+      getGreetingProgress().then(setProgress).catch(() => {});
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // 确保 JD 分析存在 — 优先从 store 读取，没有则请求
   async function ensureJDAnalysis(job: JobPosting) {
@@ -127,12 +211,297 @@ export default function GreetingPage() {
     navigator.clipboard.writeText(text).then(() => { setCopiedId(jobId); setTimeout(() => setCopiedId(null), 2000); }).catch(() => {});
   }
 
+  async function refreshGreetingCandidates() {
+    setWorkbenchLoading("候选筛选中…");
+    setError("");
+    try {
+      setCandidateResult(await getGreetingCandidates(selectedJobIds));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "候选筛选失败");
+    } finally {
+      setWorkbenchLoading("");
+    }
+  }
+
+  async function onDryRunGreetings() {
+    setWorkbenchLoading("生成草稿中…");
+    setError("");
+    try {
+      const result = await dryRunGreetings({
+        job_ids: selectedJobIds,
+        resume_summary: resumeProfile?.summary || resumeProfile?.title || "",
+        style: "稳妥自然",
+      });
+      setDryRunResult(result);
+      const next = { ...greetingTexts };
+      result.records.forEach(record => {
+        if (record.message) next[record.jobId] = record.message;
+      });
+      dispatch(actions.setGreetingTexts(next));
+      if (!candidateResult) {
+        await refreshGreetingCandidates();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "dry-run 失败");
+    } finally {
+      setWorkbenchLoading("");
+    }
+  }
+
+  async function validateCurrentGreetings() {
+    const items = selectedJobIds
+      .map(jobId => ({ job_id: jobId, message: greetingTexts[jobId] || "" }))
+      .filter(item => item.message.trim());
+    if (items.length === 0) {
+      setError("暂无可校验的招呼语，请先生成草稿");
+      return;
+    }
+    setWorkbenchLoading("校验中…");
+    setError("");
+    try {
+      const result = await validateGreetingMessages(items);
+      setValidationResults(Object.fromEntries(result.results.map(item => [item.jobId, item])));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "校验失败");
+    } finally {
+      setWorkbenchLoading("");
+    }
+  }
+
+  function selectedGreetingMessages() {
+    return Object.fromEntries(
+      selectedJobIds
+        .map(jobId => [jobId, greetingTexts[jobId] || ""] as const)
+        .filter(([, message]) => message.trim())
+    );
+  }
+
+  async function toggleAutoSendEnabled(nextValue: boolean) {
+    setAutoSendEnabled(nextValue);
+    try {
+      const saved = await saveGreetingAutoSendSettings({ auto_send_enabled: nextValue, profile: "standard", gray_mode_enabled: grayModeEnabled });
+      setAutoSendEnabled(!!saved.settings.auto_send_enabled);
+      setGrayModeEnabled(saved.settings.gray_mode_enabled !== false);
+      getGreetingSafetySummary().then(setSafetySummary).catch(() => {});
+    } catch (err) {
+      setAutoSendEnabled(!nextValue);
+      setError(err instanceof Error ? err.message : "自动发送设置保存失败");
+    }
+  }
+
+  async function toggleGrayMode(nextValue: boolean) {
+    setGrayModeEnabled(nextValue);
+    try {
+      const saved = await saveGreetingAutoSendSettings({
+        auto_send_enabled: autoSendEnabled,
+        profile: "standard",
+        gray_mode_enabled: nextValue,
+        gray_first_success_required: true,
+      });
+      setGrayModeEnabled(saved.settings.gray_mode_enabled !== false);
+      getGreetingSafetySummary().then(setSafetySummary).catch(() => {});
+    } catch (err) {
+      setGrayModeEnabled(!nextValue);
+      setError(err instanceof Error ? err.message : "灰度模式保存失败");
+    }
+  }
+
+  function applyFrequencyProfile(profile: GreetingFrequencyProfile) {
+    setAutoBatchLimit(profile.batchLimit);
+    setAutoIntervalSeconds(profile.intervalSeconds);
+    setAutoDailyLimit(profile.dailyLimit);
+    saveGreetingAutoSendSettings({ auto_send_enabled: autoSendEnabled, profile: profile.key, gray_mode_enabled: grayModeEnabled }).catch(() => {});
+  }
+
+  async function runPreflight() {
+    const messages = selectedGreetingMessages();
+    if (Object.keys(messages).length === 0) {
+      setError("暂无可预检的招呼语，请先生成草稿");
+      return;
+    }
+    setWorkbenchLoading("预检中…");
+    setError("");
+    try {
+      setPreflightResult(await preflightGreetings({ job_ids: selectedJobIds, messages, mode: "browser_auto" }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "发送前预检失败");
+    } finally {
+      setWorkbenchLoading("");
+    }
+  }
+
+  async function runSelectorHealth() {
+    const firstJobId = selectedJobIds[0];
+    if (!firstJobId) return;
+    setWorkbenchLoading("检测页面中…");
+    setError("");
+    try {
+      setSelectorHealth(await checkGreetingSelectorHealth(firstJobId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "选择器健康检查失败");
+    } finally {
+      setWorkbenchLoading("");
+    }
+  }
+
+  async function loadAcceptancePlan() {
+    const firstJobId = selectedJobIds[0];
+    if (!firstJobId) return;
+    try {
+      setAcceptancePlan(await getGreetingAcceptancePlan(firstJobId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "人工验收步骤加载失败");
+    }
+  }
+
+  async function recordAcceptance(job: JobPosting) {
+    try {
+      const result = await saveGreetingAcceptanceRecord({
+        job_id: job.id,
+        result: "passed",
+        operator: "本机用户",
+        note: "已按人工验收步骤检查 BOSS 页面和发送结果",
+        checks: [
+          { key: "open_job", status: "passed", note: "岗位详情已打开" },
+          { key: "confirm_send", status: "passed", note: "发送结果已人工确认" },
+        ],
+      });
+      setAcceptanceRecords(prev => [result.record, ...prev]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "验收记录保存失败");
+    }
+  }
+
+  async function recordReply(job: JobPosting) {
+    const content = window.prompt("记录 HR 回复内容或摘要");
+    if (!content?.trim()) return;
+    const replyType = window.confirm("这次回复是否偏积极？") ? "positive" : "neutral";
+    try {
+      const result = await saveGreetingReply({
+        job_id: job.id,
+        reply_type: replyType,
+        content: content.trim(),
+        next_action: replyType === "positive" ? "准备下一轮沟通或面试时间" : "继续观察并择机跟进",
+      });
+      setReplyRecords(prev => [result.record, ...prev]);
+      getGreetingStats().then(setGreetingStats).catch(() => {});
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "回复记录保存失败");
+    }
+  }
+
+  async function updateControl(action: "pause" | "resume" | "stop") {
+    try {
+      const result = await controlGreetingSend(action);
+      setProgress(prev => ({ control: result.control, task: prev?.task || null, recent: prev?.recent || [] }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "发送控制失败");
+    }
+  }
+
+  async function sendSelectedGreetings(mode: "manual_confirm" | "browser_auto") {
+    const messages = selectedGreetingMessages();
+    if (Object.keys(messages).length === 0) {
+      setError("暂无可确认发送的招呼语，请先生成草稿");
+      return;
+    }
+    const confirmation = await getGreetingFinalConfirmation({
+      job_ids: selectedJobIds,
+      messages,
+      mode,
+      daily_limit: autoDailyLimit,
+      batch_limit: mode === "browser_auto" ? autoBatchLimit : 5,
+    });
+    setFinalConfirmation(confirmation);
+    if (confirmation.status === "blocked") {
+      setError(confirmation.riskItems.join("；") || "当前批次暂不适合发送");
+      return;
+    }
+    const riskCopy = confirmation.riskItems.length ? `\n风险项：${confirmation.riskItems.join("；")}` : "";
+    const linkCopy = confirmation.links.slice(0, 5).join("\n");
+    const ok = window.confirm(`${confirmation.confirmText}${riskCopy}\n\n将打开链接：\n${linkCopy || "无外部链接"}`);
+    if (!ok) return;
+    setWorkbenchLoading(mode === "browser_auto" ? "自动发送中…" : "确认发送中…");
+    setError("");
+    try {
+      const result = await sendGreetingConfirmations({
+        job_ids: selectedJobIds,
+        messages,
+        confirm: true,
+        mode,
+        batch_limit: mode === "browser_auto" ? autoBatchLimit : 5,
+        daily_limit: autoDailyLimit,
+        send_interval_seconds: mode === "browser_auto" ? autoIntervalSeconds : 0,
+        stop_on_blocked: true,
+      });
+      setSendResult(result);
+      getGreetingStats().then(setGreetingStats).catch(() => {});
+      getGreetingProgress().then(setProgress).catch(() => {});
+      getGreetingSafetySummary().then(setSafetySummary).catch(() => {});
+      if (result.records.length > 0) {
+        setGreetedStatus(prev => {
+          const next = { ...prev };
+          result.records.forEach(record => {
+            if (record.status === "sent") next[record.jobId] = true;
+          });
+          return next;
+        });
+      }
+      await refreshGreetingCandidates();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "发送失败");
+    } finally {
+      setWorkbenchLoading("");
+    }
+  }
+
+  async function confirmSelectedGreetingsSent() {
+    await sendSelectedGreetings("manual_confirm");
+  }
+
+  async function autoSendSelectedGreetings() {
+    await sendSelectedGreetings("browser_auto");
+  }
+
   async function onExportPdf(job: JobPosting) {
     const opt = optimizations[job.id]; if (!opt || !resumeProfile) return;
     setLoading(prev => ({ ...prev, [job.id + "-pdf"]: "导出中…" }));
-    try { await exportResumePdf({ profile: resumeProfile, optimization: opt, company: job.company, job_title: resumeProfile.title || job.title, template: pdfTemplate }); }
+    try { await exportResumePdf({ profile: resumeProfile, optimization: opt, company: job.company, job_title: resumeProfile.title || job.title, template: pdfTemplate, density: pdfDensity }); }
     catch (err) { setError(err instanceof Error ? err.message : "导出失败"); }
     finally { setLoading(prev => ({ ...prev, [job.id + "-pdf"]: "" })); }
+  }
+
+  async function onRecommendTemplate(job: JobPosting) {
+    try {
+      const r = await recommendPdfTemplate({ job_title: job.title, profile: resumeProfile });
+      setPdfTemplate(r.template);
+      setPdfTemplateReason(r.reason);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "模板推荐失败");
+    }
+  }
+
+  async function onPreviewPdf(job: JobPosting) {
+    const opt = optimizations[job.id];
+    if (!opt || !resumeProfile) return;
+    setLoading(prev => ({ ...prev, [job.id + "-preview"]: "预览生成中…" }));
+    try {
+      if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
+      const url = await previewResumePdf({
+        profile: resumeProfile,
+        optimization: opt,
+        company: job.company,
+        job_title: resumeProfile.title || job.title,
+        template: pdfTemplate,
+        density: pdfDensity,
+      });
+      setPdfPreviewUrl(url);
+      setPdfPreviewTitle(`${job.company} · ${job.title}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "预览失败");
+    } finally {
+      setLoading(prev => ({ ...prev, [job.id + "-preview"]: "" }));
+    }
   }
 
   const bossUrl = (job: JobPosting) => job.source_url || `https://www.zhipin.com/web/geek/job?query=${encodeURIComponent(job.title)}&city=100010000`;
@@ -148,14 +517,304 @@ export default function GreetingPage() {
       </div>
 
       {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}
+      {pdfPreviewUrl && (
+        <div className="pdf-preview-dialog" role="dialog" aria-label="PDF 简历预览">
+          <div className="pdf-preview-dialog__header">
+            <strong>PDF 简历预览 · {pdfPreviewTitle}</strong>
+            <button type="button" className="button-quiet" onClick={() => setPdfPreviewUrl("")}>关闭</button>
+          </div>
+          <iframe title="PDF 简历预览" src={pdfPreviewUrl} />
+        </div>
+      )}
 
       {selectedJobIds.length === 0 && (
         <div className="panel panel-strong"><div className="panel-inner"><EmptyState icon="👋" title="尚未选择岗位" desc="请在「排序」页面勾选岗位后进入此页面。" /></div></div>
       )}
 
+      {selectedJobIds.length > 0 && (
+        <div className="panel panel-strong greeting-workbench">
+          <div className="panel-inner">
+            <div className="page-section__top">
+              <div>
+                <p className="page-kicker">智能打招呼工作台</p>
+                <h3 className="section-title">先生成、校验和审核，再由你决定是否发送</h3>
+                <p className="text-muted">支持 dry-run、人工确认和真实自动发送；真实发送需先打开总开关并通过预检。</p>
+              </div>
+              <div className="toolbar-row toolbar-row--wrap">
+                <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={refreshGreetingCandidates}>
+                  筛选候选
+                </button>
+                <button type="button" className="button-primary" disabled={!!workbenchLoading} onClick={onDryRunGreetings}>
+                  {workbenchLoading || "dry-run 生成草稿"}
+                </button>
+                <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={validateCurrentGreetings}>
+                  校验当前话术
+                </button>
+                <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={confirmSelectedGreetingsSent}>
+                  确认已人工发送
+                </button>
+                <button type="button" className="button-primary" disabled={!!workbenchLoading || !autoSendEnabled} onClick={autoSendSelectedGreetings}>
+                  自动打开 BOSS 发送
+                </button>
+              </div>
+            </div>
+
+            <div className="greeting-auto-controls">
+              <label className="greeting-toggle">
+                <input
+                  type="checkbox"
+                  checked={autoSendEnabled}
+                  onChange={event => toggleAutoSendEnabled(event.target.checked)}
+                />
+                <span>允许真实自动发送</span>
+              </label>
+              <label className="greeting-toggle">
+                <input
+                  type="checkbox"
+                  checked={grayModeEnabled}
+                  onChange={event => toggleGrayMode(event.target.checked)}
+                />
+                <span>灰度模式</span>
+              </label>
+              <label>
+                <span>自动单批</span>
+                <input
+                  className="form-input form-input--inline"
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={autoBatchLimit}
+                  onChange={event => setAutoBatchLimit(Math.max(1, Math.min(10, Number(event.target.value) || 1)))}
+                />
+              </label>
+              <label>
+                <span>发送间隔(秒)</span>
+                <input
+                  className="form-input form-input--inline"
+                  type="number"
+                  min={3}
+                  max={30}
+                  value={autoIntervalSeconds}
+                  onChange={event => setAutoIntervalSeconds(Math.max(3, Math.min(30, Number(event.target.value) || 3)))}
+                />
+              </label>
+              <label>
+                <span>今日上限</span>
+                <input
+                  className="form-input form-input--inline"
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={autoDailyLimit}
+                  onChange={event => setAutoDailyLimit(Math.max(1, Math.min(100, Number(event.target.value) || 1)))}
+                />
+              </label>
+              <label>
+                <span>频率模板</span>
+                <select
+                  className="form-input form-input--inline"
+                  onChange={event => {
+                    const profile = frequencyProfiles.find(item => item.key === event.target.value);
+                    if (profile) applyFrequencyProfile(profile);
+                  }}
+                  defaultValue=""
+                >
+                  <option value="" disabled>选择模板</option>
+                  {frequencyProfiles.map(profile => (
+                    <option key={profile.key} value={profile.key}>{profile.label}</option>
+                  ))}
+                </select>
+              </label>
+              <small>{grayModeEnabled ? "灰度模式会要求先成功发送 1 个岗位，再开放批量真实发送。" : "遇到登录失效、验证码或风控会停止剩余岗位。"}</small>
+            </div>
+
+            <div className="greeting-control-strip">
+              <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={runPreflight}>发送前预检</button>
+              <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={() => getGreetingSafetySummary().then(setSafetySummary).catch(() => {})}>刷新安全阈值</button>
+              <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={() => getGreetingRecoveryPanel().then(setRecoveryPanel).catch(() => {})}>刷新失败恢复</button>
+              <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={runSelectorHealth}>检测页面可用性</button>
+              <button type="button" className="button-secondary" onClick={loadAcceptancePlan}>人工验收步骤</button>
+              <button type="button" className="button-quiet" onClick={() => updateControl("pause")}>暂停</button>
+              <button type="button" className="button-quiet" onClick={() => updateControl("resume")}>继续</button>
+              <button type="button" className="button-quiet button-danger" onClick={() => updateControl("stop")}>终止</button>
+              <span>控制状态：{progress?.control.state === "paused" ? "已暂停" : progress?.control.state === "stopped" ? "已终止" : "运行中"}</span>
+              {progress?.task && <span>当前任务：{progress.task.done}/{progress.task.total} · {progress.task.message || progress.task.status}</span>}
+            </div>
+
+            {safetySummary && (
+              <div className={`greeting-preflight greeting-preflight--${safetySummary.status === "blocked" ? "error" : safetySummary.status}`}>
+                <strong>自动发送安全阈值：{safetySummary.status === "blocked" ? "建议暂停" : safetySummary.status === "warn" ? "需关注" : "正常"}</strong>
+                <span className="tag tag--muted">今日 {safetySummary.summary.sentToday}</span>
+                <span className={safetySummary.summary.failedStreak >= 3 ? "tag tag--red" : "tag tag--green"}>连续失败 {safetySummary.summary.failedStreak}</span>
+                {safetySummary.summary.grayMode && (
+                  <span className={safetySummary.summary.grayMode.batchAllowed ? "tag tag--green" : "tag tag--muted"}>
+                    {safetySummary.summary.grayMode.batchAllowed ? "灰度已通过" : "灰度待首发"}
+                  </span>
+                )}
+                {safetySummary.checks.map(check => (
+                  <span key={check.key} className={`tag ${check.status === "ok" ? "tag--green" : check.status === "error" ? "tag--red" : "tag--muted"}`}>
+                    {check.message}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {finalConfirmation && (
+              <div className={`greeting-preflight greeting-preflight--${finalConfirmation.status === "ok" ? "ok" : "error"}`}>
+                <strong>最终确认摘要：{finalConfirmation.summary.jobCount} 个岗位 · 剩余额度 {finalConfirmation.summary.remaining}</strong>
+                <span className="tag tag--muted">有效话术 {finalConfirmation.summary.validMessages}</span>
+                <span className="tag tag--muted">链接 {finalConfirmation.links.length}</span>
+                {finalConfirmation.riskItems.map(item => <span key={item} className="tag tag--red">{item}</span>)}
+              </div>
+            )}
+
+            {recoveryPanel && recoveryPanel.summary.failed > 0 && (
+              <div className="greeting-acceptance-plan">
+                <strong>失败恢复台 · 失败 {recoveryPanel.summary.failed} · 可重试 {recoveryPanel.summary.retryable}</strong>
+                {recoveryPanel.groups.map(group => (
+                  <div key={group.category} className="greeting-acceptance-step">
+                    <span>{group.count}</span>
+                    <div>
+                      <b>{group.label}</b>
+                      <p>{group.action}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {preflightResult && (
+              <div className={`greeting-preflight greeting-preflight--${preflightResult.status}`}>
+                <strong>发送前预检：{preflightResult.status === "ok" ? "通过" : "需处理"}</strong>
+                {preflightResult.checks.map(check => (
+                  <span key={check.key} className={`tag ${check.status === "ok" ? "tag--green" : "tag--red"}`}>
+                    {check.message}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {selectorHealth && (
+              <div className={`greeting-preflight greeting-preflight--${selectorHealth.status}`}>
+                <strong>页面可用性：{selectorHealth.company}</strong>
+                {selectorHealth.checks.map(check => (
+                  <span key={check.key} className={`tag ${check.status === "ok" ? "tag--green" : check.status === "warn" ? "tag--muted" : "tag--red"}`}>
+                    {check.message}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {acceptancePlan && (
+              <div className="greeting-acceptance-plan">
+                <strong>人工验收模式 · {acceptancePlan.company}</strong>
+                {acceptancePlan.steps.map((step, index) => (
+                  <div key={step.key} className="greeting-acceptance-step">
+                    <span>{index + 1}</span>
+                    <div>
+                      <b>{step.label}</b>
+                      <p>{step.description}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="greeting-workbench__grid">
+              <div className="greeting-metric">
+                <span>已选择</span>
+                <strong>{selectedJobIds.length}</strong>
+              </div>
+              <div className="greeting-metric">
+                <span>可生成</span>
+                <strong>{candidateResult?.summary.candidateCount ?? dryRunResult?.summary.drafted ?? "-"}</strong>
+              </div>
+              <div className="greeting-metric">
+                <span>已跳过</span>
+                <strong>{candidateResult?.summary.skippedCount ?? dryRunResult?.summary.skipped ?? "-"}</strong>
+              </div>
+              <div className="greeting-metric">
+                <span>dry-run 发送</span>
+                <strong>{dryRunResult?.summary.sent ?? 0}</strong>
+              </div>
+              <div className="greeting-metric">
+                <span>确认已发</span>
+                <strong>{sendResult?.summary.sent ?? 0}</strong>
+              </div>
+              <div className="greeting-metric">
+                <span>累计发送</span>
+                <strong>{greetingStats?.summary.sent ?? "-"}</strong>
+              </div>
+              <div className="greeting-metric">
+                <span>累计失败</span>
+                <strong>{greetingStats?.summary.failed ?? "-"}</strong>
+              </div>
+              <div className="greeting-metric">
+                <span>待跟进</span>
+                <strong>{followups?.summary.pendingFollowups ?? "-"}</strong>
+              </div>
+              <div className="greeting-metric">
+                <span>已回复</span>
+                <strong>{greetingStats?.summary.replies ?? replyRecords.length}</strong>
+              </div>
+            </div>
+
+            {followups?.items.length ? (
+              <div className="greeting-followup-list">
+                <strong>待跟进提醒</strong>
+                {followups.items.slice(0, 5).map(item => (
+                  <span key={item.jobId} className="tag tag--muted">
+                    {item.company} · {item.windowHours}h
+                  </span>
+                ))}
+              </div>
+            ) : null}
+
+            {sendResult && (
+              <div className="greeting-send-summary">
+                <strong>发送确认结果</strong>
+                <span>已确认 {sendResult.summary.sent} 条</span>
+                <span>跳过 {sendResult.summary.skipped} 条</span>
+                <span>失败 {sendResult.summary.failed} 条</span>
+                <span>今日上限 {sendResult.summary.dailyLimit} 条</span>
+              </div>
+            )}
+
+            {(candidateResult?.skipped.length || dryRunResult?.skipped.length) ? (
+              <div className="greeting-skip-list">
+                <strong>跳过原因</strong>
+                {(candidateResult?.skipped || dryRunResult?.skipped || []).slice(0, 6).map(item => (
+                  <span key={`${item.jobId}-${item.reason}`} className="tag tag--muted">
+                    {item.company} · {item.reason}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+
+            {dryRunResult?.records.length ? (
+              <div className="greeting-draft-list">
+                {dryRunResult.records.map(record => (
+                  <div key={record.jobId} className="greeting-draft-row">
+                    <div>
+                      <strong>{record.company} · {record.title}</strong>
+                      <p>{record.message}</p>
+                    </div>
+                    <span className={`tag ${record.validationOk ? "tag--green" : "tag--red"}`}>
+                      {record.validationOk ? "校验通过" : record.validationReasons.join("、")}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+
       {jobs.map(job => {
 	        const opt = optimizations[job.id];
 	        const greeting = greetingTexts[job.id];
+          const jobAcceptance = acceptanceRecords.find(record => record.jobId === job.id);
+          const jobReply = replyRecords.find(record => record.jobId === job.id);
 	        const readyItems = [
 	          { label: "话术", ok: !!greeting },
 	          { label: "简历", ok: !!opt },
@@ -179,6 +838,12 @@ export default function GreetingPage() {
                     onClick={() => markGreeted(job.id)} style={{ cursor: "pointer", border: "none" }}>
                     {greetedStatus[job.id] ? "✓ 已招呼" : "标记已招呼"}
                   </button>
+                  <button type="button" className="button-quiet" onClick={() => recordAcceptance(job)} style={{ fontSize: 12 }}>
+                    记录验收
+                  </button>
+                  <button type="button" className="button-quiet" onClick={() => recordReply(job)} style={{ fontSize: 12 }}>
+                    记录回复
+                  </button>
                   {(customTags[job.id] || []).map(t => <span key={t} className="tag">{t}</span>)}
 	                  <input className="form-input form-input--inline" style={{ width: 80, fontSize: 11, padding: "3px 8px" }}
 	                    placeholder="添加标签" value={tagInputs[job.id] || ""}
@@ -192,7 +857,15 @@ export default function GreetingPage() {
 	                    {item.ok ? "已准备" : "待处理"} · {item.label}
 	                  </span>
 	                ))}
+                  {jobAcceptance && <span className="tag tag--green">验收: {jobAcceptance.result === "passed" ? "通过" : "需复核"}</span>}
+                  {jobReply && <span className="tag tag--active">回复: {jobReply.replyType === "positive" ? "积极" : "已记录"}</span>}
 	              </div>
+                {(jobAcceptance || jobReply) && (
+                  <div className="greeting-record-strip">
+                    {jobAcceptance && <span>最近验收：{jobAcceptance.note || jobAcceptance.result}</span>}
+                    {jobReply && <span>最近回复：{jobReply.content} · {jobReply.nextAction}</span>}
+                  </div>
+                )}
 
               {/* 打招呼语 */}
               <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
@@ -210,6 +883,7 @@ export default function GreetingPage() {
                   )}
                 </div>
                 {greeting ? (
+                  <>
                   <textarea className="form-input" value={greeting}
 	                    onChange={e => {
 	                      const next = { ...greetingTexts, [job.id]: e.target.value };
@@ -219,6 +893,12 @@ export default function GreetingPage() {
 	                      });
 	                    }}
                     rows={3} style={{ width: "100%", fontSize: 13 }} />
+                    {validationResults[job.id] && (
+                      <p className={validationResults[job.id].ok ? "text-success" : "text-danger"} style={{ fontSize: 12, marginTop: 6 }}>
+                        {validationResults[job.id].ok ? "校验通过，可以进入人工确认。" : `校验未通过：${validationResults[job.id].reasons.join("、")}`}
+                      </p>
+                    )}
+                  </>
                 ) : (
                   <p className="text-muted" style={{ fontSize: 13 }}>点击生成定制打招呼语</p>
                 )}
@@ -246,6 +926,14 @@ export default function GreetingPage() {
                       <option value="classic">经典双栏</option>
                       <option value="ats">紧凑 ATS</option>
                     </select>
+                    <button type="button" className="button-quiet" onClick={() => onRecommendTemplate(job)} style={{ fontSize: 12 }}>
+                      推荐模板
+                    </button>
+                    <button type="button" className="button-secondary"
+                      disabled={!!loading[job.id + "-preview"]}
+                      onClick={() => onPreviewPdf(job)} style={{ fontSize: 12 }}>
+                      {loading[job.id + "-preview"] || "预览PDF"}
+                    </button>
                     <button type="button" className="button-secondary"
                       disabled={!!loading[job.id + "-pdf"]}
                       onClick={() => onExportPdf(job)} style={{ fontSize: 12 }}>
@@ -254,6 +942,7 @@ export default function GreetingPage() {
                     </>
                   )}
                 </div>
+                {pdfTemplateReason && <p className="text-muted" style={{ fontSize: 12, marginTop: -4 }}>{pdfTemplateReason}</p>}
                 {opt && (
                   <div className="panel panel-muted" style={{ marginBottom: 12 }}>
                     <div className="panel-inner" style={{ padding: "14px 18px" }}>

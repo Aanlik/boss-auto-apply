@@ -21,6 +21,8 @@ if [ ! -f "$FRONTEND_DIR/dist/index.html" ]; then
   pnpm build
 fi
 
+python3 "$ROOT_DIR/scripts/launcher_preflight.py"
+
 cd "$BACKEND_DIR"
 pkill -f "uvicorn app.main" 2>/dev/null
 sleep 1

@@ -81,6 +81,93 @@ PROBE_JS = """(function(){
     return JSON.stringify({httpStatus: xhr.status, body: xhr.responseText});
 })()"""
 
+GREETING_SEND_JS_TEMPLATE = r"""(async function(){
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    const bodyText = (document.body && document.body.innerText || '').toLowerCase();
+    if (bodyText.includes('登录') && (location.href.includes('/web/user') || bodyText.includes('微信扫码'))) {
+        return JSON.stringify({ok:false, status:'blocked', failureCode:'not_logged_in', message:'未登录或登录页可见'});
+    }
+    if (['验证码','滑块','拼图','captcha','verify','操作太频繁','稍后再试','账号异常','限制使用'].some(t => bodyText.includes(t.toLowerCase()))) {
+        return JSON.stringify({ok:false, status:'blocked', failureCode:'risk_control', message:'检测到验证码、风控或账号异常提示'});
+    }
+
+    function visible(el) {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    }
+    function byText(selectors, texts) {
+        const nodes = Array.from(document.querySelectorAll(selectors));
+        return nodes.find(el => visible(el) && texts.some(text => (el.innerText || el.textContent || '').trim().includes(text)));
+    }
+    let chatButton = byText('button,a,span,div', ['立即沟通','立即投递','投递简历','继续沟通']);
+    if (!chatButton) {
+        return JSON.stringify({ok:false, status:'failed', failureCode:'button_not_found', message:'未找到立即沟通按钮'});
+    }
+    chatButton.click();
+    await sleep(1800);
+
+    let input = Array.from(document.querySelectorAll('#chat-input, textarea, [contenteditable="true"], [class*="chat-input"], [placeholder*="请输入"]')).find(visible);
+    if (!input) {
+        input = Array.from(document.querySelectorAll('[contenteditable="true"]')).find(visible);
+    }
+    if (!input) {
+        return JSON.stringify({ok:false, status:'failed', failureCode:'input_not_found', message:'未找到聊天输入框'});
+    }
+
+    const message = __MESSAGE_JSON__;
+    input.focus();
+    if ('value' in input) {
+        input.value = message;
+        input.dispatchEvent(new Event('input', {bubbles:true}));
+        input.dispatchEvent(new Event('change', {bubbles:true}));
+    } else {
+        input.textContent = '';
+        document.execCommand('insertText', false, message);
+        input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:message}));
+    }
+    await sleep(800);
+
+    let sendButton = byText('button,span,div,a', ['发送']);
+    if (!sendButton) {
+        return JSON.stringify({ok:false, status:'failed', failureCode:'send_button_not_found', message:'未找到发送按钮'});
+    }
+    sendButton.click();
+    await sleep(1200);
+
+    const afterText = (document.body && document.body.innerText || '').toLowerCase();
+    if (['验证码','滑块','拼图','captcha','verify','操作太频繁','稍后再试'].some(t => afterText.includes(t.toLowerCase()))) {
+        return JSON.stringify({ok:false, status:'blocked', failureCode:'risk_control', message:'发送后检测到验证码或频率限制'});
+    }
+    return JSON.stringify({ok:true, status:'sent', failureCode:'', message:'已自动点击发送'});
+})()"""
+
+GREETING_SELECTOR_HEALTH_JS = r"""(function(){
+    const bodyText = (document.body && document.body.innerText || '').toLowerCase();
+    function visible(el) {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    }
+    function byText(selectors, texts) {
+        const nodes = Array.from(document.querySelectorAll(selectors));
+        return nodes.find(el => visible(el) && texts.some(text => (el.innerText || el.textContent || '').trim().includes(text)));
+    }
+    const chatButton = byText('button,a,span,div', ['立即沟通','立即投递','投递简历','继续沟通']);
+    const input = Array.from(document.querySelectorAll('#chat-input, textarea, [contenteditable="true"], [class*="chat-input"], [placeholder*="请输入"]')).find(visible);
+    const sendButton = byText('button,span,div,a', ['发送']);
+    const risk = ['验证码','滑块','拼图','captcha','verify','操作太频繁','稍后再试','账号异常','限制使用'].some(t => bodyText.includes(t.toLowerCase()));
+    const checks = [
+        {key:'page_risk', status:risk ? 'error' : 'ok', message:risk ? '检测到验证码或风控提示' : '未检测到明显风控提示'},
+        {key:'chat_button', status:chatButton ? 'ok' : 'error', message:chatButton ? '找到立即沟通按钮' : '未找到立即沟通按钮'},
+        {key:'chat_input', status:input ? 'ok' : 'warn', message:input ? '当前页面已有输入框' : '详情页未直接显示输入框，点击沟通后再检测'},
+        {key:'send_button', status:sendButton ? 'ok' : 'warn', message:sendButton ? '当前页面已有发送按钮' : '详情页未直接显示发送按钮，点击沟通后再检测'},
+    ];
+    return JSON.stringify({status: checks.some(c => c.status === 'error') ? 'error' : 'ok', checks});
+})()"""
+
 
 # ============================================================
 #  CDPSession — CDP WebSocket 客户端
@@ -479,6 +566,11 @@ async def scrape_boss_jobs(keyword="Python", city="深圳", max_pages=3, headles
                 cdp.close()
             except Exception:
                 pass
+        if cdp:
+            try:
+                cdp.close()
+            except Exception:
+                pass
 
 
 def login_boss_sync(headless=False):
@@ -491,6 +583,88 @@ def scrape_jobs_sync(keyword="Python", city="深圳", max_pages=3, headless=True
     return asyncio.run(scrape_boss_jobs(
         keyword=keyword, city=city, max_pages=max_pages, headless=headless, filters=filters
     ))
+
+
+def send_boss_greeting_sync(job_url: str, message: str) -> dict:
+    """打开岗位详情页，点击立即沟通，粘贴招呼语并点击发送。
+
+    只做正常页面操作；遇到登录、验证码、风控、页面结构变化会停止并返回结构化原因。
+    """
+    if not job_url:
+        return {"ok": False, "status": "failed", "failureCode": "missing_job_url", "message": "缺少岗位链接"}
+    if not message.strip():
+        return {"ok": False, "status": "failed", "failureCode": "empty_message", "message": "招呼语为空"}
+
+    if not _chrome_running():
+        if not _launch_chrome():
+            return {"ok": False, "status": "blocked", "failureCode": "browser_start_failed", "message": "Chrome 启动失败"}
+
+    cdp = None
+    tid = None
+    try:
+        cdp = CDPSession(CDP_PORT)
+        tid, sid = cdp.create_page()
+        cdp.navigate(job_url, sid)
+        probe = _probe_login(cdp, sid)
+        if probe["status"] != "ok":
+            reason = "risk_control" if probe.get("status") == "restricted" else "cookie_expired"
+            return {"ok": False, "status": "blocked", "failureCode": reason, "message": probe.get("message") or "登录态无效"}
+        js = GREETING_SEND_JS_TEMPLATE.replace("__MESSAGE_JSON__", json.dumps(message, ensure_ascii=False))
+        raw = cdp.eval_js(js, sid)
+        if raw is None:
+            return {"ok": False, "status": "failed", "failureCode": "page_script_failed", "message": "页面脚本执行失败"}
+        try:
+            result = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            return {"ok": False, "status": "failed", "failureCode": "page_script_invalid", "message": str(raw)[:120]}
+        return result if isinstance(result, dict) else {"ok": False, "status": "failed", "failureCode": "page_script_invalid", "message": "页面返回异常"}
+    except Exception as e:
+        return {"ok": False, "status": "failed", "failureCode": "browser_error", "message": str(e)}
+    finally:
+        if tid and cdp:
+            try:
+                cdp.send("Target.closeTarget", {"targetId": tid})
+            except Exception:
+                pass
+
+
+def check_boss_greeting_selectors_sync(job_url: str) -> dict:
+    """打开岗位详情页，只检测沟通相关选择器，不发送任何内容。"""
+    if not job_url:
+        return {"status": "error", "checks": [{"key": "job_url", "status": "error", "message": "缺少岗位链接"}]}
+    if not _chrome_running():
+        if not _launch_chrome():
+            return {"status": "error", "checks": [{"key": "browser", "status": "error", "message": "Chrome 启动失败"}]}
+    cdp = None
+    tid = None
+    try:
+        cdp = CDPSession(CDP_PORT)
+        tid, sid = cdp.create_page()
+        cdp.navigate(job_url, sid)
+        probe = _probe_login(cdp, sid)
+        if probe["status"] != "ok":
+            return {
+                "status": "error",
+                "checks": [{"key": "boss_login", "status": "error", "message": probe.get("message") or "登录态无效"}],
+            }
+        raw = cdp.eval_js(GREETING_SELECTOR_HEALTH_JS, sid)
+        try:
+            return json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            return {"status": "error", "checks": [{"key": "page_script", "status": "error", "message": "选择器检测返回异常"}]}
+    except Exception as e:
+        return {"status": "error", "checks": [{"key": "browser_error", "status": "error", "message": str(e)}]}
+    finally:
+        if tid and cdp:
+            try:
+                cdp.send("Target.closeTarget", {"targetId": tid})
+            except Exception:
+                pass
+        if cdp:
+            try:
+                cdp.close()
+            except Exception:
+                pass
 
 
 # ============================================================

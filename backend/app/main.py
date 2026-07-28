@@ -2,28 +2,50 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.routes.assistant import router as assistant_router
 from app.routes.diligence import router as diligence_router
+from app.routes.feedback import router as feedback_router
+from app.routes.dashboard import router as dashboard_router
 from app.routes.greetings import router as greetings_router
+from app.routes.help import router as help_router
 from app.routes.jobs import router as jobs_router
+from app.routes.maintenance import router as maintenance_router
 from app.routes.resumes import router as resumes_router
 from app.routes.scoring import router as scoring_router
 from app.routes.settings import router as settings_router
 from app.routes.workflow import router as workflow_router
+from app.services.access_control import is_allowed_host
 
 app = FastAPI(title="BOSS Workbench")
 
+
+class LocalAccessGuardMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if not is_allowed_host(request.headers.get("host", "")):
+            return JSONResponse(
+                {"detail": "本地服务默认只允许从本机访问。如需局域网访问，请显式设置 BOSS_WORKBENCH_ALLOW_REMOTE=true。"},
+                status_code=403,
+            )
+        return await call_next(request)
+
+
+app.add_middleware(LocalAccessGuardMiddleware)
+
 # API 路由
+app.include_router(assistant_router)
 app.include_router(resumes_router)
+app.include_router(dashboard_router)
 app.include_router(jobs_router)
 app.include_router(diligence_router)
+app.include_router(feedback_router)
 app.include_router(scoring_router)
 app.include_router(settings_router)
 app.include_router(greetings_router)
+app.include_router(help_router)
 app.include_router(workflow_router)
-
-# ── 禁用静态文件缓存（开发阶段） ──
-from starlette.middleware.base import BaseHTTPMiddleware
+app.include_router(maintenance_router)
 
 class NoCacheStaticMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):

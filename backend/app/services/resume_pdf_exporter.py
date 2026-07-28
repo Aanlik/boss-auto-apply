@@ -60,7 +60,7 @@ F_H = "ResumeSans"
 F_B = "ResumeSans"
 
 C_PRIMARY = HexColor("#1f2937")
-C_ACCENT  = HexColor("#2563eb")
+C_ACCENT  = HexColor("#0f766e")
 C_BODY    = HexColor("#243041")
 C_MUTED   = HexColor("#667085")
 C_LINE    = HexColor("#d9e1ec")
@@ -71,9 +71,36 @@ C_SIDEBAR_MUTED = HexColor("#667085")
 C_BG      = HexColor("#ffffff")
 
 PDF_TEMPLATES = {
-    "modern": {"name": "续页单栏", "description": "第一页双栏，第二页起单栏，适合内容较多的岗位"},
-    "classic": {"name": "经典双栏", "description": "每页保留左侧栏，适合一页简历或信息较少的岗位"},
-    "ats": {"name": "紧凑 ATS", "description": "纯单栏，适合系统筛选和文本读取"},
+    "modern": {
+        "name": "清爽续页",
+        "description": "第一页双栏，第二页起单栏，留白更舒展，适合内容较多的岗位",
+        "font": "ResumeSans",
+        "density": "balanced",
+        "bestFor": ["产品", "运营", "综合管理"],
+        "layout": "first_page_sidebar",
+    },
+    "classic": {
+        "name": "稳重双栏",
+        "description": "每页保留左侧栏，层级清晰，适合一页简历或信息较少的岗位",
+        "font": "ResumeSans",
+        "density": "comfortable",
+        "bestFor": ["管理", "市场", "HR"],
+        "layout": "persistent_sidebar",
+    },
+    "ats": {
+        "name": "ATS 单栏",
+        "description": "纯单栏，减少装饰，适合系统筛选和文本读取",
+        "font": "ResumeSans",
+        "density": "compact",
+        "bestFor": ["技术", "数据", "研发"],
+        "layout": "single_column",
+    },
+}
+
+DENSITY_PROFILES = {
+    "comfortable": {"fontScale": 1.04, "leadingScale": 1.10, "spaceScale": 1.12, "marginScale": 1.04},
+    "balanced": {"fontScale": 1.0, "leadingScale": 1.0, "spaceScale": 1.0, "marginScale": 1.0},
+    "compact": {"fontScale": 0.94, "leadingScale": 0.90, "spaceScale": 0.86, "marginScale": 0.92},
 }
 
 PAGE_W, PAGE_H = A4
@@ -88,52 +115,59 @@ CONTINUATION_RIGHT = 22 * mm
 CONTINUATION_W = PAGE_W - CONTINUATION_LEFT - CONTINUATION_RIGHT
 
 
-def _main_title(text):
+def _density_options(density: str = "balanced") -> dict:
+    return DENSITY_PROFILES.get(str(density or "balanced"), DENSITY_PROFILES["balanced"])
+
+
+def _main_title(text, density: str = "balanced"):
+    opts = _density_options(density)
     return Paragraph(text, ParagraphStyle(
-        "MTitle", fontName=F_H, fontSize=11.8, leading=18,
-        textColor=C_ACCENT, spaceBefore=12, spaceAfter=6,
+        f"MTitle-{density}", fontName=F_H, fontSize=11.4 * opts["fontScale"], leading=18.5 * opts["leadingScale"],
+        textColor=C_ACCENT, spaceBefore=13 * opts["spaceScale"], spaceAfter=6 * opts["spaceScale"],
         wordWrap="CJK"))
 
 
-def _body_style(name, **kwargs):
+def _body_style(name, density: str = "balanced", **kwargs):
+    opts = _density_options(density)
     defaults = {
         "fontName": F_B,
-        "fontSize": 9.8,
-        "leading": 17.2,
+        "fontSize": 9.8 * opts["fontScale"],
+        "leading": 18.2 * opts["leadingScale"],
         "textColor": C_BODY,
-        "spaceAfter": 3,
+        "spaceAfter": 3 * opts["spaceScale"],
         "wordWrap": "CJK",
     }
     defaults.update(kwargs)
     return ParagraphStyle(name, **defaults)
 
 
-def _build_main(profile, optimization):
+def _build_main(profile, optimization, density: str = "balanced"):
     """构建右侧主内容（纯 flowable 列表）"""
     items = []
+    opts = _density_options(density)
 
     # HR 栏：目标岗位
     title = profile.title or ""
     if title:
         items.append(Paragraph(
             f"<font color='#2b6cb0'>{title}</font>",
-            ParagraphStyle("MTarget", fontName=F_H, fontSize=15.4, leading=22,
-                           textColor=C_ACCENT, spaceAfter=4, wordWrap="CJK")))
-        items.append(HRFlowable(width="100%", thickness=0.9, color=C_LINE, spaceAfter=10))
+            ParagraphStyle(f"MTarget-{density}", fontName=F_H, fontSize=15.4 * opts["fontScale"], leading=22 * opts["leadingScale"],
+                           textColor=C_ACCENT, spaceAfter=4 * opts["spaceScale"], wordWrap="CJK")))
+        items.append(HRFlowable(width="100%", thickness=0.8, color=C_LINE, spaceAfter=11 * opts["spaceScale"]))
 
     # 个人总结
     summary = optimization.get("tailored_summary") or profile.summary or ""
     if summary:
-        items.append(_main_title("个人总结"))
+        items.append(_main_title("个人总结", density))
         items.append(Paragraph(summary, ParagraphStyle(
-            "MSummary", fontName=F_B, fontSize=10, leading=17.8,
-            textColor=C_BODY, firstLineIndent=20, spaceAfter=10,
+            f"MSummary-{density}", fontName=F_B, fontSize=10 * opts["fontScale"], leading=17.8 * opts["leadingScale"],
+            textColor=C_BODY, firstLineIndent=18, spaceAfter=11 * opts["spaceScale"],
             wordWrap="CJK")))
 
     # 工作经历
     opt_exp = optimization.get("work_experience") or []
     if opt_exp:
-        items.append(_main_title("工作经历"))
+        items.append(_main_title("工作经历", density))
         for exp in opt_exp:
             d = exp if isinstance(exp, dict) else {
                 "company": getattr(exp, "company", ""),
@@ -147,33 +181,33 @@ def _build_main(profile, optimization):
             if d.get("duration"):
                 h += f"  <font color='#777'>{d['duration']}</font>"
             items.append(Paragraph(h, ParagraphStyle(
-                "MExpH", fontName=F_H, fontSize=10.5, leading=17.2,
-                textColor=C_PRIMARY, spaceBefore=8, spaceAfter=3,
+                f"MExpH-{density}", fontName=F_H, fontSize=10.4 * opts["fontScale"], leading=17.8 * opts["leadingScale"],
+                textColor=C_PRIMARY, spaceBefore=8 * opts["spaceScale"], spaceAfter=3 * opts["spaceScale"],
                 wordWrap="CJK")))
             for b in (d.get("bullets") or []):
                 if b and str(b).strip():
                     items.append(Paragraph(
                         f"- {str(b).strip()}",
-                        _body_style("MBullet", leftIndent=16, spaceAfter=3)))
-            items.append(Spacer(1, 5))
+                        _body_style("MBullet", density=density, leftIndent=16, spaceAfter=3 * opts["spaceScale"])))
+            items.append(Spacer(1, 5 * opts["spaceScale"]))
     elif profile.work_experience:
-        items.append(_main_title("工作经历"))
+        items.append(_main_title("工作经历", density))
         for e in profile.work_experience:
             h = f"<b>{e.title or ''}</b> | {e.company or ''}  <font color='#777'>{e.duration or ''}</font>"
             items.append(Paragraph(h, ParagraphStyle(
-                "MExpH", fontName=F_H, fontSize=10.5, leading=17.2,
-                textColor=C_PRIMARY, spaceBefore=7, spaceAfter=3,
+                f"MExpH-{density}", fontName=F_H, fontSize=10.5 * opts["fontScale"], leading=17.2 * opts["leadingScale"],
+                textColor=C_PRIMARY, spaceBefore=7 * opts["spaceScale"], spaceAfter=3 * opts["spaceScale"],
                 wordWrap="CJK")))
             if e.description:
                 items.append(Paragraph(
                     f"- {e.description}",
-                    _body_style("MBullet", leftIndent=16, spaceAfter=2)))
-            items.append(Spacer(1, 5))
+                    _body_style("MBullet", density=density, leftIndent=16, spaceAfter=2 * opts["spaceScale"])))
+            items.append(Spacer(1, 5 * opts["spaceScale"]))
 
     # 项目经历
     all_proj = (optimization.get("projects") or []) or (profile.projects or [])
     if all_proj:
-        items.append(_main_title("项目经历"))
+        items.append(_main_title("项目经历", density))
         for proj in all_proj:
             d = proj if isinstance(proj, dict) else {
                 "name": getattr(proj, "name", ""),
@@ -185,13 +219,13 @@ def _build_main(profile, optimization):
             if tn:
                 h += f"  <font color='#2b6cb0'>[{tn}]</font>"
             items.append(Paragraph(h, ParagraphStyle(
-                "MProjH", fontName=F_H, fontSize=10.5, leading=17.2,
-                textColor=C_PRIMARY, spaceBefore=7, spaceAfter=3,
+                f"MProjH-{density}", fontName=F_H, fontSize=10.5 * opts["fontScale"], leading=17.2 * opts["leadingScale"],
+                textColor=C_PRIMARY, spaceBefore=7 * opts["spaceScale"], spaceAfter=3 * opts["spaceScale"],
                 wordWrap="CJK")))
             if d.get("description"):
                 items.append(Paragraph(
                     d["description"],
-                    _body_style("MProjD", leftIndent=16, spaceAfter=5)))
+                    _body_style("MProjD", density=density, leftIndent=16, spaceAfter=5 * opts["spaceScale"])))
 
     return items
 
@@ -228,7 +262,7 @@ def _draw_wrapped(canvas, text, x, y, width, font_name, font_size, leading, colo
 
 def _draw_sidebar_title(canvas, text, x, y, width):
     canvas.setFillColor(C_ACCENT)
-    canvas.setFont(F_H, 8.2)
+    canvas.setFont(F_H, 8.4)
     canvas.drawString(x, y, text)
     canvas.setStrokeColor(C_LINE)
     canvas.setLineWidth(0.35)
@@ -316,14 +350,16 @@ def _draw_continuation_page(canvas, doc):
     canvas.restoreState()
 
 
-def export_resume_pdf(profile, optimization: dict, company: str, job_title: str, template: str = "modern") -> bytes:
+def export_resume_pdf(profile, optimization: dict, company: str, job_title: str, template: str = "modern", density: str = "balanced") -> bytes:
     """生成可自然分页的专业双栏 PDF 简历。"""
     buf = io.BytesIO()
     template = template if template in PDF_TEMPLATES else "modern"
+    density = density if density in DENSITY_PROFILES else PDF_TEMPLATES[template]["density"]
+    density_opts = _density_options(density)
 
-    main_items = _build_main(profile, optimization or {})
+    main_items = _build_main(profile, optimization or {}, density=density)
     if not main_items:
-        main_items = [Paragraph("暂无简历内容", _body_style("Empty"))]
+        main_items = [Paragraph("暂无简历内容", _body_style("Empty", density=density))]
 
     doc = BaseDocTemplate(
         buf, pagesize=A4,
@@ -332,11 +368,11 @@ def export_resume_pdf(profile, optimization: dict, company: str, job_title: str,
         title=f"{profile.name or ''} 简历.pdf",
     )
     first_frame = Frame(
-        MAIN_LEFT, MAIN_BOTTOM, MAIN_W, PAGE_H - MAIN_TOP - MAIN_BOTTOM,
+        MAIN_LEFT, MAIN_BOTTOM * density_opts["marginScale"], MAIN_W, PAGE_H - MAIN_TOP * density_opts["marginScale"] - MAIN_BOTTOM * density_opts["marginScale"],
         id="main", leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
     )
     continuation_frame = Frame(
-        CONTINUATION_LEFT, MAIN_BOTTOM, CONTINUATION_W, PAGE_H - MAIN_TOP - MAIN_BOTTOM,
+        CONTINUATION_LEFT, MAIN_BOTTOM * density_opts["marginScale"], CONTINUATION_W, PAGE_H - MAIN_TOP * density_opts["marginScale"] - MAIN_BOTTOM * density_opts["marginScale"],
         id="continuation", leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
     )
     if template == "classic":
@@ -372,3 +408,4 @@ def export_resume_pdf(profile, optimization: dict, company: str, job_title: str,
     doc.build(main_items)
     buf.seek(0)
     return buf.getvalue()
+    opts = _density_options(density)

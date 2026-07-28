@@ -1,5 +1,5 @@
 from __future__ import annotations
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Response
 import asyncio
 import json
 import os
@@ -11,6 +11,8 @@ from app.services.resume_parser import _extract_text_from_bytes, parse_resume_te
 from app.services.resume_evaluator import evaluate_resume
 from app.services.jd_analyzer import analyze_jd
 from app.services.resume_optimizer import optimize_resume as ai_optimize
+from app.services import workflow_persistence
+from app.services.workflow_persistence import write_json_atomic
 
 router = APIRouter(prefix="/api/resumes", tags=["resumes"])
 
@@ -67,7 +69,10 @@ def _save_entry(file_id: str, entry: dict):
         else:
             data[k] = v
     try:
-        _store_path(file_id).write_text(json.dumps(data, ensure_ascii=False, default=lambda o: (o.model_dump() if hasattr(o, "model_dump") else (_logger.warning("_save_entry: 无法序列化的对象类型 %s，key=%s，已跳过", type(o).__name__, k) or None))))
+        if workflow_persistence._active_store() == "sqlite":
+            from app.services import sqlite_kv_store
+            sqlite_kv_store.put("resumes", file_id, data)
+        write_json_atomic(_store_path(file_id), data)
     except OSError as e:
         _logger.error("保存简历数据失败 (%s): %s", file_id, e)
         pass  # 不中断调用方流程
@@ -77,11 +82,16 @@ def _load_entry(file_id: str) -> dict | None:
     """从文件加载简历数据。损坏文件自动清理。"""
     import logging
     _logger = logging.getLogger("resumes")
-    p = _store_path(file_id)
-    if not p.exists():
-        return None
     try:
-        data = json.loads(p.read_text())
+        data = None
+        if workflow_persistence._active_store() == "sqlite":
+            from app.services import sqlite_kv_store
+            data = sqlite_kv_store.get("resumes", file_id)
+        p = _store_path(file_id)
+        if data is None:
+            if not p.exists():
+                return None
+            data = json.loads(p.read_text())
         if "profile" in data and isinstance(data["profile"], dict):
             data["profile"] = ResumeProfile.model_validate(data["profile"])
         return data
@@ -97,13 +107,37 @@ def _load_entry(file_id: str) -> dict | None:
         return None
 
 
+def _delete_entry(file_id: str) -> None:
+    try:
+        _store_path(file_id).unlink()
+    except OSError:
+        pass
+    if workflow_persistence._active_store() == "sqlite":
+        from app.services import sqlite_kv_store
+        sqlite_kv_store.delete("resumes", file_id)
+
+
 def _load_all_entries():
     """从磁盘恢复所有简历数据。启动时调用，异常不影响服务启动。"""
     global _uploaded_files, _active_file_id
     _uploaded_files = []
     try:
-        for f in sorted(STORE_DIR.glob("*.json"), key=os.path.getmtime, reverse=True):
-            file_id = f.stem
+        entries = {}
+        if workflow_persistence._active_store() == "sqlite":
+            from app.services import sqlite_kv_store
+            entries = sqlite_kv_store.all("resumes")
+        if not entries:
+            entries = {
+                path.stem: _load_entry(path.stem)
+                for path in STORE_DIR.glob("*.json")
+            }
+        for file_id, entry in sorted(
+            entries.items(),
+            key=lambda item: str((item[1] or {}).get("updated_at") or ""),
+            reverse=True,
+        ):
+            if not isinstance(entry, dict):
+                continue
             upload_path = UPLOAD_DIR / file_id
             if not upload_path.exists():
                 upload_path_candidates = list(UPLOAD_DIR.glob(f"{file_id}*"))
@@ -112,14 +146,13 @@ def _load_all_entries():
                 else:
                     continue
             try:
-                fstat = f.stat()
                 ustats = upload_path.stat()
             except OSError:
                 continue
             _uploaded_files.append({
                 "id": file_id, "filename": (lambda parts: parts[-1] if len(parts) > 2 else file_id)(file_id.split("_", 2)),
                 "path": str(upload_path), "size": ustats.st_size,
-                "uploaded_at": datetime.fromtimestamp(fstat.st_mtime).isoformat(),
+                "uploaded_at": str(entry.get("uploaded_at") or datetime.fromtimestamp(ustats.st_mtime).isoformat()),
             })
         if _uploaded_files and not _active_file_id:
             _active_file_id = _uploaded_files[0]["id"]
@@ -211,8 +244,7 @@ async def parse_resume(file: UploadFile = File(...)):
             old = _uploaded_files.pop()
             try: os.remove(old["path"])
             except OSError: pass
-            try: os.remove(_store_path(old["id"]))
-            except OSError: pass
+            _delete_entry(old["id"])
 
         # 后台异步 AI 补充解析（仅在 AI 已配置时启动）
         import asyncio
@@ -406,7 +438,7 @@ async def export_resume_pdf(payload: dict):
 
     profile = ResumeProfile.model_validate(profile_data) if isinstance(profile_data, dict) else profile_data
     try:
-        pdf_bytes = gen_pdf(profile, optimization, company, job_title, payload.get("template", "modern"))
+        pdf_bytes = gen_pdf(profile, optimization, company, job_title, payload.get("template", "modern"), payload.get("density", ""))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF 生成失败: {e}")
 
@@ -414,6 +446,129 @@ async def export_resume_pdf(payload: dict):
     encoded = quote(f"{safe_name}.pdf")
     return Response(content=pdf_bytes, media_type="application/pdf",
                     headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"})
+
+
+@router.post("/preview-pdf")
+async def preview_resume_pdf(payload: dict):
+    from app.services.resume_pdf_exporter import export_resume_pdf as gen_pdf
+
+    profile_data = payload.get("profile")
+    if not profile_data:
+        raise HTTPException(status_code=400, detail="请先上传并解析简历")
+    profile = ResumeProfile.model_validate(profile_data) if isinstance(profile_data, dict) else profile_data
+    try:
+        pdf_bytes = gen_pdf(
+            profile,
+            payload.get("optimization") if isinstance(payload.get("optimization"), dict) else {},
+            str(payload.get("company") or "目标公司"),
+            str(payload.get("job_title") or profile.title or "目标岗位"),
+            str(payload.get("template") or "modern"),
+            str(payload.get("density") or ""),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PDF 预览生成失败: {exc}")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "inline; filename=resume-preview.pdf"},
+    )
+
+
+@router.post("/pdf-template/recommend")
+def recommend_pdf_template(payload: dict) -> dict:
+    job_title = str(payload.get("job_title") or payload.get("title") or "").lower()
+    profile_data = payload.get("profile") or {}
+    content_size = len(json.dumps(profile_data, ensure_ascii=False)) if profile_data else 0
+    technical_words = ("工程师", "开发", "后端", "前端", "算法", "数据", "java", "python", "go")
+    management_words = ("总监", "负责人", "经理", "管理")
+    if any(word in job_title for word in technical_words):
+        template = "ats"
+        reason = "技术类岗位更适合 ATS 单栏模板，便于系统读取关键词。"
+    elif any(word in job_title for word in management_words) and content_size < 6000:
+        template = "classic"
+        reason = "管理类岗位信息层次较多，经典双栏便于展示概览。"
+    else:
+        template = "modern"
+        reason = "默认使用现代续页模板，适合大多数产品、运营和综合岗位。"
+    return {"template": template, "reason": reason, "options": ["modern", "classic", "ats"]}
+
+
+@router.get("/pdf-templates")
+def list_pdf_templates() -> dict:
+    from app.services.resume_pdf_exporter import PDF_TEMPLATES
+
+    return {"templates": PDF_TEMPLATES, "default": "modern"}
+
+
+@router.get("/pdf-preview-options")
+def pdf_preview_options() -> dict:
+    from app.services.resume_pdf_exporter import PDF_TEMPLATES
+
+    density_options = [
+        {"key": "comfortable", "label": "舒展", "description": "行距更大，适合内容不多、偏管理或产品表达的简历。"},
+        {"key": "balanced", "label": "均衡", "description": "默认密度，兼顾阅读体验和信息承载。"},
+        {"key": "compact", "label": "紧凑", "description": "信息较多时使用，适合 ATS 和技术岗位。"},
+    ]
+    return {
+        "templates": PDF_TEMPLATES,
+        "defaultTemplate": "modern",
+        "densityOptions": density_options,
+        "defaultDensity": "balanced",
+        "actions": [
+            {"key": "preview", "label": "真实预览"},
+            {"key": "apply", "label": "应用到当前导出"},
+            {"key": "download", "label": "下载 PDF"},
+        ],
+    }
+
+
+@router.get("/versions")
+def list_resume_versions() -> dict:
+    entry = _load_entry(_active_file_id) if _active_file_id else {}
+    versions = entry.get("versions") if isinstance(entry, dict) else []
+    return {"versions": versions or []}
+
+
+@router.post("/versions")
+def save_resume_version(payload: dict) -> dict:
+    if not _active_file_id:
+        raise HTTPException(status_code=400, detail="没有活跃的简历文件")
+    entry = _load_entry(_active_file_id) or {}
+    versions = entry.get("versions") or []
+    if not versions and entry.get("profile"):
+        base = entry["profile"].model_dump() if hasattr(entry["profile"], "model_dump") else entry["profile"]
+        versions.append({"label": "当前版本", "profile": base, "createdAt": datetime.now().isoformat()})
+    profile = payload.get("profile") or entry.get("profile")
+    if hasattr(profile, "model_dump"):
+        profile = profile.model_dump()
+    versions.append({
+        "label": str(payload.get("label") or f"版本 {len(versions) + 1}"),
+        "profile": profile or {},
+        "createdAt": datetime.now().isoformat(),
+    })
+    entry["versions"] = versions[-20:]
+    _save_entry(_active_file_id, entry)
+    return {"versions": entry["versions"]}
+
+
+@router.post("/versions/compare")
+def compare_resume_versions(payload: dict) -> dict:
+    entry = _load_entry(_active_file_id) if _active_file_id else {}
+    versions = entry.get("versions") or []
+    from_index = int(payload.get("from_index", 0))
+    to_index = int(payload.get("to_index", len(versions) - 1))
+    if from_index < 0 or to_index < 0 or from_index >= len(versions) or to_index >= len(versions):
+        raise HTTPException(status_code=400, detail="版本索引无效")
+    before = versions[from_index].get("profile") or {}
+    after = versions[to_index].get("profile") or {}
+    keys = sorted(set(before.keys()) | set(after.keys()))
+    changed = [key for key in keys if before.get(key) != after.get(key)]
+    return {
+        "from": versions[from_index],
+        "to": versions[to_index],
+        "changedFields": changed,
+        "summary": [f"{key}: 已变更" for key in changed],
+    }
 
 
 # ── AI 对话 ──

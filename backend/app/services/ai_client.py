@@ -4,9 +4,12 @@ import json
 import os
 import base64
 import logging
+import time
 from pathlib import Path
 from openai import OpenAI
+from app.services.external_service import ProviderFailure, run_with_resilience, test_mode_enabled
 from app.services.workflow_persistence import write_json_atomic
+from app.services.secret_store import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger("ai_client")
 
@@ -48,7 +51,17 @@ PROVIDER_PRESETS = {
 def _load_config() -> dict:
     try:
         if CONFIG_FILE.exists():
-            return json.loads(CONFIG_FILE.read_text())
+            cfg = json.loads(CONFIG_FILE.read_text())
+            api_key = cfg.get("api_key", "")
+            encrypted_key = cfg.get("api_key_encrypted", "")
+            if encrypted_key:
+                cfg["api_key"] = decrypt_secret(encrypted_key)
+            elif api_key:
+                cfg["api_key_encrypted"] = encrypt_secret(api_key)
+                cfg["api_key"] = ""
+                _save_config(cfg)
+                cfg["api_key"] = api_key
+            return cfg
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("加载 AI 供应商配置失败: %s", e)
     return {}
@@ -93,12 +106,13 @@ def set_config(provider: str, api_key: str, base_url: str = "", model: str = "")
 
     cfg = {
         "provider": provider,
-        "api_key": api_key,
+        "api_key": "",
+        "api_key_encrypted": encrypt_secret(api_key),
         "base_url": base_url,
         "model": model,
     }
     _save_config(cfg)
-    _cached_config = cfg
+    _cached_config = {**cfg, "api_key": api_key}
     _client = None
     return True
 
@@ -163,6 +177,14 @@ def get_model() -> str:
 
 def chat_json(system: str, user: str, model: str | None = None, temperature: float = 0.3):
     """调用 AI chat，要求返回 JSON，自动解析。使用配置的模型。"""
+    if test_mode_enabled():
+        return {
+            "summary": "测试模式报告",
+            "priority": "normal",
+            "resumeAdvice": ["突出与岗位相关的量化成果"],
+            "interviewAdvice": ["准备一个跨团队协作案例"],
+            "riskAdvice": ["使用测试数据，不代表真实风险结论"],
+        }
     client = get_client()
     active_model = model or get_model()
     logger.info("AI 调用: %s (model=%s)", system[:80], active_model)
@@ -176,14 +198,32 @@ def chat_json(system: str, user: str, model: str | None = None, temperature: flo
         "temperature": temperature,
     }
 
-    # 部分供应商不支持 json_object，降级处理
     try:
-        kwargs["response_format"] = {"type": "json_object"}
-        resp = client.chat.completions.create(**kwargs)
+        def operation():
+            request_kwargs = dict(kwargs)
+            try:
+                request_kwargs["response_format"] = {"type": "json_object"}
+                return client.chat.completions.create(**request_kwargs)
+            except Exception:
+                request_kwargs.pop("response_format", None)
+                return client.chat.completions.create(**request_kwargs)
+
+        started = time.time()
+        resp = run_with_resilience("ai", operation, max_attempts=3, circuit_threshold=3)
+    except ProviderFailure as exc:
+        return {"error": str(exc), "errorMeta": exc.public_payload()}
+    try:
+        from app.services.maintenance_service import log_api_call
+        log_api_call(
+            "ai",
+            "POST",
+            str(get_config().get("base_url") or "openai"),
+            200,
+            int((time.time() - started) * 1000),
+            {"model": active_model, "attempts": 1, "outcome": "success"},
+        )
     except Exception:
-        # 去掉 response_format 重试
-        kwargs.pop("response_format", None)
-        resp = client.chat.completions.create(**kwargs)
+        pass
 
     text = resp.choices[0].message.content
     try:

@@ -14,6 +14,9 @@ from app.services.ai_client import (
     PROVIDER_PRESETS,
 )
 from app.services.workflow_persistence import write_json_atomic
+from app.services.secret_store import decrypt_secret, encrypt_secret
+from app.services import preferences as preferences_service
+from app.services.runtime_mode import runtime_mode_status, set_runtime_mode
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 _EXPORT_TOKENS: dict[str, float] = {}
@@ -74,6 +77,19 @@ def delete_provider_config() -> dict:
     """清除供应商配置。"""
     clear_config()
     return {"configured": False, "message": "配置已清除"}
+
+
+@router.get("/runtime-mode")
+def get_runtime_mode_status() -> dict:
+    return runtime_mode_status()
+
+
+@router.post("/runtime-mode")
+def save_runtime_mode(payload: dict) -> dict:
+    try:
+        return set_runtime_mode(str(payload.get("mode") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/provider/test")
@@ -169,7 +185,7 @@ def import_settings(payload: dict) -> dict:
     baidu = payload.get("baidu") if isinstance(payload.get("baidu"), dict) else {}
     baidu_key = str(baidu.get("api_key") or "").strip()
     if baidu_key:
-        _write_baidu_config({"api_key": baidu_key})
+        _write_baidu_config({"api_key": "", "api_key_encrypted": encrypt_secret(baidu_key)})
         imported.append("baidu")
 
     business = payload.get("business") if isinstance(payload.get("business"), dict) else {}
@@ -193,7 +209,17 @@ BAIDU_CONFIG_FILE = _Path(__file__).resolve().parents[3] / "data" / "baidu_confi
 def _read_baidu_config() -> dict:
     try:
         if BAIDU_CONFIG_FILE.exists():
-            return _json.loads(BAIDU_CONFIG_FILE.read_text())
+            cfg = _json.loads(BAIDU_CONFIG_FILE.read_text())
+            key = str(cfg.get("api_key") or "")
+            encrypted = str(cfg.get("api_key_encrypted") or "")
+            if encrypted:
+                cfg["api_key"] = decrypt_secret(encrypted)
+            elif key:
+                cfg["api_key_encrypted"] = encrypt_secret(key)
+                cfg["api_key"] = ""
+                _write_baidu_config(cfg)
+                cfg["api_key"] = key
+            return cfg
     except (_json.JSONDecodeError, OSError) as e:
         logger.warning("加载百度搜索 API 配置失败: %s", e)
     return {"api_key": ""}
@@ -220,7 +246,7 @@ def save_baidu_config(payload: dict) -> dict:
     if not api_key:
         raise HTTPException(status_code=400, detail="API Key 不能为空")
 
-    cfg = {"api_key": api_key}
+    cfg = {"api_key": "", "api_key_encrypted": encrypt_secret(api_key)}
     _write_baidu_config(cfg)
 
     import os as _os
@@ -245,6 +271,16 @@ def delete_baidu_config() -> dict:
     _search_cache.clear()
 
     return {"configured": False, "message": "千帆搜索 API Key 已清除"}
+
+
+@router.get("/preferences")
+def get_preferences() -> dict:
+    return {"preferences": preferences_service.load_preferences()}
+
+
+@router.post("/preferences")
+def save_preferences(payload: dict) -> dict:
+    return {"preferences": preferences_service.save_preferences(payload)}
 
 
 @router.post("/baidu/test")

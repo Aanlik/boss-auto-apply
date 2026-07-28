@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { listJobPool, getJobPoolQuality, listBossCities, listBossFilterOptions, captureBossJobs, bossLogin, bossLoginStatus, enrichJdDetails, deleteJob, deleteBatchJobs, tagJob, clearAllJobs, listCompanyBlacklist, addCompanyBlacklist, deleteCompanyBlacklist, exportCompanyBlacklist, importCompanyBlacklist, cleanupExpiredJobs, keepExpiredJobs, mergeDuplicateJobs, updateJobApplicationStatus, updateJobDecisionStatus } from "../lib/api";
-import type { BossCaptureFilters, BossFilterOptions, BossLoginStatus, CompanyBlacklistItem, JobApplicationStatus, JobDecisionStatus, JobPoolQuality, JobPosting } from "../lib/types";
+import { listJobPool, getJobPoolQuality, listBossCities, listBossFilterOptions, captureBossJobs, bossLogin, bossLoginStatus, enrichJdDetails, deleteJob, deleteBatchJobs, tagJob, clearAllJobs, listCompanyBlacklist, addCompanyBlacklist, deleteCompanyBlacklist, exportCompanyBlacklist, importCompanyBlacklist, cleanupExpiredJobs, keepExpiredJobs, mergeDuplicateJobs, compareJobs, updateJobApplicationStatus, updateJobDecisionStatus, exportJobsUrl, listJobSearchPresets, saveJobSearchPreset, deleteJobSearchPreset } from "../lib/api";
+import type { BossCaptureFilters, BossFilterOptions, BossLoginStatus, CompanyBlacklistItem, JobApplicationStatus, JobComparison, JobDecisionStatus, JobPoolQuality, JobPosting, JobSearchPreset } from "../lib/types";
 import { HIDDEN_COMMON_TAGS_KEY, useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
 import { CitySearchSelect } from "../components/CitySearchSelect";
@@ -35,6 +35,7 @@ const DECISION_STATUS_LABELS: Record<JobDecisionStatus, string> = {
   risky: "风险",
 };
 type QualityFilterKey = "" | "with_jd" | "missing_jd" | "suspected_expired" | "blacklisted" | "duplicates";
+type JobViewMode = "card" | "compact" | "table";
 
 const QUALITY_FILTER_LABELS: Record<Exclude<QualityFilterKey, "">, string> = {
   with_jd: "已获取 JD",
@@ -62,6 +63,8 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     degree: [],
     industry: [],
   });
+  const [searchPresets, setSearchPresets] = useState<JobSearchPreset[]>([]);
+  const [presetName, setPresetName] = useState("");
 
   // ---- 筛选参数 ----
   const [filterText, setFilterText] = useState("");
@@ -72,6 +75,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   const [filterApplicationStatus, setFilterApplicationStatus] = useState("");
   const [filterDecisionStatus, setFilterDecisionStatus] = useState("");
   const [qualityFilter, setQualityFilter] = useState<QualityFilterKey>("");
+  const [viewMode, setViewMode] = useState<JobViewMode>("card");
 
   // ---- 数据状态 ----
   const [jobs, setJobs] = useState<JobPosting[]>([]);
@@ -88,6 +92,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   const [blacklistExpanded, setBlacklistExpanded] = useState(false);
   const [quality, setQuality] = useState<JobPoolQuality | null>(null);
   const [duplicatesExpanded, setDuplicatesExpanded] = useState(false);
+  const [comparison, setComparison] = useState<JobComparison | null>(null);
   const blacklistImportRef = useRef<HTMLInputElement | null>(null);
   const [hiddenCommonTags, setHiddenCommonTags] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
@@ -104,6 +109,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       loadCityOptions();
       loadFilterOptions();
       loadBlacklist();
+      loadSearchPresets();
       loadJobs(qualityFilter === "blacklisted");
       loadQuality();
       // JD 抓取进行中不触发 checkStatus，防止抢占 Chrome 导致页面跳转
@@ -126,6 +132,15 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       setFilterOptions(await listBossFilterOptions());
     } catch (err) {
       console.warn("[jobs] 加载抓取筛选项失败:", err);
+    }
+  }
+
+  async function loadSearchPresets() {
+    try {
+      const r = await listJobSearchPresets();
+      setSearchPresets(r.presets || []);
+    } catch (err) {
+      console.warn("[jobs] 加载搜索预设失败:", err);
     }
   }
 
@@ -198,6 +213,56 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       await loadQuality();
     } catch (err) { setError(formatApiError(err) || "抓取失败"); }
     finally { setLoading(prev => prev === "capture" ? "" : prev); }
+  }
+
+  async function onSaveSearchPreset() {
+    const name = presetName.trim() || `${city || "全国"} ${keyword || "岗位"}`;
+    try {
+      const r = await saveJobSearchPreset({
+        name,
+        keyword,
+        city,
+        max_pages: maxPages,
+        filters: captureFilters,
+        job_filters: {
+          text: filterText,
+          city: filterCity,
+          salary_min: filterSalaryMin,
+          salary_max: filterSalaryMax,
+          tags: filterTags,
+          application_status: filterApplicationStatus,
+          decision_status: filterDecisionStatus,
+        },
+      });
+      setSearchPresets(prev => [r.preset, ...prev.filter(item => item.id !== r.preset.id)]);
+      setPresetName("");
+    } catch (err) {
+      setError(formatApiError(err) || "保存搜索条件失败");
+    }
+  }
+
+  function applySearchPreset(preset: JobSearchPreset) {
+    setKeyword(preset.keyword || "产品经理");
+    setCity(preset.city || "全国");
+    setMaxPages(preset.max_pages || 3);
+    setCaptureFilters(preset.filters || {});
+    const jobFilters = preset.job_filters || {};
+    setFilterText(jobFilters.text || "");
+    setFilterCity(jobFilters.city || "");
+    setFilterSalaryMin(jobFilters.salary_min || "");
+    setFilterSalaryMax(jobFilters.salary_max || "");
+    setFilterTags(jobFilters.tags || "");
+    setFilterApplicationStatus(jobFilters.application_status || "");
+    setFilterDecisionStatus(jobFilters.decision_status || "");
+  }
+
+  async function removeSearchPreset(presetId: string) {
+    try {
+      await deleteJobSearchPreset(presetId);
+      setSearchPresets(prev => prev.filter(item => item.id !== presetId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除搜索条件失败");
+    }
   }
 
   async function onEnrichJD() {
@@ -314,6 +379,18 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       setError(`重复岗位已合并，保留 ${r.kept}，删除 ${r.removed.length} 个`);
     } catch (err) {
       setError(formatApiError(err) || "合并重复岗位失败");
+    }
+  }
+
+  async function onCompareSelected() {
+    if (selectedJobIds.length < 2 || selectedJobIds.length > 5) {
+      setError("岗位对比需要选择 2-5 个岗位");
+      return;
+    }
+    try {
+      setComparison(await compareJobs(selectedJobIds));
+    } catch (err) {
+      setError(formatApiError(err) || "岗位对比失败");
     }
   }
 
@@ -497,7 +574,15 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
           {selectedJobIds.length > 0 && (
             <button type="button" className="button-primary" onClick={() => onNavigate("diligence")}>开始尽调 →</button>
           )}
+          {selectedJobIds.length >= 2 && selectedJobIds.length <= 5 && (
+            <button type="button" className="button-secondary" onClick={onCompareSelected}>对比岗位</button>
+          )}
         </div>
+      </div>
+      <div className="module-export-bar" aria-label="岗位数据导出">
+        <span>岗位数据</span>
+        <a className="button-secondary button-secondary--sm" href={exportJobsUrl("json")} download>导出 JSON</a>
+        <a className="button-secondary button-secondary--sm" href={exportJobsUrl("csv")} download>导出 CSV</a>
       </div>
 
       {/* ── 错误 ── */}
@@ -520,6 +605,31 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
                 </div>
               ))}
             </div>
+            {comparison && (
+              <div className="job-comparison-panel">
+                <div className="page-section__top">
+                  <div>
+                    <div className="page-kicker">岗位对比</div>
+                    <p className="capture-panel-copy">将薪资、JD 完整度、生命周期和求职状态放在一起判断。</p>
+                  </div>
+                  <button type="button" className="button-quiet" onClick={() => setComparison(null)}>关闭对比</button>
+                </div>
+                <div className="job-comparison-grid">
+                  {comparison.jobs.map(job => (
+                    <div className="job-comparison-card" key={job.id}>
+                      <strong>{job.title}</strong>
+                      <span>{job.company} · {job.city || "城市未知"}</span>
+                      <dl>
+                        <div><dt>薪资</dt><dd>{job.salary || "面议"}</dd></div>
+                        <div><dt>JD</dt><dd>{comparison.comparison.jd_quality.find(item => item.id === job.id)?.value ? "完整" : "待补"}</dd></div>
+                        <div><dt>状态</dt><dd>{APPLICATION_STATUS_LABELS[job.application_status || "pending"]}</dd></div>
+                        <div><dt>决策</dt><dd>{DECISION_STATUS_LABELS[job.decision_status || "undecided"]}</dd></div>
+                      </dl>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -581,6 +691,28 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
                 {loading === "enrich" ? "获取中..." : "获取 JD 详情"}
               </button>
             </div>
+          </div>
+
+          <div className="search-preset-strip">
+            <div className="search-preset-save">
+              <input
+                className="form-input form-input--inline"
+                value={presetName}
+                onChange={e => setPresetName(e.target.value)}
+                placeholder={`${city || "全国"} ${keyword || "岗位"}`}
+              />
+              <button type="button" className="button-secondary" onClick={onSaveSearchPreset}>保存搜索条件</button>
+            </div>
+            {searchPresets.length > 0 && (
+              <div className="search-preset-list">
+                {searchPresets.slice(0, 6).map(preset => (
+                  <span key={preset.id} className="search-preset-chip">
+                    <button type="button" onClick={() => applySearchPreset(preset)}>{preset.name}</button>
+                    <button type="button" aria-label={`删除 ${preset.name}`} onClick={() => removeSearchPreset(preset.id)}>×</button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="capture-filter-grid" aria-label="高级筛选">
@@ -658,7 +790,23 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
               <button type="button" className={`quality-metric ${qualityFilter === "duplicates" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("duplicates")}>
                 <span>重复岗位</span><strong>{quality.summary.duplicate_jobs}</strong>
               </button>
+              <div className="quality-metric quality-metric--static">
+                <span>抓取批次</span><strong>{quality.summary.batch_count || 0}</strong>
+              </div>
             </div>
+            {quality.batches && quality.batches.length > 0 && (
+              <div className="batch-summary-list">
+                {quality.batches.slice(0, 4).map(batch => (
+                  <div key={batch.id} className="batch-summary-item">
+                    <div>
+                      <strong>{batch.keyword || "手动录入"} · {batch.city || "全国"}</strong>
+                      <p>{batch.capturedAt || "无时间"} · {batch.total} 个岗位 · 缺少 JD {batch.missing_jd}</p>
+                    </div>
+                    <code>{batch.id}</code>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="application-board">
               {(Object.keys(APPLICATION_STATUS_LABELS) as JobApplicationStatus[]).map(status => (
                 <button
@@ -742,6 +890,22 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
         />
       )}
 
+      {jobs.length > 0 && (
+        <div className="view-mode-strip">
+          <span className="page-kicker" style={{ margin: 0 }}>显示方式</span>
+          {(["card", "compact", "table"] as JobViewMode[]).map(mode => (
+            <button
+              key={mode}
+              type="button"
+              className={viewMode === mode ? "button-primary" : "button-secondary"}
+              onClick={() => setViewMode(mode)}
+            >
+              {mode === "card" ? "卡片" : mode === "compact" ? "紧凑" : "表格"}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* ── 岗位列表 ── */}
       {jobs.length === 0 ? (
         <div className="panel panel-strong">
@@ -749,6 +913,58 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
             <EmptyState icon="💼" title="暂无岗位数据" desc="登录 BOSS 直聘后输入关键词和城市，点击「开始抓取」获取岗位。" />
           </div>
         </div>
+      ) : viewMode === "table" ? (
+        <div className="job-table-wrap">
+          <table className="job-table">
+            <thead>
+              <tr>
+                <th>选择</th>
+                <th>岗位</th>
+                <th>公司</th>
+                <th>城市</th>
+                <th>薪资</th>
+                <th>状态</th>
+                <th>决策</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredJobs.map(job => (
+                <tr key={job.id} className={selectedJobIds.includes(job.id) ? "job-table-row--selected" : ""}>
+                  <td><input type="checkbox" checked={selectedJobIds.includes(job.id)} onChange={() => toggleJob(job.id)} /></td>
+                  <td><strong>{job.title}</strong></td>
+                  <td>{job.company}</td>
+                  <td>{job.city || "未知"}</td>
+                  <td>{job.salary || "面议"}</td>
+                  <td>{APPLICATION_STATUS_LABELS[(job.application_status || "pending") as JobApplicationStatus]}</td>
+                  <td>{DECISION_STATUS_LABELS[(job.decision_status || "undecided") as JobDecisionStatus]}</td>
+                  <td>
+                    <button type="button" className="button-quiet" onClick={() => setDetailId(detailId === job.id ? null : job.id)}>JD</button>
+                    <button type="button" className="button-quiet button-danger" onClick={() => onDeleteOne(job.id)}>删除</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : viewMode === "compact" ? (
+        <ul className="list-reset job-compact-list">
+          {filteredJobs.map(job => (
+            <li key={job.id} className={`job-compact-row${selectedJobIds.includes(job.id) ? " job-compact-row--selected" : ""}`}>
+              <input type="checkbox" checked={selectedJobIds.includes(job.id)} onChange={() => toggleJob(job.id)} />
+              <strong>{job.title}</strong>
+              <span>{job.company}</span>
+              <span>{job.city || "未知"} · {job.salary || "面议"}</span>
+              <select className="form-input form-input--inline" value={job.application_status || "pending"} onChange={e => onUpdateApplicationStatus(job, e.target.value as JobApplicationStatus)}>
+                {(Object.keys(APPLICATION_STATUS_LABELS) as JobApplicationStatus[]).map(status => <option key={status} value={status}>{APPLICATION_STATUS_LABELS[status]}</option>)}
+              </select>
+              <select className="form-input form-input--inline" value={job.decision_status || "undecided"} onChange={e => onUpdateDecisionStatus(job, e.target.value as JobDecisionStatus)}>
+                {(Object.keys(DECISION_STATUS_LABELS) as JobDecisionStatus[]).map(status => <option key={status} value={status}>{DECISION_STATUS_LABELS[status]}</option>)}
+              </select>
+              <button type="button" className="button-quiet" onClick={() => setDetailId(detailId === job.id ? null : job.id)}>JD</button>
+            </li>
+          ))}
+        </ul>
       ) : (
         <ul className="list-reset job-grid">
           {filteredJobs.map(job => {

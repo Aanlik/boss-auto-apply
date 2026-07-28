@@ -1,5 +1,17 @@
-from fastapi import APIRouter, HTTPException
-from app.services.scoring import RANKING_SETTINGS_FILE, load_ranking_weights, rank_jobs_ai, save_ranking_weights
+from __future__ import annotations
+
+import csv
+import io
+from datetime import datetime
+
+from fastapi import APIRouter, HTTPException, Response
+from app.services.scoring import (
+    RANKING_SETTINGS_FILE,
+    get_ranking_weight_templates,
+    load_ranking_weights,
+    rank_jobs_ai,
+    save_ranking_weights,
+)
 from app.services.workflow_persistence import load_rankings, save_rankings
 from app.services.workflow_tasks import complete_task, fail_task, start_task
 
@@ -11,9 +23,43 @@ def get_rankings() -> dict:
     return {"rankings": load_rankings()}
 
 
+@router.get("/rankings/export")
+def export_rankings(format: str = "json"):
+    rankings = load_rankings()
+    if format == "json":
+        return {"rankings": rankings, "total": len(rankings), "exportedAt": datetime.now().isoformat()}
+    if format == "csv":
+        output = io.StringIO()
+        fields = [
+            "jobId",
+            "jobTitle",
+            "company",
+            "salary",
+            "companyScore",
+            "matchScore",
+            "compositeScore",
+            "recommendation",
+            "reason",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rankings)
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="rankings.csv"'},
+        )
+    raise HTTPException(status_code=400, detail="导出格式必须是 json/csv")
+
+
 @router.get("/weights")
 def get_ranking_weights() -> dict:
     return {"weights": load_ranking_weights()}
+
+
+@router.get("/weights/templates")
+def get_weight_templates() -> dict:
+    return {"templates": get_ranking_weight_templates()}
 
 
 @router.post("/weights")

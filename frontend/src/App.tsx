@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { ACTIVE_PAGE_KEY, WorkflowProvider, useWorkflowState } from "./lib/store";
-import { listJobPool, listWorkflowTasks } from "./lib/api";
+import { getWorkflowHealthCheck, listJobPool, listWorkflowTasks, retryWorkflowTask } from "./lib/api";
 import { buildRecoveryTasks, buildWorkflowTasks, buildWorkflowTodos } from "./lib/workflowInsights";
-import type { JobPosting, WorkflowRuntimeTask } from "./lib/types";
+import type { JobPosting, WorkflowHealthCheck, WorkflowRuntimeTask } from "./lib/types";
+import DashboardPage from "./pages/dashboard";
 import ResumesPage from "./pages/resumes";
 import JobsPage from "./pages/jobs";
 import DiligencePage from "./pages/diligence";
 import RankedJobsPage from "./pages/ranked-jobs";
 import GreetingPage from "./pages/greeting";
 import SettingsPanel from "./components/SettingsPanel";
+import HelpCenter from "./components/HelpCenter";
 
-type PageKey = "resumes" | "jobs" | "diligence" | "ranking" | "greeting";
+type PageKey = "dashboard" | "resumes" | "jobs" | "diligence" | "ranking" | "greeting";
 
 const pages: Array<{ key: PageKey; label: string }> = [
+  { key: "dashboard", label: "仪表盘" },
   { key: "resumes", label: "简历" },
   { key: "jobs", label: "岗位" },
   { key: "diligence", label: "尽调" },
@@ -24,15 +27,17 @@ function getInitialPage(): PageKey {
   if (typeof window === "undefined") return "resumes";
   const saved = window.localStorage.getItem(ACTIVE_PAGE_KEY);
   if (pages.some(p => p.key === saved)) return saved as PageKey;
-  return "resumes";
+  return "dashboard";
 }
 
 function AppShell() {
   const [page, setPageState] = useState<PageKey>(getInitialPage);
   const [showSettings, setShowSettings] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const state = useWorkflowState();
   const [jobs, setJobs] = useState<JobPosting[]>([]);
   const [runtimeTasks, setRuntimeTasks] = useState<WorkflowRuntimeTask[]>([]);
+  const [healthCheck, setHealthCheck] = useState<WorkflowHealthCheck | null>(null);
 
   async function refreshJobsForWorkflow() {
     try {
@@ -52,8 +57,16 @@ function AppShell() {
     }
   }
 
+  async function refreshHealthCheck() {
+    try {
+      setHealthCheck(await getWorkflowHealthCheck());
+    } catch (err) {
+      console.warn("[app] 加载系统健康状态失败:", err);
+    }
+  }
+
   async function refreshGlobalStatus() {
-    await Promise.all([refreshJobsForWorkflow(), refreshRuntimeTasks()]);
+    await Promise.all([refreshJobsForWorkflow(), refreshRuntimeTasks(), refreshHealthCheck()]);
   }
 
   useEffect(() => {
@@ -75,6 +88,26 @@ function AppShell() {
     setPageState(pageKey);
     if (typeof window !== "undefined") {
       window.localStorage.setItem(ACTIVE_PAGE_KEY, pageKey);
+    }
+  }
+
+  function navigateFromDashboard(pageKey: string) {
+    if (pageKey === "settings") {
+      setShowSettings(true);
+      return;
+    }
+    if (pages.some(item => item.key === pageKey)) {
+      setPage(pageKey as PageKey);
+    }
+  }
+
+  function navigateFromHelp(pageKey: string) {
+    if (pageKey === "settings") {
+      setShowSettings(true);
+      return;
+    }
+    if (pages.some(item => item.key === pageKey)) {
+      setPage(pageKey as PageKey);
     }
   }
 
@@ -101,12 +134,22 @@ function AppShell() {
         >
           ⚙ 设置
         </button>
+        <button
+          className={`nav-link ${showHelp ? "nav-link--active" : ""}`}
+          onClick={() => setShowHelp(!showHelp)}
+        >
+          帮助
+        </button>
       </nav>
 
       <SettingsPanel show={showSettings} onClose={() => setShowSettings(false)} />
-      <GlobalWorkflowStatus jobs={jobs} runtimeTasks={runtimeTasks} onRefresh={refreshGlobalStatus} onNavigate={setPage} />
+      <HelpCenter show={showHelp} onClose={() => setShowHelp(false)} onNavigate={navigateFromHelp} />
+      <GlobalWorkflowStatus jobs={jobs} runtimeTasks={runtimeTasks} healthCheck={healthCheck} onRefresh={refreshGlobalStatus} onNavigate={setPage} />
 
       <main className="workspace-stage">
+        <div style={{ display: page === "dashboard" ? "block" : "none" }}>
+          <DashboardPage onNavigate={navigateFromDashboard} />
+        </div>
         <div style={{ display: page === "resumes" ? "block" : "none" }}>
           <ResumesPage />
         </div>
@@ -130,11 +173,13 @@ function AppShell() {
 function GlobalWorkflowStatus({
   jobs,
   runtimeTasks,
+  healthCheck,
   onRefresh,
   onNavigate,
 }: {
   jobs: JobPosting[];
   runtimeTasks: WorkflowRuntimeTask[];
+  healthCheck: WorkflowHealthCheck | null;
   onRefresh: () => void;
   onNavigate: (page: PageKey) => void;
 }) {
@@ -149,6 +194,7 @@ function GlobalWorkflowStatus({
 
   const activeRuntimeTasks = runtimeTasks.filter(task => task.status === "running" || task.status === "queued").slice(0, 2);
   const recoveryTasks = useMemo(() => buildRecoveryTasks(runtimeTasks).slice(0, 3), [runtimeTasks]);
+  const attentionChecks = (healthCheck?.checks || []).filter(item => item.status !== "ok").slice(0, 3);
   const todos = useMemo(() => buildWorkflowTodos({
     jobs,
     selectedJobIds: state.selectedJobIds,
@@ -156,7 +202,7 @@ function GlobalWorkflowStatus({
     rankingResults: state.rankingResults,
     greetingTexts: state.greetingTexts,
   }).slice(0, 3), [jobs, state.selectedJobIds, state.diligenceReports, state.rankingResults, state.greetingTexts]);
-  const hasRuntimePanel = activeRuntimeTasks.length > 0 || recoveryTasks.length > 0 || todos.length > 0;
+  const hasRuntimePanel = activeRuntimeTasks.length > 0 || recoveryTasks.length > 0 || todos.length > 0 || attentionChecks.length > 0;
 
   function targetPage(taskType: string): PageKey {
     if (taskType.includes("diligence")) return "diligence";
@@ -165,13 +211,27 @@ function GlobalWorkflowStatus({
     return "jobs";
   }
 
+  async function retryTask(taskId: string) {
+    try {
+      await retryWorkflowTask(taskId);
+      onRefresh();
+    } catch (err) {
+      console.warn("[app] 任务重试失败:", err);
+    }
+  }
+
   return (
     <section className="global-workflow-status" aria-label="全流程状态">
       <div className={`global-workflow-status__inner${hasRuntimePanel ? " global-workflow-status__inner--with-recovery" : ""}`}>
         <div className="global-workflow-status__title">
           <span>全流程状态</span>
-          <small>岗位池到打招呼</small>
+          <small>岗位池到打招呼 · 系统{healthCheck?.status === "ok" ? "正常" : healthCheck?.status === "error" ? "异常" : "需关注"}</small>
         </div>
+        {healthCheck && (
+          <div className={`health-pill health-pill--${healthCheck.status}`}>
+            {healthCheck.status === "ok" ? "健康" : healthCheck.status === "error" ? "异常" : "待配置"}
+          </div>
+        )}
         <div className="workflow-status-grid workflow-status-grid--compact">
           {tasks.map(task => (
             <div key={task.key} className={`workflow-status-card workflow-status-card--${task.status}`}>
@@ -188,9 +248,16 @@ function GlobalWorkflowStatus({
         {hasRuntimePanel && (
           <div className="workflow-recovery-panel" aria-label="流程操作中心">
             <div className="workflow-recovery-panel__top">
-              <strong>{recoveryTasks.length > 0 ? "失败恢复中心" : activeRuntimeTasks.length > 0 ? "任务执行中" : "今日待办"}</strong>
+              <strong>{recoveryTasks.length > 0 ? "失败恢复中心" : activeRuntimeTasks.length > 0 ? "任务执行中" : attentionChecks.length > 0 ? "系统检查" : "今日待办"}</strong>
               <button type="button" className="button-quiet button-compact" onClick={onRefresh}>刷新状态</button>
             </div>
+            {attentionChecks.map(check => (
+              <div key={check.key} className={`workflow-recovery-item workflow-recovery-item--${check.status}`}>
+                <span>{check.label}</span>
+                <small>{check.message}</small>
+                {check.action && <em>{check.action}</em>}
+              </div>
+            ))}
             {activeRuntimeTasks.map(task => (
               <div key={task.id} className="workflow-recovery-item workflow-recovery-item--running">
                 <span>{task.title}</span>
@@ -205,9 +272,14 @@ function GlobalWorkflowStatus({
                   <small>{task.message}</small>
                   <em>{task.action}</em>
                   {sourceTask && (
-                    <button type="button" className="button-secondary button-secondary--sm" onClick={() => onNavigate(targetPage(sourceTask.type))}>
-                      处理
-                    </button>
+                    <>
+                      <button type="button" className="button-secondary button-secondary--sm" onClick={() => retryTask(sourceTask.id)}>
+                        重试
+                      </button>
+                      <button type="button" className="button-quiet button-secondary--sm" onClick={() => onNavigate(targetPage(sourceTask.type))}>
+                        处理
+                      </button>
+                    </>
                   )}
                 </div>
               );

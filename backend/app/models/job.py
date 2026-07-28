@@ -16,6 +16,11 @@ class JobRecord(BaseModel):
     source_url: str = ""
     fetched_at: str = ""         # ISO 时间戳
     dedupe_key: str = ""         # 去重键：company+title+city 的小写哈希
+    capture_batch_id: str = ""   # 抓取批次，便于回溯本次抓取质量
+    capture_keyword: str = ""    # 本次抓取关键词
+    capture_city: str = ""       # 本次抓取城市
+    capture_filters: dict = Field(default_factory=dict)  # 本次抓取筛选条件
+    captured_at: str = ""        # 本次抓取完成时间
     greeted: bool = False        # 是否已打招呼
     tags: list[str] = Field(default_factory=list)  # 自定义标签
     lifecycle_status: str = "active"  # active / suspected_expired / blacklisted
@@ -25,6 +30,7 @@ class JobRecord(BaseModel):
     application_note: str = ""
     application_updated_at: str = ""
     decision_status: str = "undecided"  # undecided / recommended / watching / abandoned / risky
+    status_history: list[dict] = Field(default_factory=list)
 
 
 class JobSource(BaseModel):

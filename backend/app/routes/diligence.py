@@ -1,4 +1,10 @@
-from fastapi import APIRouter, HTTPException
+from __future__ import annotations
+
+import csv
+import io
+from datetime import datetime
+
+from fastapi import APIRouter, HTTPException, Response
 from app.services.company_diligence import run_full_diligence
 from app.services.business_info import query_business_info
 from app.services.workflow_persistence import find_diligence_report, load_diligence_reports, save_diligence_report
@@ -10,6 +16,79 @@ router = APIRouter(prefix="/api/diligence", tags=["diligence"])
 @router.get("/reports")
 def get_diligence_reports() -> dict:
     return {"reports": load_diligence_reports()}
+
+
+def _as_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    if value:
+        return [value]
+    return []
+
+
+def _evidence_summary(report: dict) -> dict:
+    business = report.get("businessInfo") if isinstance(report.get("businessInfo"), dict) else {}
+    sentiment = report.get("sentiment") if isinstance(report.get("sentiment"), dict) else {}
+    industry = report.get("industryOutlook") if isinstance(report.get("industryOutlook"), dict) else {}
+    search_links = []
+    for key in ("evidenceLinks", "links", "sources"):
+        for item in _as_list(sentiment.get(key)):
+            if isinstance(item, dict):
+                url = item.get("url") or item.get("link")
+            else:
+                url = item
+            if url and url not in search_links:
+                search_links.append(url)
+    business_evidence = {
+        "companyName": business.get("companyName") or report.get("companyName", ""),
+        "unifiedCreditCode": business.get("unifiedCreditCode") or business.get("creditNo") or business.get("CreditNo") or "",
+        "legalRepresentative": business.get("legalRepresentative") or business.get("legalPerson") or business.get("LegalPerson") or "",
+        "registrationCapital": business.get("registrationCapital") or business.get("capital") or business.get("Capital") or "",
+        "establishedDate": business.get("establishedDate") or business.get("establishDate") or business.get("EstablishDate") or "",
+        "businessStatus": business.get("businessStatus") or business.get("companyStatus") or business.get("CompanyStatus") or "",
+        "industry": business.get("industry") or business.get("registeredIndustry") or "",
+        "abnormalCount": len(_as_list(business.get("abnormalInfo") or business.get("exceptions") or business.get("Exceptions"))),
+        "penaltyCount": len(_as_list(business.get("penalties") or business.get("Penalties"))),
+    }
+    return {
+        "business": business_evidence,
+        "searchLinks": search_links,
+        "positiveSignals": _as_list(sentiment.get("positive")),
+        "negativeSignals": _as_list(sentiment.get("negative")),
+        "industryOpportunities": _as_list(industry.get("advantages") or industry.get("opportunities")),
+        "industryWeaknesses": _as_list(industry.get("disadvantages") or industry.get("weaknesses")),
+        "industryRisks": _as_list(industry.get("risks")),
+    }
+
+
+@router.get("/export")
+def export_diligence_reports(format: str = "json"):
+    reports = list(load_diligence_reports().values())
+    enriched = [{**report, "evidenceSummary": _evidence_summary(report)} for report in reports]
+    if format == "json":
+        return {"reports": enriched, "total": len(enriched), "exportedAt": datetime.now().isoformat()}
+    if format == "csv":
+        output = io.StringIO()
+        fields = ["companyName", "companyScore", "riskLevel", "businessStatus", "industry", "searchLinks"]
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        for report in enriched:
+            evidence = report.get("evidenceSummary", {})
+            business = evidence.get("business", {})
+            writer.writerow({
+                "companyName": report.get("companyName", ""),
+                "companyScore": report.get("companyScore", ""),
+                "riskLevel": report.get("riskLevel", ""),
+                "businessStatus": business.get("businessStatus", ""),
+                "industry": business.get("industry", ""),
+                "searchLinks": "；".join(evidence.get("searchLinks") or []),
+            })
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="diligence.csv"'},
+        )
+    raise HTTPException(status_code=400, detail="导出格式必须是 json/csv")
 
 
 @router.post("/evaluate")

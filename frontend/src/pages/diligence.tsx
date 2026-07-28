@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { listJobPool as poolJobs, analyzeJD, evaluateCompany, getDiligenceReports, refreshDiligence, saveDiligenceNote } from "../lib/api";
+import { listJobPool as poolJobs, analyzeJD, evaluateCompany, getDiligenceReports, refreshDiligence, saveDiligenceNote, exportDiligenceUrl } from "../lib/api";
 import type { DiligenceReport, JobPosting } from "../lib/types";
 import { useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
 import ChatPanel from "../components/ChatPanel";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
 import { buildDiligenceEvidence } from "../lib/workflowInsights";
+import AiFeedbackButtons from "../components/AiFeedbackButtons";
 
 type CardState = { jdExpanded: boolean; ddExpanded: boolean; chatExpanded: boolean };
 type BatchProgress = { kind: "jd" | "dd"; done: number; total: number; current: string } | null;
@@ -234,6 +235,11 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
           )}
         </div>
       </div>
+      <div className="module-export-bar" aria-label="尽调数据导出">
+        <span>尽调报告</span>
+        <a className="button-secondary button-secondary--sm" href={exportDiligenceUrl("json")} download>导出 JSON</a>
+        <a className="button-secondary button-secondary--sm" href={exportDiligenceUrl("csv")} download>导出 CSV</a>
+      </div>
 
       {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}
       {batchProgress && (
@@ -398,6 +404,12 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
                               <p style={{ fontSize: 12, marginTop: 2, lineHeight: 1.5 }}>{analysis.summary_text}</p>
                             </div>
                           )}
+                          <AiFeedbackButtons
+                            domain="jd_quality"
+                            targetId={job.id}
+                            compact
+                            context={{ company: job.company, title: job.title }}
+                          />
                         </div>
                       </div>
                       <div style={{ marginTop: 10 }}>
@@ -430,9 +442,23 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
                             💡 {diligence.oneLiner}
                           </p>
                         )}
+                        <AiFeedbackButtons
+                          domain="diligence"
+                          targetId={diligence.companyKey || diligence.companyName || job.company}
+                          compact
+                          context={{ company: diligence.companyName || job.company, score: diligence.companyScore, riskLevel: diligence.riskLevel }}
+                        />
                         {evidence && (
                           <details className="evidence-panel" style={{ marginBottom: 12 }}>
                             <summary>证据来源与判断依据</summary>
+                            <div className="evidence-trust-row" aria-label="证据可信度说明">
+                              {evidence.sourceTrust.map(source => (
+                                <div key={source.label} className={`evidence-trust evidence-trust--${source.level}`}>
+                                  <strong>{source.label}</strong>
+                                  <span>{source.description}</span>
+                                </div>
+                              ))}
+                            </div>
                             <div className="evidence-grid">
                               <div>
                                 <span className="detail-label">工商 API</span>

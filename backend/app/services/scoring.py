@@ -10,11 +10,30 @@ import json
 import logging
 from pathlib import Path
 from app.services.ai_client import get_ai_client
+from app.services.feedback_store import list_feedback
+from app.services.preferences import load_preferences
 from app.services.workflow_persistence import _read_json, write_json_atomic
 
 logger = logging.getLogger(__name__)
 RANKING_SETTINGS_FILE = Path(__file__).resolve().parents[3] / "data" / "rankings" / "settings.json"
 DEFAULT_RANKING_WEIGHTS = {"company_weight": 0.4, "match_weight": 0.6}
+RANKING_WEIGHT_TEMPLATES = {
+    "balanced": {
+        "name": "均衡推荐",
+        "description": "兼顾公司质量和简历匹配，适合日常筛选。",
+        "weights": {"company_weight": 0.4, "match_weight": 0.6},
+    },
+    "low_risk": {
+        "name": "低风险优先",
+        "description": "提高公司尽调权重，适合规避经营与舆情风险。",
+        "weights": {"company_weight": 0.65, "match_weight": 0.35},
+    },
+    "high_match": {
+        "name": "高匹配优先",
+        "description": "提高简历匹配权重，适合优先冲击成功率。",
+        "weights": {"company_weight": 0.25, "match_weight": 0.75},
+    },
+}
 
 
 def normalize_ranking_weights(payload: dict | None = None) -> dict[str, float]:
@@ -37,10 +56,49 @@ def load_ranking_weights() -> dict[str, float]:
     return normalize_ranking_weights(data if isinstance(data, dict) else {})
 
 
+def load_feedback_adjusted_weights(base_weights: dict | None = None) -> dict:
+    weights = normalize_ranking_weights(base_weights or load_ranking_weights())
+    company_delta = 0.0
+    match_delta = 0.0
+    signals: list[str] = []
+    for record in list_feedback(domain="ranking")[:30]:
+        if record.get("useful") is True:
+            continue
+        context = record.get("context") if isinstance(record.get("context"), dict) else {}
+        preference = str(context.get("weightPreference") or "").strip()
+        if not preference:
+            company_score = _safe_float(context.get("companyScore"))
+            match_score = _safe_float(context.get("matchScore"))
+            if company_score is not None and match_score is not None:
+                if company_score + 10 < match_score:
+                    preference = "company"
+                elif match_score + 10 < company_score:
+                    preference = "match"
+        if preference == "company":
+            company_delta += 0.03
+            signals.append("近期排序反馈提示：公司风险权重应略微提高。")
+        elif preference == "match":
+            match_delta += 0.03
+            signals.append("近期排序反馈提示：简历匹配权重应略微提高。")
+    company_delta = min(0.15, company_delta)
+    match_delta = min(0.15, match_delta)
+    adjusted = normalize_ranking_weights({
+        "company_weight": weights["company_weight"] + company_delta,
+        "match_weight": weights["match_weight"] + match_delta,
+    })
+    if not signals:
+        return adjusted
+    return {**adjusted, "feedbackAdjusted": True, "feedbackSignals": list(dict.fromkeys(signals))[:4]}
+
+
 def save_ranking_weights(payload: dict) -> dict[str, float]:
     weights = normalize_ranking_weights(payload)
     write_json_atomic(RANKING_SETTINGS_FILE, weights)
     return weights
+
+
+def get_ranking_weight_templates() -> dict:
+    return RANKING_WEIGHT_TEMPLATES
 
 
 async def analyze_jd_for_matching(job: dict) -> dict:
@@ -145,7 +203,7 @@ async def rank_jobs_ai(jobs: list, resume: dict, diligence_reports: dict, weight
     """
     results = []
     diligence_index = _build_diligence_index(diligence_reports)
-    active_weights = normalize_ranking_weights(weights or load_ranking_weights())
+    active_weights = load_feedback_adjusted_weights(weights or load_ranking_weights())
     for job in jobs:
         job_id = job.get("id", "")
         company = job.get("company", "")
@@ -181,6 +239,16 @@ async def rank_jobs_ai(jobs: list, resume: dict, diligence_reports: dict, weight
             "matchHighlights": match_result.get("highlights", []),
             "matchGaps": match_result.get("gaps", []),
             "weights": active_weights,
+            "explanation": _build_ranking_explanation(
+                job=job,
+                diligence=diligence,
+                jd_analysis=jd_analysis,
+                match_result=match_result,
+                company_score=company_score,
+                match_score=match_score,
+                composite_score=composite,
+                preferences=load_preferences(),
+            ),
         })
 
     # 按综合得分降序排列
@@ -254,3 +322,98 @@ def _fallback_match(error_msg: str = "") -> dict:
         "recommendation": "consider",
         "reason": reason,
     }
+
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_ranking_explanation(
+    job: dict,
+    diligence: dict,
+    jd_analysis: dict,
+    match_result: dict,
+    company_score: int | float,
+    match_score: int | float,
+    composite_score: int | float,
+    preferences: dict | None = None,
+) -> dict:
+    highlights = match_result.get("highlights") if isinstance(match_result.get("highlights"), list) else []
+    gaps = match_result.get("gaps") if isinstance(match_result.get("gaps"), list) else []
+    risk_level = diligence.get("riskLevel") or "unknown"
+    negative = []
+    sentiment = diligence.get("sentiment") if isinstance(diligence.get("sentiment"), dict) else {}
+    if isinstance(sentiment.get("negative"), list):
+        negative = sentiment.get("negative")[:3]
+    company_reason = "公司风险信息不足"
+    if company_score >= 80:
+        company_reason = "公司尽调得分较高"
+    elif company_score >= 60:
+        company_reason = "公司尽调风险中等"
+    elif diligence:
+        company_reason = "公司尽调风险偏高，建议复核证据"
+
+    if composite_score >= 80:
+        next_step = "优先投递，并结合尽调证据准备沟通重点"
+    elif gaps:
+        next_step = "投递前先补齐简历中的关键缺口"
+    elif risk_level in {"high", "高", "risky"}:
+        next_step = "先刷新尽调证据，再决定是否推进"
+    else:
+        next_step = "可作为备选岗位继续观察"
+    preference_signals = _build_preference_signals(job, diligence, preferences or {})
+
+    return {
+        "matchReasons": highlights,
+        "resumeGaps": gaps,
+        "companyReason": company_reason,
+        "riskSignals": negative,
+        "jdSignals": {
+            "coreRequirements": jd_analysis.get("core_requirements", []),
+            "hardRequirements": jd_analysis.get("hard_requirements", []),
+        },
+        "scoreBreakdown": {
+            "companyScore": company_score,
+            "matchScore": match_score,
+            "compositeScore": composite_score,
+        },
+        "nextStep": next_step,
+        "preferenceSignals": preference_signals,
+        "summary": match_result.get("reason") or company_reason,
+        "jobSnapshot": {
+            "title": job.get("title", ""),
+            "company": job.get("company", ""),
+            "salary": job.get("salary", ""),
+        },
+    }
+
+
+def build_preference_signals(job: dict, diligence: dict, preferences: dict) -> list[str]:
+    signals: list[str] = []
+    stability = int(preferences.get("stability") or 0)
+    salary = int(preferences.get("salary") or 0)
+    growth = int(preferences.get("growth") or 0)
+    match = int(preferences.get("match") or 0)
+    if stability >= 80:
+        signals.append("偏好稳定性：优先关注公司经营状态、风险等级和长期岗位有效性")
+    if salary >= 80:
+        signals.append(f"偏好薪资：当前薪资 {job.get('salary') or '未披露'} 需要重点比较市场水平")
+    if growth >= 80:
+        signals.append("偏好成长：建议结合行业趋势、业务空间和岗位职责成长性判断")
+    if match >= 80:
+        signals.append("偏好匹配度：当前排序更应重视简历命中 JD 核心要求")
+    industry = str((diligence.get("industryOutlook") or {}).get("industry") or (diligence.get("businessInfo") or {}).get("industry") or "")
+    avoid_industries = [str(item) for item in preferences.get("avoid_industries", []) if str(item)]
+    if industry and any(item in industry for item in avoid_industries):
+        signals.append(f"规避行业命中：{industry}")
+    preferred_cities = [str(item) for item in preferences.get("preferred_cities", []) if str(item)]
+    city = str(job.get("city") or "")
+    if city and preferred_cities and city in preferred_cities:
+        signals.append(f"偏好城市命中：{city}")
+    return signals
+
+
+_build_preference_signals = build_preference_signals

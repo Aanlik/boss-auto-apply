@@ -247,6 +247,142 @@ def test_job_pool_quality_summary_exposes_duplicates_and_lifecycle(monkeypatch):
     assert body["duplicateGroups"][0]["jobIds"] == ["job-1", "job-2"]
 
 
+def test_job_status_change_keeps_history_and_audit_event(tmp_path, monkeypatch):
+    import app.routes.jobs as jobs_route
+    from app.services import workflow_persistence as persistence
+
+    monkeypatch.setattr(persistence, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "job-1": JobRecord(id="job-1", title="产品经理", company="示例科技"),
+    })
+
+    response = client.post("/api/jobs/status", json={"job_id": "job-1", "status": "interviewing", "note": "约周五面试"})
+    history = client.get("/api/jobs/job-1/history")
+    logs = client.get("/api/maintenance/logs?limit=10")
+
+    assert response.status_code == 200
+    assert history.json()["history"][-1]["status"] == "interviewing"
+    assert history.json()["history"][-1]["note"] == "约周五面试"
+    assert any(event["category"] == "job_status" for event in logs.json()["events"])
+
+
+def test_batch_quality_includes_rates_and_job_compare(monkeypatch):
+    import app.routes.jobs as jobs_route
+
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "job-1": JobRecord(
+            id="job-1", title="产品经理", company="示例科技", city="上海",
+            jd_text="负责产品规划", capture_batch_id="batch-1",
+        ),
+        "job-2": JobRecord(
+            id="job-2", title="运营", company="风险科技", city="上海",
+            jd_text="", capture_batch_id="batch-1", lifecycle_status="suspected_expired",
+        ),
+    })
+
+    quality = client.get("/api/jobs/pool/quality").json()
+    compare = client.post("/api/jobs/compare", json={"job_ids": ["job-1", "job-2"]})
+
+    batch = quality["batches"][0]
+    assert batch["jd_completion_rate"] == 50
+    assert batch["stale_rate"] == 50
+    assert compare.status_code == 200
+    assert compare.json()["jobs"][0]["id"] == "job-1"
+    assert "jd_quality" in compare.json()["comparison"]
+
+
+def test_application_funnel_reports_conversion_and_batch_performance(monkeypatch):
+    import app.routes.jobs as jobs_route
+
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "job-1": JobRecord(id="job-1", title="产品", company="A", capture_batch_id="b1", application_status="greeted", decision_status="recommended"),
+        "job-2": JobRecord(id="job-2", title="运营", company="B", capture_batch_id="b1", application_status="interviewing", decision_status="recommended"),
+        "job-3": JobRecord(id="job-3", title="销售", company="C", capture_batch_id="b2", application_status="rejected", decision_status="risky"),
+        "job-4": JobRecord(id="job-4", title="客服", company="D", capture_batch_id="b2", application_status="pending"),
+    })
+
+    response = client.get("/api/jobs/funnel")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["total"] == 4
+    assert body["summary"]["contacted"] == 3
+    assert body["summary"]["interviewRate"] == 25
+    assert body["batches"][0]["id"] in {"b1", "b2"}
+    assert body["recommendations"]
+
+
+def test_user_preferences_can_be_saved_for_personalized_ranking(tmp_path, monkeypatch):
+    from app.services import preferences
+
+    monkeypatch.setattr(preferences, "PREFERENCES_FILE", tmp_path / "preferences.json")
+
+    saved = client.post("/api/settings/preferences", json={
+        "stability": 80,
+        "salary": 60,
+        "growth": 70,
+        "match": 90,
+        "avoid_industries": ["教培"],
+        "preferred_cities": ["上海"],
+    })
+    loaded = client.get("/api/settings/preferences")
+
+    assert saved.status_code == 200
+    assert loaded.json()["preferences"]["stability"] == 80
+    assert "教培" in loaded.json()["preferences"]["avoid_industries"]
+
+
+def test_ranking_explanation_includes_user_preferences(tmp_path, monkeypatch):
+    import app.services.scoring as scoring
+    from app.services import preferences
+
+    monkeypatch.setattr(preferences, "PREFERENCES_FILE", tmp_path / "preferences.json")
+    preferences.save_preferences({
+        "stability": 90,
+        "salary": 40,
+        "growth": 70,
+        "match": 85,
+        "avoid_industries": ["教培"],
+        "preferred_cities": ["上海"],
+    })
+
+    async def fake_jd(job):
+        return {"core_requirements": ["产品规划"], "hard_requirements": []}
+
+    async def fake_match(resume, job, jd_analysis):
+        return {"match_score": 80, "highlights": ["产品经验匹配"], "gaps": [], "recommendation": "recommend", "reason": "匹配"}
+
+    monkeypatch.setattr(scoring, "analyze_jd_for_matching", fake_jd)
+    monkeypatch.setattr(scoring, "match_resume_to_job", fake_match)
+
+    ranked = asyncio.run(scoring.rank_jobs_ai(
+        [{"id": "job-1", "title": "产品经理", "company": "示例科技", "city": "上海", "salary": "20-30K", "jd_text": "负责产品规划"}],
+        {"skills": ["产品规划"]},
+        {"示例科技": {"companyScore": 80, "riskLevel": "low"}},
+    ))
+
+    assert ranked[0]["explanation"]["preferenceSignals"]
+    assert any("稳定性" in item for item in ranked[0]["explanation"]["preferenceSignals"])
+
+
+def test_deleted_jobs_can_be_restored_from_archive(tmp_path, monkeypatch):
+    import app.routes.jobs as jobs_route
+
+    monkeypatch.setattr(jobs_route, "JOBS_FILE", tmp_path / "jobs.json")
+    monkeypatch.setattr(jobs_route, "DELETED_JOBS_FILE", tmp_path / "deleted_jobs.json")
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "job-1": JobRecord(id="job-1", title="产品经理", company="示例科技"),
+    })
+
+    deleted = client.delete("/api/jobs/job-1")
+    restored = client.post("/api/jobs/restore", json={"job_ids": ["job-1"]})
+
+    assert deleted.status_code == 200
+    assert restored.status_code == 200
+    assert restored.json()["restored"] == 1
+    assert "job-1" in jobs_route._job_store
+
+
 def test_standard_api_error_preserves_code_message_and_action():
     from app.services.api_errors import api_error
 
@@ -352,3 +488,31 @@ def test_workflow_task_lifecycle_is_persisted(tmp_path, monkeypatch):
     assert body["tasks"][0]["type"] == "jd_enrich"
     assert body["tasks"][0]["done"] == 3
     assert body["tasks"][0]["message"] == "完成"
+
+
+def test_secret_store_encrypts_and_round_trips_without_plaintext(tmp_path, monkeypatch):
+    from app.services import secret_store
+
+    monkeypatch.setattr(secret_store, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(secret_store, "KEY_FILE", tmp_path / ".secret_key")
+
+    encrypted = secret_store.encrypt_secret("sk-sensitive")
+
+    assert encrypted != "sk-sensitive"
+    assert secret_store.decrypt_secret(encrypted) == "sk-sensitive"
+    assert secret_store.is_encrypted(encrypted) is True
+
+
+def test_provider_config_is_stored_encrypted(tmp_path, monkeypatch):
+    from app.services import ai_client, secret_store
+
+    monkeypatch.setattr(ai_client, "CONFIG_FILE", tmp_path / "provider.json")
+    monkeypatch.setattr(secret_store, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(secret_store, "KEY_FILE", tmp_path / ".secret_key")
+    monkeypatch.setattr(ai_client, "_cached_config", None)
+
+    assert ai_client.set_config("openai", "sk-sensitive", "", "gpt-4.1-mini")
+
+    raw = (tmp_path / "provider.json").read_text(encoding="utf-8")
+    assert "sk-sensitive" not in raw
+    assert ai_client.get_config()["api_key"] == "sk-sensitive"

@@ -96,6 +96,49 @@ def test_business_info_calls_cloudmarket_with_post_query_keyword(monkeypatch):
     assert result["companyName"] == "深圳市腾讯计算机系统有限公司"
 
 
+def test_business_info_retries_transient_cloudmarket_failure(monkeypatch):
+    attempts = 0
+
+    class FakeResponse:
+        def __init__(self, status):
+            self.status = status
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def text(self):
+            if self.status == 200:
+                return json.dumps({"code": 200, "data": {"Base": {"CompanyName": "重试成功公司"}}})
+            return "temporary failure"
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, *args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            return FakeResponse(503 if attempts < 3 else 200)
+
+    monkeypatch.setattr(business_info.aiohttp, "ClientSession", FakeSession)
+    monkeypatch.setattr(business_info, "_secret_id", "sid")
+    monkeypatch.setattr(business_info, "_secret_key", "skey")
+
+    result = asyncio.run(business_info._call_api("重试公司"))
+
+    assert attempts == 3
+    assert result["companyName"] == "重试成功公司"
+
+
 def test_business_info_formats_use_plan_error():
     message = business_info._format_cloudmarket_error(
         421,

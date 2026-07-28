@@ -12,6 +12,7 @@ AI 驱动的互联网搜索 — 百度千帆智能搜索 API
 
 import json
 import logging
+import time
 import os
 import re
 from pathlib import Path
@@ -19,6 +20,8 @@ from pathlib import Path
 import aiohttp
 
 from app.services.ai_client import get_ai_client
+from app.services.external_service import ProviderFailure, async_run_with_resilience, test_mode_enabled
+from app.services.secret_store import decrypt_secret
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,8 @@ def load_baidu_config():
         cfg_file = Path(__file__).resolve().parents[3] / "data" / "baidu_config.json"
         if cfg_file.exists():
             cfg = json.loads(cfg_file.read_text())
-            key = cfg.get("api_key", "") or os.environ.get("BAIDU_API_KEY", "")
+            key = decrypt_secret(str(cfg.get("api_key_encrypted") or "")) if cfg.get("api_key_encrypted") else cfg.get("api_key", "")
+            key = key or os.environ.get("BAIDU_API_KEY", "")
             if key:
                 QIANFAN_API_KEY = key
                 logger.info("千帆智能搜索 API Key 已加载")
@@ -93,9 +97,28 @@ def _build_search_prompt(search_type: str, company_name: str, extra: str = "") -
 
 async def _qianfan_search(prompt: str, max_results: int = 8) -> dict:
     """调用千帆智能搜索，返回 AI 总结 + 引用来源"""
+    if test_mode_enabled():
+        return {"summary": "", "references": [], "error": "", "testMode": True}
     if not QIANFAN_API_KEY:
         return {}
+    try:
+        return await async_run_with_resilience(
+            "baidu",
+            lambda: _qianfan_search_once(prompt, max_results),
+            max_attempts=3,
+            base_delay=0.25,
+            circuit_threshold=3,
+        )
+    except ProviderFailure as exc:
+        return {
+            "summary": "",
+            "references": [],
+            "error": str(exc),
+            "errorMeta": exc.public_payload(),
+        }
 
+
+async def _qianfan_search_once(prompt: str, max_results: int = 8) -> dict:
     try:
         headers = {
             "Authorization": f"Bearer {QIANFAN_API_KEY}",
@@ -109,14 +132,27 @@ async def _qianfan_search(prompt: str, max_results: int = 8) -> dict:
             "max_completion_tokens": "3000",
         }
 
+        started = time.time()
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 QIANFAN_SEARCH_URL, json=payload,
                 headers=headers, timeout=30
             ) as resp:
+                try:
+                    from app.services.maintenance_service import log_api_call
+                    log_api_call("baidu_search", "POST", QIANFAN_SEARCH_URL, resp.status, int((time.time() - started) * 1000), {"max_results": max_results})
+                except Exception:
+                    pass
                 if resp.status != 200:
                     text = await resp.text()
                     logger.warning("千帆搜索 %d: %s", resp.status, text[:300])
+                    if resp.status == 429 or resp.status >= 500:
+                        raise ProviderFailure(
+                            "baidu",
+                            "rate_limit" if resp.status == 429 else "provider",
+                            f"HTTP {resp.status}: {text[:200]}",
+                            status_code=resp.status,
+                        )
                     return {"error": f"HTTP {resp.status}: {text[:200]}"}
                 data = await resp.json()
 
@@ -126,6 +162,8 @@ async def _qianfan_search(prompt: str, max_results: int = 8) -> dict:
                      len(result.get("references", [])))
         return result
 
+    except ProviderFailure:
+        raise
     except Exception as e:
         logger.warning("千帆搜索异常: %s", e)
         return {"error": str(e)}

@@ -134,6 +134,8 @@ def optimize_resume(profile, evaluation, jd_analysis, job_title="", company="", 
 
     try:
         data = chat_json(SYSTEM_PROMPT, user)
+        if not isinstance(data, dict) or data.get("error"):
+            raise RuntimeError(str((data or {}).get("error") or "AI 返回结果不可用"))
         work_exp = []
         for exp in (data.get("work_experience") or []):
             if isinstance(exp, dict):
