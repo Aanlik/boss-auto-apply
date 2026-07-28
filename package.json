@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "description": "boss 直聘求职端自动化桌面端",
+  "author": {
+    "name": "Aanlik",
+    "email": "Aanlik@users.noreply.github.com"
+  },
   "main": "desktop/main.cjs",
   "scripts": {
     "desktop:build": "python3 scripts/build_desktop.py",
@@ -53,6 +57,7 @@
     },
     "linux": {
       "category": "Utility",
+      "maintainer": "Aanlik <Aanlik@users.noreply.github.com>",
       "target": [
         {
           "target": "AppImage",

@@ -143,16 +143,16 @@ def current_platform_target() -> str:
 def build_electron(target: str, arch: str = "") -> None:
     install_command = ["pnpm", "install", "--frozen-lockfile"] if (ROOT / "pnpm-lock.yaml").exists() else ["pnpm", "install", "--no-frozen-lockfile"]
     run(install_command, cwd=ROOT)
-    env = {"CSC_IDENTITY_AUTO_DISCOVERY": "false"}
+    env = {"CSC_IDENTITY_AUTO_DISCOVERY": "false", "ELECTRON_BUILDER_DISABLE_PUBLISH": "true"}
     arch_args = [f"--{arch}"] if arch in {"x64", "arm64"} else []
     if target in {"dir", "mac-dir"}:
-        run(["pnpm", "exec", "electron-builder", "--mac", "dir", *arch_args], cwd=ROOT, env=env)
+        run(["pnpm", "exec", "electron-builder", "--mac", "dir", *arch_args, "--publish", "never"], cwd=ROOT, env=env)
     elif target in {"dmg", "mac", "mac-dmg"}:
-        run(["pnpm", "exec", "electron-builder", "--mac", "dmg", *arch_args], cwd=ROOT, env=env)
+        run(["pnpm", "exec", "electron-builder", "--mac", "dmg", *arch_args, "--publish", "never"], cwd=ROOT, env=env)
     elif target in {"win", "windows"}:
-        run(["pnpm", "exec", "electron-builder", "--win", "nsis", *arch_args], cwd=ROOT, env=env)
+        run(["pnpm", "exec", "electron-builder", "--win", "nsis", *arch_args, "--publish", "never"], cwd=ROOT, env=env)
     elif target == "linux":
-        run(["pnpm", "exec", "electron-builder", "--linux", "AppImage", "deb", *arch_args], cwd=ROOT, env=env)
+        run(["pnpm", "exec", "electron-builder", "--linux", "AppImage", "deb", *arch_args, "--publish", "never"], cwd=ROOT, env=env)
     else:
         raise ValueError(f"未知桌面端打包目标: {target}")
 
