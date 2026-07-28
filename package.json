@@ -16,6 +16,7 @@
   "build": {
     "appId": "com.bossworkbench.desktop",
     "productName": "boss 直聘求职端自动化",
+    "artifactName": "boss-auto-apply-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "files": [
       "desktop/**/*",

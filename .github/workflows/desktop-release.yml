@@ -134,14 +134,14 @@ jobs:
         with:
           name: desktop-${{ matrix.artifact }}
           path: |
-            release/desktop/**/*.dmg
-            release/desktop/**/*.zip
-            release/desktop/**/*.exe
-            release/desktop/**/*.msi
-            release/desktop/**/*.AppImage
-            release/desktop/**/*.deb
-            release/desktop/**/*.rpm
-            release/desktop/**/*.blockmap
+            release/desktop/*.dmg
+            release/desktop/*.zip
+            release/desktop/*.exe
+            release/desktop/*.msi
+            release/desktop/*.AppImage
+            release/desktop/*.deb
+            release/desktop/*.rpm
+            release/desktop/*.blockmap
             release/desktop/latest*.yml
           if-no-files-found: error
 
