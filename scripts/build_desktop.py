@@ -168,7 +168,7 @@ def main() -> int:
     build_backend()
     build_browser_runtime()
     build_electron(target, arch)
-    print("\n桌面端打包完成。")
+    print("\nDesktop package build completed.")
     return 0
 
 
