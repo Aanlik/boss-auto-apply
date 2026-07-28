@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Any
 
 
-DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+def _default_data_dir() -> Path:
+    configured = os.environ.get("BOSS_WORKBENCH_DATA_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path(__file__).resolve().parents[3] / "data"
+
+
+DATA_DIR = _default_data_dir()
 
 
 def _read_json(path: Path, default: Any) -> Any:

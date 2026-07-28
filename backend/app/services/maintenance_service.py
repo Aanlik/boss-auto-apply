@@ -582,9 +582,9 @@ def release_manifest() -> dict:
 def release_notes() -> dict:
     return {
         "kind": "release_notes",
-        "version": "0.9.0-beta",
+        "version": "1.0",
         "generatedAt": _now(),
-        "phase": "Beta 内测稳定化",
+        "phase": "1.0 正式版",
         "highlights": [
             "核心流程已闭环：简历、岗位、JD、尽调、排序、打招呼、跟进。",
             "上线维护能力已接入：发布体检、安全审计、脱敏备份、人工验收清单。",
@@ -1385,7 +1385,7 @@ def release_version_snapshot() -> dict[str, Any]:
     preflight = release_preflight()
     return {
         "kind": "release_version_snapshot",
-        "version": notes.get("version") or "0.9.0-beta",
+        "version": notes.get("version") or "1.0",
         "commit": manifest.get("commit", ""),
         "generatedAt": _now(),
         "phase": notes.get("phase", ""),
@@ -1447,7 +1447,7 @@ def list_release_records(limit: int = 20) -> dict[str, Any]:
 
 
 def create_release_record(payload: dict) -> dict[str, Any]:
-    version = str(payload.get("version") or release_notes().get("version") or "0.9.0-beta").strip()
+    version = str(payload.get("version") or release_notes().get("version") or "1.0").strip()
     operator = str(payload.get("operator") or "").strip() or "未填写"
     decision = str(payload.get("decision") or "review").strip()
     notes = [str(item).strip() for item in payload.get("notes", []) if str(item).strip()] if isinstance(payload.get("notes"), list) else []

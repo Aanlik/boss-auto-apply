@@ -426,7 +426,7 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
   }
 
   async function onCreateReleaseRecord() {
-    const version = window.prompt("发布版本号", versionSnapshot?.version || releaseNotes?.version || "0.9.0-beta");
+    const version = window.prompt("发布版本号", versionSnapshot?.version || releaseNotes?.version || "1.0");
     if (!version?.trim()) return;
     const operator = window.prompt("验收人/发布人", "用户") || "";
     const decision = window.confirm("本次是否允许上线？") ? "ready" : "review";
@@ -727,11 +727,11 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
                 disabled={!!runtimeMode?.lockedByEnv}
                 onChange={e => onChangeRuntimeMode(e.target.value as RuntimeModeStatus["mode"])}
               >
-                <option value="production">生产数据</option>
-                <option value="demo">演示数据</option>
-                <option value="test">测试数据</option>
+                <option value="production">上线模式</option>
+                <option value="demo">演示模式</option>
+                <option value="test">测试模式</option>
               </select>
-              {runtimeMode && <span className={`tag ${runtimeMode.mode === "production" ? "tag--active" : "tag--muted"}`}>{runtimeMode.dataScope}</span>}
+              {runtimeMode && <span className={`tag ${runtimeMode.mode === "production" ? "tag--active" : "tag--muted"}`}>{runtimeMode.mode === "production" ? "上线模式" : runtimeMode.dataScope}</span>}
             </div>
           </div>
           {runtimeMode?.warning && <p className="settings-status">{runtimeMode.warning}</p>}
@@ -759,7 +759,7 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
           <div className="settings-row" style={{ alignItems: "center", marginTop: 8 }}>
             <label className="settings-label">导入</label>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <a className="button-secondary" href={jobsImportTemplateUrl()} download>下载 CSV 模板</a>
+              <a className="button-secondary button-link" href={jobsImportTemplateUrl()} download>下载 CSV 模板</a>
               <button type="button" className="button-secondary" onClick={onPreviewJobsImport}>预览导入</button>
               <button type="button" className="button-primary" onClick={onApplyJobsImport} disabled={!importPreview || importPreview.summary.creates === 0}>执行导入</button>
             </div>

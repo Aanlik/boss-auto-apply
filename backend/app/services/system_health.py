@@ -13,6 +13,10 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 FRONTEND_DIR = ROOT_DIR / "frontend"
 
 
+def _is_desktop() -> bool:
+    return os.environ.get("BOSS_WORKBENCH_DESKTOP", "").strip().lower() in {"1", "true", "yes"}
+
+
 def _check(key: str, label: str, status: str, message: str, action: str = "") -> dict:
     return {
         "key": key,
@@ -24,24 +28,37 @@ def _check(key: str, label: str, status: str, message: str, action: str = "") ->
 
 
 def run_health_check() -> dict:
-    checks = [
-        _runtime_mode_check(),
-        _python_check(),
-        _pnpm_check(),
-        _frontend_build_check(),
+    desktop = _is_desktop()
+    checks = [_runtime_mode_check()]
+    if desktop:
+        checks.extend([
+            _desktop_backend_check(),
+            _browser_runtime_check(),
+            _python_check(desktop=True),
+            _pnpm_check(desktop=True),
+            _frontend_build_check(desktop=True),
+        ])
+    else:
+        checks.extend([
+            _python_check(),
+            _pnpm_check(),
+            _frontend_build_check(),
+        ])
+    checks.extend([
         _data_dir_check(),
         _ai_provider_check(),
         _baidu_search_check(),
         _business_api_check(),
         _boss_login_check(),
-    ]
-    if any(item["status"] == "error" for item in checks):
+    ])
+    required_checks = [item for item in checks if not item.get("optional")]
+    if any(item["status"] == "error" for item in required_checks):
         status = "error"
-    elif any(item["status"] == "warn" for item in checks):
+    elif any(item["status"] == "warn" for item in required_checks):
         status = "warn"
     else:
         status = "ok"
-    return {"status": status, "checks": checks}
+    return {"status": status, "runtime": "desktop" if desktop else "development", "checks": checks}
 
 
 def _runtime_mode_check() -> dict:
@@ -51,19 +68,42 @@ def _runtime_mode_check() -> dict:
     return _check("runtime_mode", "运行模式", "warn", f"当前为 {mode} 模式", "上线前切换为 production")
 
 
-def _python_check() -> dict:
+def _desktop_backend_check() -> dict:
+    return _check("desktop_backend", "桌面端后端", "ok", "后端运行环境已内置在安装包内")
+
+
+def _browser_runtime_check() -> dict:
+    executable = os.environ.get("BOSS_WORKBENCH_BROWSER_EXECUTABLE", "").strip()
+    if executable and Path(executable).exists():
+        return _check("browser_runtime", "内置浏览器", "ok", "Chromium 已随安装包内置")
+    return _check("browser_runtime", "内置浏览器", "warn", "未检测到内置 Chromium 路径", "BOSS 抓取会尝试使用系统 Chrome")
+
+
+def _python_check(desktop: bool = False) -> dict:
+    if desktop:
+        item = _check("python", "Python 运行环境", "ok", "桌面端已内置 Python 运行环境", "仅源码开发需要单独安装 Python")
+        item["optional"] = True
+        return item
     version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     status = "ok" if sys.version_info >= (3, 10) else "warn"
     return _check("python", "Python 运行环境", status, f"当前版本 {version}", "建议使用 Python 3.10+")
 
 
-def _pnpm_check() -> dict:
+def _pnpm_check(desktop: bool = False) -> dict:
+    if desktop:
+        item = _check("pnpm", "前端包管理器", "ok", "桌面端不需要安装 pnpm", "仅源码开发和重新打包需要 pnpm")
+        item["optional"] = True
+        return item
     if shutil.which("pnpm"):
         return _check("pnpm", "前端包管理器", "ok", "pnpm 可用")
     return _check("pnpm", "前端包管理器", "warn", "未检测到 pnpm", "安装 pnpm 后可执行前端校验")
 
 
-def _frontend_build_check() -> dict:
+def _frontend_build_check(desktop: bool = False) -> dict:
+    if desktop and os.environ.get("BOSS_WORKBENCH_FRONTEND_DIST"):
+        item = _check("frontend_build", "前端页面", "ok", "前端页面已内置在安装包内", "仅源码开发需要执行前端构建")
+        item["optional"] = True
+        return item
     index = FRONTEND_DIR / "dist" / "index.html"
     if index.exists():
         return _check("frontend_build", "前端构建产物", "ok", "已检测到可发布页面")

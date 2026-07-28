@@ -27,13 +27,14 @@ from typing import Optional
 
 import aiohttp
 from app.services.external_service import ProviderFailure, async_run_with_resilience
+from app.services import workflow_persistence
 from app.services.workflow_persistence import write_json_atomic
 from app.services.secret_store import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger(__name__)
 
 # ── 配置 ──
-CONFIG_FILE = Path(__file__).resolve().parents[3] / "data" / "business_info_config.json"
+CONFIG_FILE = workflow_persistence.DATA_DIR / "business_info_config.json"
 
 # 默认端点（腾讯云市场 CloudMarket API Gateway）
 DEFAULT_ENDPOINT = "https://ap-shanghai.cloudmarket-apigw.com/service-6dr7ul9n/enterprise/business/all"

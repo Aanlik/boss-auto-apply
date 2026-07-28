@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from app.models.job import JobRecord, JobFilter
+from app.services import workflow_persistence
 from app.services.workflow_persistence import _read_json, write_json_atomic
 from app.services.city_codes import list_city_options
 from app.services.boss_filter_options import list_filter_options, normalize_capture_filters
@@ -39,7 +40,7 @@ APPLICATION_STATUSES = {"pending", "greeted", "applied", "interviewing", "reject
 DECISION_STATUSES = {"undecided", "recommended", "watching", "abandoned", "risky"}
 
 # ---------- 持久化目录 ----------
-DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+DATA_DIR = workflow_persistence.DATA_DIR
 JOBS_DIR = DATA_DIR / "jobs"
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_FILE = JOBS_DIR / "jobs.json"

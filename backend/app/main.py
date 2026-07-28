@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -66,7 +67,7 @@ def health() -> dict[str, str]:
 
 
 # 静态文件服务
-frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+frontend_dist = Path(os.environ.get("BOSS_WORKBENCH_FRONTEND_DIST", "")).expanduser() if os.environ.get("BOSS_WORKBENCH_FRONTEND_DIST") else Path(__file__).resolve().parents[2] / "frontend" / "dist"
 STATIC_DIR = frontend_dist
 
 

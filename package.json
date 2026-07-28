@@ -1,0 +1,52 @@
+{
+  "name": "boss-workbench-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BOSS 求职工作台桌面端",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "desktop:build": "python3 scripts/build_desktop.py",
+    "desktop:pack": "electron-builder --mac dir",
+    "desktop:dist": "electron-builder --mac dmg"
+  },
+  "build": {
+    "appId": "com.bossworkbench.desktop",
+    "productName": "BOSS 求职工作台",
+    "asar": true,
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-desktop/backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "dist-desktop/browser",
+        "to": "browser",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dir",
+        "dmg"
+      ],
+      "identity": null
+    },
+    "directories": {
+      "output": "release/desktop"
+    }
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.12"
+  }
+}

@@ -4,10 +4,11 @@ import json
 import time
 from pathlib import Path
 
+from app.services import workflow_persistence
 from app.services.workflow_persistence import write_json_atomic
 
 
-PREFERENCES_FILE = Path(__file__).resolve().parents[3] / "data" / "preferences.json"
+PREFERENCES_FILE = workflow_persistence.DATA_DIR / "preferences.json"
 
 
 def default_preferences() -> dict:

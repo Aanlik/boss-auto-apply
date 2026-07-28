@@ -16,7 +16,7 @@ from app.services.workflow_persistence import write_json_atomic
 
 router = APIRouter(prefix="/api/resumes", tags=["resumes"])
 
-DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+DATA_DIR = workflow_persistence.DATA_DIR
 UPLOAD_DIR = DATA_DIR / "uploads"
 STORE_DIR = DATA_DIR / "resumes"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

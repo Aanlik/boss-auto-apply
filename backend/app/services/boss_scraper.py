@@ -30,12 +30,13 @@ import requests
 import websocket
 
 from app.services.city_codes import load_city_codes, resolve_city_code
+from app.services import workflow_persistence
 
 logger = logging.getLogger("boss_scraper")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [BOSS] %(message)s", datefmt="%H:%M:%S")
 
 # ——— 配置 ———
-DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+DATA_DIR = workflow_persistence.DATA_DIR
 CDP_PROFILE = str(DATA_DIR / "chrome_profile")
 CDP_PORT = 9222
 API_SEARCH = "/wapi/zpgeek/search/joblist.json"
@@ -261,6 +262,9 @@ def _chrome_running():
 def _find_chrome() -> str:
     """跨平台查找 Chrome/Chromium 可执行文件。"""
     import shutil as _shutil
+    bundled = os.environ.get("BOSS_WORKBENCH_BROWSER_EXECUTABLE", "").strip()
+    if bundled and os.path.exists(bundled):
+        return bundled
     candidates = []
     system = sys.platform
     if system == "darwin":
@@ -282,7 +286,7 @@ def _find_chrome() -> str:
         if c and (_shutil.which(c) or os.path.exists(c)):
             return c
     raise RuntimeError(
-        "未找到 Chrome/Chromium。请安装 Google Chrome。\n"
+        "未找到 Chrome/Chromium。请使用桌面端内置浏览器或安装 Google Chrome。\n"
         f"  系统: {system}\n"
         f"  搜索路径: {candidates[:3]}"
     )

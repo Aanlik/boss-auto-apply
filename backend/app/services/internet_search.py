@@ -22,6 +22,7 @@ import aiohttp
 from app.services.ai_client import get_ai_client
 from app.services.external_service import ProviderFailure, async_run_with_resilience, test_mode_enabled
 from app.services.secret_store import decrypt_secret
+from app.services import workflow_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ _search_cache: dict[str, dict] = {}
 def load_baidu_config():
     global QIANFAN_API_KEY
     try:
-        cfg_file = Path(__file__).resolve().parents[3] / "data" / "baidu_config.json"
+        cfg_file = workflow_persistence.DATA_DIR / "baidu_config.json"
         if cfg_file.exists():
             cfg = json.loads(cfg_file.read_text())
             key = decrypt_secret(str(cfg.get("api_key_encrypted") or "")) if cfg.get("api_key_encrypted") else cfg.get("api_key", "")

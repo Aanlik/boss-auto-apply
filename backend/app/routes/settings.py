@@ -13,6 +13,7 @@ from app.services.ai_client import (
     get_config, set_config, clear_config, test_connection,
     PROVIDER_PRESETS,
 )
+from app.services import workflow_persistence
 from app.services.workflow_persistence import write_json_atomic
 from app.services.secret_store import decrypt_secret, encrypt_secret
 from app.services import preferences as preferences_service
@@ -203,7 +204,7 @@ def import_settings(payload: dict) -> dict:
 #  百度千帆智能搜索 API 配置（仅需 API Key）
 # ═══════════════════════════════════════════════════════════
 
-BAIDU_CONFIG_FILE = _Path(__file__).resolve().parents[3] / "data" / "baidu_config.json"
+BAIDU_CONFIG_FILE = workflow_persistence.DATA_DIR / "baidu_config.json"
 
 
 def _read_baidu_config() -> dict:

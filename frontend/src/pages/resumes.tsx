@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, type ChangeEvent } from "reac
 import {
   parseResumeFile, evaluateResume, listUploadedFiles, reEnrichResume,
   deleteUploadedFile, loadResume, getActiveResume, updateProfile
-  , listResumeVersions, saveResumeVersion, compareResumeVersions, listPdfTemplates, getPdfPreviewOptions
+  , listResumeVersions, saveResumeVersion, compareResumeVersions, listPdfTemplates, getPdfPreviewOptions, exportResumePdf, previewResumePdf
 } from "../lib/api";
 import type { UploadedFile, ResumeProfile, ResumeEvaluation, ResumeVersion } from "../lib/types";
 import { useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
@@ -42,7 +42,10 @@ export default function ResumesPage() {
   const [versionSummary, setVersionSummary] = useState<string[]>([]);
   const [pdfTemplates, setPdfTemplates] = useState<Record<string, { name: string; description: string; font: string; density: string; bestFor: string[]; layout: string }>>({});
   const [pdfDensityOptions, setPdfDensityOptions] = useState<Array<{ key: string; label: string; description: string }>>([]);
+  const [pdfTemplate, setPdfTemplate] = useState<"modern" | "classic" | "ats">("modern");
   const [pdfDensity, setPdfDensity] = useState("balanced");
+  const [pdfStatus, setPdfStatus] = useState("");
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState("");
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadIdRef = useRef(0);
@@ -81,6 +84,7 @@ export default function ResumesPage() {
     Promise.all([listPdfTemplates(), getPdfPreviewOptions()]).then(([templates, options]) => {
       if (c) return;
       setPdfTemplates(options.templates || templates.templates || {});
+      setPdfTemplate(options.defaultTemplate || templates.default || "modern");
       setPdfDensityOptions(options.densityOptions || []);
       setPdfDensity(options.defaultDensity || "balanced");
     }).catch(() => {});
@@ -193,6 +197,12 @@ export default function ResumesPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    return () => {
+      if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
+    };
+  }, [pdfPreviewUrl]);
+
   async function onReEnrich() {
     if (!fileId) return;
     setParseStatus("pending_ai");
@@ -216,6 +226,44 @@ export default function ResumesPage() {
       setVersionSummary(result.summary || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "版本对比失败");
+    }
+  }
+
+  async function onPreviewPdf() {
+    if (!profile) return;
+    setPdfStatus("正在生成 PDF 预览...");
+    try {
+      if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
+      const url = await previewResumePdf({
+        profile,
+        optimization: evaluation || {},
+        company: "",
+        job_title: profile.title || "",
+        template: pdfTemplate,
+        density: pdfDensity,
+      });
+      setPdfPreviewUrl(url);
+      setPdfStatus("PDF 预览已生成");
+    } catch (err) {
+      setPdfStatus(err instanceof Error ? err.message : "PDF 预览失败");
+    }
+  }
+
+  async function onDownloadPdf() {
+    if (!profile) return;
+    setPdfStatus("正在导出 PDF...");
+    try {
+      await exportResumePdf({
+        profile,
+        optimization: evaluation || {},
+        company: "",
+        job_title: profile.title || "",
+        template: pdfTemplate,
+        density: pdfDensity,
+      });
+      setPdfStatus("PDF 已开始下载");
+    } catch (err) {
+      setPdfStatus(err instanceof Error ? err.message : "PDF 导出失败");
     }
   }
 
@@ -274,20 +322,35 @@ export default function ResumesPage() {
             <div className="page-section__top" style={{ marginBottom: 8 }}>
               <div>
                 <div className="page-kicker">PDF 模板</div>
-                <p className="capture-panel-copy">按岗位类型选择合适版式，导出时会自动使用推荐模板。</p>
+                <p className="capture-panel-copy">选择后会用于当前简历的 PDF 预览和下载。</p>
+              </div>
+              <div className="toolbar-row toolbar-row--wrap">
+                <button type="button" className="button-secondary button-secondary--sm" onClick={onPreviewPdf} disabled={!profile}>预览 PDF</button>
+                <button type="button" className="button-primary button-secondary--sm" onClick={onDownloadPdf} disabled={!profile}>下载 PDF</button>
               </div>
             </div>
             <div className="pdf-template-grid">
               {Object.entries(pdfTemplates).map(([key, tpl]) => (
-                <div key={key} className="pdf-template-card">
-                  <strong>{tpl.name}</strong>
+                <button
+                  key={key}
+                  type="button"
+                  className={`pdf-template-card ${pdfTemplate === key ? "pdf-template-card--active" : ""}`}
+                  onClick={() => {
+                    const nextTemplate = key as "modern" | "classic" | "ats";
+                    setPdfTemplate(nextTemplate);
+                    if (tpl.density) setPdfDensity(tpl.density);
+                    setPdfStatus(`已选择 ${tpl.name}`);
+                  }}
+                  aria-pressed={pdfTemplate === key}
+                >
+                  <strong>{tpl.name}{pdfTemplate === key && <span className="pdf-template-card__mark">已选</span>}</strong>
                   <p>{tpl.description}</p>
                   <div className="job-tags">
                     <span className="tag tag--muted">{tpl.density}</span>
                     <span className="tag tag--muted">{tpl.layout}</span>
                     {tpl.bestFor.slice(0, 3).map(item => <span key={item} className="tag">{item}</span>)}
                   </div>
-                </div>
+                </button>
               ))}
             </div>
             {pdfDensityOptions.length > 0 && (
@@ -305,6 +368,16 @@ export default function ResumesPage() {
                   </button>
                 ))}
                 <small>{pdfDensityOptions.find(item => item.key === pdfDensity)?.description || "导出 PDF 前可先预览版式。"}</small>
+              </div>
+            )}
+            {pdfStatus && <p className="settings-status">{pdfStatus}</p>}
+            {pdfPreviewUrl && (
+              <div className="pdf-inline-preview">
+                <div className="pdf-inline-preview__top">
+                  <strong>PDF 预览</strong>
+                  <button type="button" className="button-quiet" onClick={() => { URL.revokeObjectURL(pdfPreviewUrl); setPdfPreviewUrl(""); }}>关闭预览</button>
+                </div>
+                <iframe title="简历 PDF 预览" src={pdfPreviewUrl} />
               </div>
             )}
           </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   listJobPool as poolJobs,
   analyzeJD,
@@ -39,6 +39,27 @@ import { useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
 import ChatPanel from "../components/ChatPanel";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
 
+type GreetingBatchFilter =
+  | "selected"
+  | "ready"
+  | "ungreeted"
+  | "missing_greeting"
+  | "missing_jd"
+  | "recommended"
+  | "safe"
+  | "all";
+
+const GREETING_BATCH_FILTERS: Array<{ key: GreetingBatchFilter; label: string }> = [
+  { key: "selected", label: "岗位页已选" },
+  { key: "ready", label: "可直接发送" },
+  { key: "ungreeted", label: "未打招呼" },
+  { key: "missing_greeting", label: "缺少话术" },
+  { key: "missing_jd", label: "缺少 JD" },
+  { key: "recommended", label: "决策推荐" },
+  { key: "safe", label: "低风险" },
+  { key: "all", label: "全部岗位" },
+];
+
 export default function GreetingPage() {
   const { selectedJobIds, resumeProfile, jdAnalyses, optimizations, greetingTexts, chatMessages } = useWorkflowState();
   const dispatch = useWorkflowDispatch();
@@ -77,6 +98,8 @@ export default function GreetingPage() {
   const [followups, setFollowups] = useState<GreetingFollowups | null>(null);
   const [recoveryPanel, setRecoveryPanel] = useState<GreetingRecoveryPanel | null>(null);
   const [finalConfirmation, setFinalConfirmation] = useState<GreetingFinalConfirmation | null>(null);
+  const [greetingFilter, setGreetingFilter] = useState<GreetingBatchFilter>("selected");
+  const [greetingSelectedIds, setGreetingSelectedIds] = useState<string[]>([]);
 
   useEffect(() => () => {
     if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
@@ -85,7 +108,7 @@ export default function GreetingPage() {
   useEffect(() => {
     poolJobs().then(r => {
       const all: JobPosting[] = r.jobs || [];
-      setJobs(all.filter(j => selectedJobIds.includes(j.id)));
+      setJobs(all);
       const g: Record<string, boolean> = {};
       const t: Record<string, string[]> = {};
       all.forEach((j) => { if (j.greeted) g[j.id] = true; if (j.tags?.length) t[j.id] = j.tags; });
@@ -95,6 +118,15 @@ export default function GreetingPage() {
       console.warn("[greeting] 加载岗位失败:", err);
     });
   }, [selectedJobIds]);
+
+  useEffect(() => {
+    setGreetingSelectedIds(prev => {
+      const validIds = new Set(jobs.map(job => job.id));
+      const kept = prev.filter(id => validIds.has(id));
+      if (kept.length > 0) return kept;
+      return selectedJobIds.filter(id => validIds.has(id));
+    });
+  }, [jobs, selectedJobIds]);
 
   useEffect(() => {
     getGreetingDrafts()
@@ -211,11 +243,83 @@ export default function GreetingPage() {
     navigator.clipboard.writeText(text).then(() => { setCopiedId(jobId); setTimeout(() => setCopiedId(null), 2000); }).catch(() => {});
   }
 
-  async function refreshGreetingCandidates() {
+  const selectedJobIdSet = useMemo(() => new Set(selectedJobIds), [selectedJobIds]);
+
+  function hasJobJD(job: JobPosting) {
+    return Boolean((job.jd_text || "").trim() || jdAnalyses[job.id]);
+  }
+
+  function isGreetingSafe(job: JobPosting) {
+    return job.lifecycle_status !== "blacklisted" && job.decision_status !== "risky";
+  }
+
+  function isGreetingReady(job: JobPosting) {
+    return isGreetingSafe(job) && !greetedStatus[job.id] && hasJobJD(job) && Boolean((greetingTexts[job.id] || "").trim());
+  }
+
+  const filteredGreetingJobs = useMemo(() => jobs.filter(job => {
+    if (greetingFilter === "selected") return selectedJobIdSet.has(job.id);
+    if (greetingFilter === "ready") return isGreetingReady(job);
+    if (greetingFilter === "ungreeted") return !greetedStatus[job.id];
+    if (greetingFilter === "missing_greeting") return !(greetingTexts[job.id] || "").trim();
+    if (greetingFilter === "missing_jd") return !hasJobJD(job);
+    if (greetingFilter === "recommended") return job.decision_status === "recommended";
+    if (greetingFilter === "safe") return isGreetingSafe(job);
+    return true;
+  }), [jobs, greetingFilter, selectedJobIdSet, greetedStatus, greetingTexts, jdAnalyses]);
+
+  const greetingTargetIds = useMemo(() => {
+    const validIds = new Set(jobs.map(job => job.id));
+    return greetingSelectedIds.filter(id => validIds.has(id));
+  }, [greetingSelectedIds, jobs]);
+
+  const greetingTargetSet = useMemo(() => new Set(greetingTargetIds), [greetingTargetIds]);
+  const visibleSelectedCount = filteredGreetingJobs.filter(job => greetingTargetSet.has(job.id)).length;
+  const currentFilterLabel = GREETING_BATCH_FILTERS.find(item => item.key === greetingFilter)?.label || "当前范围";
+
+  function requireGreetingTargets(actionLabel = "批量操作") {
+    if (greetingTargetIds.length === 0) {
+      setError(`请先选择本次${actionLabel}的岗位`);
+      return null;
+    }
+    return greetingTargetIds;
+  }
+
+  function selectVisibleGreetingJobs() {
+    setGreetingSelectedIds(prev => {
+      const next = new Set(prev);
+      filteredGreetingJobs.forEach(job => next.add(job.id));
+      return Array.from(next);
+    });
+  }
+
+  function unselectVisibleGreetingJobs() {
+    const visibleIds = new Set(filteredGreetingJobs.map(job => job.id));
+    setGreetingSelectedIds(prev => prev.filter(id => !visibleIds.has(id)));
+  }
+
+  function invertVisibleGreetingJobs() {
+    setGreetingSelectedIds(prev => {
+      const next = new Set(prev);
+      filteredGreetingJobs.forEach(job => {
+        if (next.has(job.id)) next.delete(job.id);
+        else next.add(job.id);
+      });
+      return Array.from(next);
+    });
+  }
+
+  function toggleGreetingJob(jobId: string, checked: boolean) {
+    setGreetingSelectedIds(prev => checked ? Array.from(new Set([...prev, jobId])) : prev.filter(id => id !== jobId));
+  }
+
+  async function refreshGreetingCandidates(idsOverride?: string[]) {
+    const targetIds = idsOverride || requireGreetingTargets("筛选候选");
+    if (!targetIds) return;
     setWorkbenchLoading("候选筛选中…");
     setError("");
     try {
-      setCandidateResult(await getGreetingCandidates(selectedJobIds));
+      setCandidateResult(await getGreetingCandidates(targetIds));
     } catch (err) {
       setError(err instanceof Error ? err.message : "候选筛选失败");
     } finally {
@@ -224,11 +328,13 @@ export default function GreetingPage() {
   }
 
   async function onDryRunGreetings() {
+    const targetIds = requireGreetingTargets("生成草稿");
+    if (!targetIds) return;
     setWorkbenchLoading("生成草稿中…");
     setError("");
     try {
       const result = await dryRunGreetings({
-        job_ids: selectedJobIds,
+        job_ids: targetIds,
         resume_summary: resumeProfile?.summary || resumeProfile?.title || "",
         style: "稳妥自然",
       });
@@ -249,7 +355,9 @@ export default function GreetingPage() {
   }
 
   async function validateCurrentGreetings() {
-    const items = selectedJobIds
+    const targetIds = requireGreetingTargets("校验话术");
+    if (!targetIds) return;
+    const items = targetIds
       .map(jobId => ({ job_id: jobId, message: greetingTexts[jobId] || "" }))
       .filter(item => item.message.trim());
     if (items.length === 0) {
@@ -268,9 +376,9 @@ export default function GreetingPage() {
     }
   }
 
-  function selectedGreetingMessages() {
+  function selectedGreetingMessages(targetIds = greetingTargetIds) {
     return Object.fromEntries(
-      selectedJobIds
+      targetIds
         .map(jobId => [jobId, greetingTexts[jobId] || ""] as const)
         .filter(([, message]) => message.trim())
     );
@@ -314,7 +422,9 @@ export default function GreetingPage() {
   }
 
   async function runPreflight() {
-    const messages = selectedGreetingMessages();
+    const targetIds = requireGreetingTargets("预检");
+    if (!targetIds) return;
+    const messages = selectedGreetingMessages(targetIds);
     if (Object.keys(messages).length === 0) {
       setError("暂无可预检的招呼语，请先生成草稿");
       return;
@@ -322,7 +432,7 @@ export default function GreetingPage() {
     setWorkbenchLoading("预检中…");
     setError("");
     try {
-      setPreflightResult(await preflightGreetings({ job_ids: selectedJobIds, messages, mode: "browser_auto" }));
+      setPreflightResult(await preflightGreetings({ job_ids: targetIds, messages, mode: "browser_auto" }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "发送前预检失败");
     } finally {
@@ -331,8 +441,11 @@ export default function GreetingPage() {
   }
 
   async function runSelectorHealth() {
-    const firstJobId = selectedJobIds[0];
-    if (!firstJobId) return;
+    const firstJobId = greetingTargetIds[0] || filteredGreetingJobs[0]?.id;
+    if (!firstJobId) {
+      setError("请先选择一个岗位用于检测页面可用性");
+      return;
+    }
     setWorkbenchLoading("检测页面中…");
     setError("");
     try {
@@ -345,8 +458,11 @@ export default function GreetingPage() {
   }
 
   async function loadAcceptancePlan() {
-    const firstJobId = selectedJobIds[0];
-    if (!firstJobId) return;
+    const firstJobId = greetingTargetIds[0] || filteredGreetingJobs[0]?.id;
+    if (!firstJobId) {
+      setError("请先选择一个岗位用于生成验收步骤");
+      return;
+    }
     try {
       setAcceptancePlan(await getGreetingAcceptancePlan(firstJobId));
     } catch (err) {
@@ -400,13 +516,15 @@ export default function GreetingPage() {
   }
 
   async function sendSelectedGreetings(mode: "manual_confirm" | "browser_auto") {
-    const messages = selectedGreetingMessages();
+    const targetIds = requireGreetingTargets(mode === "browser_auto" ? "自动发送" : "人工确认");
+    if (!targetIds) return;
+    const messages = selectedGreetingMessages(targetIds);
     if (Object.keys(messages).length === 0) {
       setError("暂无可确认发送的招呼语，请先生成草稿");
       return;
     }
     const confirmation = await getGreetingFinalConfirmation({
-      job_ids: selectedJobIds,
+      job_ids: targetIds,
       messages,
       mode,
       daily_limit: autoDailyLimit,
@@ -425,7 +543,7 @@ export default function GreetingPage() {
     setError("");
     try {
       const result = await sendGreetingConfirmations({
-        job_ids: selectedJobIds,
+        job_ids: targetIds,
         messages,
         confirm: true,
         mode,
@@ -447,7 +565,7 @@ export default function GreetingPage() {
           return next;
         });
       }
-      await refreshGreetingCandidates();
+      await refreshGreetingCandidates(targetIds);
     } catch (err) {
       setError(err instanceof Error ? err.message : "发送失败");
     } finally {
@@ -527,11 +645,11 @@ export default function GreetingPage() {
         </div>
       )}
 
-      {selectedJobIds.length === 0 && (
-        <div className="panel panel-strong"><div className="panel-inner"><EmptyState icon="👋" title="尚未选择岗位" desc="请在「排序」页面勾选岗位后进入此页面。" /></div></div>
+      {jobs.length === 0 && (
+        <div className="panel panel-strong"><div className="panel-inner"><EmptyState icon="👋" title="暂无岗位" desc="请先在岗位模块抓取或导入岗位，再进入打招呼流程。" /></div></div>
       )}
 
-      {selectedJobIds.length > 0 && (
+      {jobs.length > 0 && (
         <div className="panel panel-strong greeting-workbench">
           <div className="panel-inner">
             <div className="page-section__top">
@@ -541,7 +659,7 @@ export default function GreetingPage() {
                 <p className="text-muted">支持 dry-run、人工确认和真实自动发送；真实发送需先打开总开关并通过预检。</p>
               </div>
               <div className="toolbar-row toolbar-row--wrap">
-                <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={refreshGreetingCandidates}>
+                <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={() => refreshGreetingCandidates()}>
                   筛选候选
                 </button>
                 <button type="button" className="button-primary" disabled={!!workbenchLoading} onClick={onDryRunGreetings}>
@@ -556,6 +674,34 @@ export default function GreetingPage() {
                 <button type="button" className="button-primary" disabled={!!workbenchLoading || !autoSendEnabled} onClick={autoSendSelectedGreetings}>
                   自动打开 BOSS 发送
                 </button>
+              </div>
+            </div>
+
+            <div className="greeting-selection-panel">
+              <div className="greeting-selection-panel__main">
+                <label className="greeting-selection-filter">
+                  <span>本次批量范围</span>
+                  <select
+                    className="form-input form-input--inline"
+                    value={greetingFilter}
+                    onChange={event => setGreetingFilter(event.target.value as GreetingBatchFilter)}
+                  >
+                    {GREETING_BATCH_FILTERS.map(filter => (
+                      <option key={filter.key} value={filter.key}>{filter.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="greeting-selection-summary">
+                  <span>当前显示 <strong>{filteredGreetingJobs.length}</strong></span>
+                  <span>本次已选 <strong>{greetingTargetIds.length}</strong></span>
+                  <span>当前范围已选 <strong>{visibleSelectedCount}</strong></span>
+                </div>
+              </div>
+              <div className="greeting-selection-actions">
+                <button type="button" className="button-secondary" onClick={selectVisibleGreetingJobs}>选择当前筛选</button>
+                <button type="button" className="button-secondary" onClick={unselectVisibleGreetingJobs}>取消当前筛选</button>
+                <button type="button" className="button-secondary" onClick={invertVisibleGreetingJobs}>反选当前筛选</button>
+                <button type="button" className="button-quiet" onClick={() => setGreetingSelectedIds([])}>清空本次选择</button>
               </div>
             </div>
 
@@ -722,8 +868,12 @@ export default function GreetingPage() {
 
             <div className="greeting-workbench__grid">
               <div className="greeting-metric">
-                <span>已选择</span>
-                <strong>{selectedJobIds.length}</strong>
+                <span>本次已选</span>
+                <strong>{greetingTargetIds.length}</strong>
+              </div>
+              <div className="greeting-metric">
+                <span>{currentFilterLabel}</span>
+                <strong>{filteredGreetingJobs.length}</strong>
               </div>
               <div className="greeting-metric">
                 <span>可生成</span>
@@ -810,11 +960,35 @@ export default function GreetingPage() {
         </div>
       )}
 
-      {jobs.map(job => {
+      {jobs.length > 0 && filteredGreetingJobs.length === 0 && (
+        <div className="panel panel-strong">
+          <div className="panel-inner">
+            <EmptyState icon="🔎" title="当前范围暂无岗位" desc="切换本次批量范围，或回到岗位模块补齐 JD、话术和筛选条件。" />
+          </div>
+        </div>
+      )}
+
+      {filteredGreetingJobs.length > 0 && (
+        <div className="greeting-list-toolbar">
+          <div className="greeting-list-toolbar__meta">
+            <strong>{currentFilterLabel}</strong>
+            <span>显示 {filteredGreetingJobs.length} 个岗位，本次已选 {greetingTargetIds.length} 个</span>
+          </div>
+          <div className="greeting-list-toolbar__actions">
+            <button type="button" className="button-secondary" onClick={selectVisibleGreetingJobs}>全选当前</button>
+            <button type="button" className="button-secondary" onClick={unselectVisibleGreetingJobs}>取消当前</button>
+            <button type="button" className="button-secondary" onClick={invertVisibleGreetingJobs}>反选当前</button>
+            <button type="button" className="button-quiet" onClick={() => setGreetingSelectedIds([])}>清空全部</button>
+          </div>
+        </div>
+      )}
+
+      {filteredGreetingJobs.map(job => {
 	        const opt = optimizations[job.id];
 	        const greeting = greetingTexts[job.id];
           const jobAcceptance = acceptanceRecords.find(record => record.jobId === job.id);
           const jobReply = replyRecords.find(record => record.jobId === job.id);
+          const isBatchSelected = greetingTargetSet.has(job.id);
 	        const readyItems = [
 	          { label: "话术", ok: !!greeting },
 	          { label: "简历", ok: !!opt },
@@ -822,12 +996,22 @@ export default function GreetingPage() {
 	          { label: "招呼", ok: !!greetedStatus[job.id] },
 	        ];
 	        return (
-	          <div key={job.id} className="panel panel-strong">
+	          <div key={job.id} className={`panel panel-strong greeting-job-card${isBatchSelected ? " greeting-job-card--selected" : ""}`}>
 	            <div className="panel-inner">
               {/* 岗位信息头 */}
               <div className="page-section__top">
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <strong style={{ fontSize: 15 }}>{job.title}</strong>
+                  <div className="greeting-job-heading">
+                    <label className="greeting-job-select">
+                      <input
+                        type="checkbox"
+                        checked={isBatchSelected}
+                        onChange={event => toggleGreetingJob(job.id, event.target.checked)}
+                      />
+                      <span>加入本次批量</span>
+                    </label>
+                    <strong style={{ fontSize: 15 }}>{job.title}</strong>
+                  </div>
                   <p className="text-muted" style={{ fontSize: 13, marginTop: 2 }}>{job.company} · {job.city} · {job.salary}</p>
                 </div>
 	                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>

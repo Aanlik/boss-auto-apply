@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from app.services import workflow_persistence
 from app.services.ai_client import get_ai_client
 from app.services.feedback_store import list_feedback
 from app.services.preferences import load_preferences
 from app.services.workflow_persistence import _read_json, write_json_atomic
 
 logger = logging.getLogger(__name__)
-RANKING_SETTINGS_FILE = Path(__file__).resolve().parents[3] / "data" / "rankings" / "settings.json"
+RANKING_SETTINGS_FILE = workflow_persistence.DATA_DIR / "rankings" / "settings.json"
 DEFAULT_RANKING_WEIGHTS = {"company_weight": 0.4, "match_weight": 0.6}
 RANKING_WEIGHT_TEMPLATES = {
     "balanced": {

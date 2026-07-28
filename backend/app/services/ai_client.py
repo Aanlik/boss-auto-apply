@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from openai import OpenAI
 from app.services.external_service import ProviderFailure, run_with_resilience, test_mode_enabled
+from app.services import workflow_persistence
 from app.services.workflow_persistence import write_json_atomic
 from app.services.secret_store import decrypt_secret, encrypt_secret
 
@@ -16,7 +17,7 @@ logger = logging.getLogger("ai_client")
 _client = None
 _cached_config = None
 
-CONFIG_FILE = Path(__file__).resolve().parents[3] / "data" / "provider.json"
+CONFIG_FILE = workflow_persistence.DATA_DIR / "provider.json"
 
 # 预设供应商
 PROVIDER_PRESETS = {
