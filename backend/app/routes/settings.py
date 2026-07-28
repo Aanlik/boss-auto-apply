@@ -8,6 +8,7 @@ import time
 
 from fastapi import APIRouter, Header, HTTPException
 from pathlib import Path as _Path
+from app.services.http_client import classify_http_error
 
 from app.services.ai_client import (
     get_config, set_config, clear_config, test_connection,
@@ -99,6 +100,8 @@ def test_provider() -> dict:
     if not get_config().get("api_key"):
         raise HTTPException(status_code=400, detail="请先设置 API Key")
     result = test_connection()
+    if isinstance(result, dict) and not result.get("ok") and result.get("message"):
+        result["message"] = classify_http_error(Exception(result["message"]))["message"]
     return result
 
 

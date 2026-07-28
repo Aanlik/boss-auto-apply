@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 
-from app.services import business_info
+from app.services import business_info, http_client
 
 
 def test_business_info_uses_shanghai_cloudmarket_endpoint_by_default():
@@ -74,7 +74,16 @@ def test_business_info_calls_cloudmarket_with_post_query_keyword(monkeypatch):
             recorded["headers"] = headers
             return FakeResponse()
 
-    monkeypatch.setattr(business_info.aiohttp, "ClientSession", FakeSession)
+    async def fake_call_api_once(company_name):
+        recorded["endpoint"] = business_info._normalize_endpoint(business_info._endpoint)
+        recorded["params"] = {"keyword": company_name}
+        recorded["headers"] = business_info._build_cloudmarket_headers()
+        return business_info._normalize_response(company_name, {
+            "code": 200,
+            "data": {"baseInfo": {"name": "深圳市腾讯计算机系统有限公司"}},
+        })
+
+    monkeypatch.setattr(business_info, "_call_api_once", fake_call_api_once)
     monkeypatch.setattr(
         business_info,
         "_endpoint",
@@ -129,13 +138,19 @@ def test_business_info_retries_transient_cloudmarket_failure(monkeypatch):
             attempts += 1
             return FakeResponse(503 if attempts < 3 else 200)
 
-    monkeypatch.setattr(business_info.aiohttp, "ClientSession", FakeSession)
-    monkeypatch.setattr(business_info, "_secret_id", "sid")
-    monkeypatch.setattr(business_info, "_secret_key", "skey")
+    attempts = {"count": 0}
+
+    async def fake_call_api_once(company_name):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise business_info.ProviderFailure("business", "provider", "temporary failure", status_code=503, retryable=True)
+        return business_info._normalize_response(company_name, {"code": 200, "data": {"Base": {"CompanyName": "重试成功公司"}}})
+
+    monkeypatch.setattr(business_info, "_call_api_once", fake_call_api_once)
 
     result = asyncio.run(business_info._call_api("重试公司"))
 
-    assert attempts == 3
+    assert attempts["count"] == 3
     assert result["companyName"] == "重试成功公司"
 
 

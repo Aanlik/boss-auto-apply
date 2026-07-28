@@ -17,7 +17,7 @@ import os
 import re
 from pathlib import Path
 
-import aiohttp
+from app.services.http_client import build_aiohttp_session, format_http_error
 
 from app.services.ai_client import get_ai_client
 from app.services.external_service import ProviderFailure, async_run_with_resilience, test_mode_enabled
@@ -134,7 +134,7 @@ async def _qianfan_search_once(prompt: str, max_results: int = 8) -> dict:
         }
 
         started = time.time()
-        async with aiohttp.ClientSession() as session:
+        async with build_aiohttp_session() as session:
             async with session.post(
                 QIANFAN_SEARCH_URL, json=payload,
                 headers=headers, timeout=30
@@ -167,7 +167,7 @@ async def _qianfan_search_once(prompt: str, max_results: int = 8) -> dict:
         raise
     except Exception as e:
         logger.warning("千帆搜索异常: %s", e)
-        return {"error": str(e)}
+        return {"error": format_http_error(e)}
 
 
 def _parse_qianfan_response(data: dict) -> dict:
@@ -206,7 +206,7 @@ async def test_qianfan_connection() -> dict:
             "max_completion_tokens": "50",
         }
 
-        async with aiohttp.ClientSession() as session:
+        async with build_aiohttp_session() as session:
             async with session.post(
                 QIANFAN_SEARCH_URL, json=payload,
                 headers=headers, timeout=20
@@ -219,7 +219,7 @@ async def test_qianfan_connection() -> dict:
                     text = await resp.text()
                     return {"ok": False, "message": f"HTTP {resp.status}: {text[:150]}"}
     except Exception as e:
-        return {"ok": False, "message": str(e)[:200]}
+        return {"ok": False, "message": format_http_error(e)}
 
 
 # ═══════════════════════════════════════════════════════════

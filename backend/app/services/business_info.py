@@ -25,7 +25,7 @@ from pathlib import Path
 import uuid
 from typing import Optional
 
-import aiohttp
+from app.services.http_client import build_aiohttp_session, format_http_error
 from app.services.external_service import ProviderFailure, async_run_with_resilience
 from app.services import workflow_persistence
 from app.services.workflow_persistence import write_json_atomic
@@ -234,8 +234,7 @@ async def _call_api_once(company_name: str) -> dict:
     params = {"keyword": company_name}
     started = time.time()
 
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with build_aiohttp_session(timeout_seconds=30.0) as session:
         async with session.post(endpoint, params=params, headers=headers) as resp:
             status = resp.status
             body = await resp.text()
@@ -579,7 +578,7 @@ async def test_connection() -> dict:
             "message": f"连接成功: {company} | 法人: {legal} | 状态: {status}",
         }
     except Exception as e:
-        return {"ok": False, "message": f"连接失败: {str(e)[:200]}"}
+        return {"ok": False, "message": f"连接失败: {format_http_error(e)}"}
 
 
 # ── 启动时加载配置 ──

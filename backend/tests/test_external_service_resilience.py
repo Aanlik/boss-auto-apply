@@ -124,15 +124,14 @@ def test_ai_test_mode_returns_deterministic_result_without_client(monkeypatch):
 
 
 def test_qianfan_test_mode_does_not_open_http_session(monkeypatch):
-    from app.services import internet_search
+    from app.services import internet_search, http_client
 
     monkeypatch.setenv("BOSS_WORKBENCH_TEST_MODE", "1")
 
-    class ForbiddenSession:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError("external search used")
+    def forbidden_session(*args, **kwargs):
+        raise AssertionError("external search used")
 
-    monkeypatch.setattr(internet_search.aiohttp, "ClientSession", ForbiddenSession)
+    monkeypatch.setattr(http_client, "build_aiohttp_session", forbidden_session)
 
     result = asyncio.run(internet_search._qianfan_search("test"))
 
@@ -143,46 +142,21 @@ def test_qianfan_test_mode_does_not_open_http_session(monkeypatch):
 def test_qianfan_retries_transient_failure(monkeypatch):
     from app.services import internet_search
 
-    attempts = 0
+    attempts = {"count": 0}
     monkeypatch.delenv("BOSS_WORKBENCH_TEST_MODE", raising=False)
     monkeypatch.setattr(internet_search, "QIANFAN_API_KEY", "baidu-key")
 
-    class FakeResponse:
-        def __init__(self, status):
-            self.status = status
+    async def fake_qianfan_search_once(prompt, max_results=8):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise ProviderFailure("baidu", "provider", "temporary failure", status_code=503, retryable=True)
+        return {"summary": "重试成功", "references": [], "error": ""}
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def text(self):
-            return "temporary"
-
-        async def json(self):
-            return {"choices": [{"message": {"content": "重试成功"}}]}
-
-    class FakeSession:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        def post(self, *args, **kwargs):
-            nonlocal attempts
-            attempts += 1
-            return FakeResponse(503 if attempts < 3 else 200)
-
-    monkeypatch.setattr(internet_search.aiohttp, "ClientSession", FakeSession)
+    monkeypatch.setattr(internet_search, "_qianfan_search_once", fake_qianfan_search_once)
 
     result = asyncio.run(internet_search._qianfan_search("test"))
 
-    assert attempts == 3
+    assert attempts["count"] == 3
     assert result["summary"] == "重试成功"
 
 
