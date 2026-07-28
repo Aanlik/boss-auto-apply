@@ -18,8 +18,22 @@ BROWSER_DIST = DIST_DESKTOP / "browser"
 
 
 def run(command: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None) -> None:
+    resolved = [resolve_executable(command[0]), *command[1:]]
     print(f"\n== {' '.join(command)}")
-    subprocess.run(command, cwd=cwd, env={**os.environ, **(env or {})}, check=True)
+    subprocess.run(resolved, cwd=cwd, env={**os.environ, **(env or {})}, check=True)
+
+
+def resolve_executable(name: str) -> str:
+    if os.name == "nt":
+        if name == "pnpm":
+            pnpm_home = os.environ.get("PNPM_HOME", "")
+            pnpm_cmd = Path(pnpm_home) / "pnpm.cmd" if pnpm_home else None
+            if pnpm_cmd and pnpm_cmd.exists():
+                return str(pnpm_cmd)
+            return shutil.which("pnpm.cmd") or shutil.which("pnpm") or "pnpm.cmd"
+        if name == "node":
+            return shutil.which("node.exe") or shutil.which("node") or "node.exe"
+    return shutil.which(name) or name
 
 
 def ensure_pyinstaller() -> None:
@@ -87,7 +101,7 @@ def build_backend() -> None:
 def build_browser_runtime() -> None:
     run(["pnpm", "exec", "playwright", "install", "chromium"], cwd=FRONTEND)
     executable = subprocess.check_output(
-        ["node", "-e", "const { chromium } = require('playwright'); console.log(chromium.executablePath())"],
+        [resolve_executable("node"), "-e", "const { chromium } = require('@playwright/test'); console.log(chromium.executablePath())"],
         cwd=FRONTEND,
         text=True,
     ).strip()
