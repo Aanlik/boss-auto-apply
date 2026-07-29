@@ -991,6 +991,16 @@ export async function importSettings(payload: unknown): Promise<{ imported: stri
   });
 }
 
+export async function clearLocalDataPackage(): Promise<{
+  cleared: boolean;
+  deleted: string[];
+  count: number;
+  dataDir: string;
+  message: string;
+}> {
+  return fetchJson("/api/settings/local-data", { method: "DELETE" });
+}
+
 export async function getUserPreferences(): Promise<{ preferences: UserPreferences }> {
   return fetchJson("/api/settings/preferences");
 }

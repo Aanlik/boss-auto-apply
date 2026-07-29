@@ -6,6 +6,7 @@ import {
   getBaiduConfig, saveBaiduConfig, deleteBaiduConfig, testBaiduConnection,
   getBusinessConfig, saveBusinessConfig, deleteBusinessConfig, testBusinessConnection,
   applyJobsImport, exportSettings,
+  clearLocalDataPackage,
   getOnboardingWizard, getUserPreferences,
   importSettings, jobsImportTemplateUrl, previewJobsImport,
   saveUserPreferences,
@@ -48,6 +49,8 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
   const [bizStatus, setBizStatus] = useState("");
   const [bizTesting, setBizTesting] = useState(false);
   const [backupStatus, setBackupStatus] = useState("");
+  const [localDataStatus, setLocalDataStatus] = useState("");
+  const [clearingLocalPackage, setClearingLocalPackage] = useState(false);
   const [preferences, setPreferences] = useState<UserPreferences>({ stability: 50, salary: 50, growth: 50, match: 50, avoid_industries: [], preferred_cities: [] });
   const [preferenceStatus, setPreferenceStatus] = useState("");
   const [onboardingWizard, setOnboardingWizard] = useState<OnboardingWizard | null>(null);
@@ -222,8 +225,29 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
   function onClearLocalData() {
     if (!confirm("确定清除本机页面流程数据？这会清除当前模块、已选岗位、简历解析结果、尽调缓存和对话记录。")) return;
     clearLocalWorkflowStorage();
-    setBackupStatus("本机页面流程数据已清除，页面将重新载入");
+    setLocalDataStatus("本机页面流程数据已清除，页面将重新载入");
     window.setTimeout(() => window.location.reload(), 300);
+  }
+
+  async function onClearLocalDataPackage() {
+    const confirmed = confirm(
+      "确定清空本地数据包？这会删除岗位池、简历文件、上传附件、尽调结果、排序结果、打招呼记录、浏览器登录态、日志和已保存的 API 配置。此操作不可撤销。"
+    );
+    if (!confirmed) return;
+    const doubleConfirmed = confirm("请再次确认：清空后需要重新登录 BOSS，并重新配置 API Key。继续清空？");
+    if (!doubleConfirmed) return;
+    setClearingLocalPackage(true);
+    setLocalDataStatus("正在清空本地数据包...");
+    try {
+      const result = await clearLocalDataPackage();
+      clearLocalWorkflowStorage();
+      setLocalDataStatus(`${result.message}，已删除 ${result.count} 项，页面将重新载入`);
+      window.setTimeout(() => window.location.reload(), 600);
+    } catch (e) {
+      setLocalDataStatus(e instanceof Error ? e.message : "清空本地数据包失败");
+    } finally {
+      setClearingLocalPackage(false);
+    }
   }
 
   return (
@@ -438,12 +462,24 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
         <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
           <div className="page-kicker">本机数据</div>
           <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "4px 0 8px" }}>
-            清除保存在本机浏览器里的流程状态、聊天记录和页面偏好，不会删除后端岗位池文件。
+            页面状态只影响当前界面缓存；本地数据包会删除后端保存的岗位、简历、附件、尽调、打招呼记录、登录态、日志和 API 配置。
           </p>
           <div className="settings-row" style={{ alignItems: "center" }}>
-            <label className="settings-label">浏览器数据</label>
+            <label className="settings-label">页面状态</label>
             <button type="button" className="button-quiet button-danger" onClick={onClearLocalData}>清除本机流程数据</button>
           </div>
+          <div className="settings-row" style={{ alignItems: "center", marginTop: 8 }}>
+            <label className="settings-label">数据包</label>
+            <button
+              type="button"
+              className="button-quiet button-danger"
+              onClick={onClearLocalDataPackage}
+              disabled={clearingLocalPackage}
+            >
+              {clearingLocalPackage ? "清空中..." : "一键清空本地数据包"}
+            </button>
+          </div>
+          {localDataStatus && <p className="settings-status">{localDataStatus}</p>}
         </div>
       </div>
     </section>

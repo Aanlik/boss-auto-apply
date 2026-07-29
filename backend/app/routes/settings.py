@@ -3,7 +3,9 @@ from __future__ import annotations
 """AI 供应商设置路由"""
 import json as _json
 import logging
+import os
 import secrets
+import shutil
 import time
 
 from fastapi import APIRouter, Header, HTTPException
@@ -29,6 +31,96 @@ def _mask_secret(value: str, head: int = 6, tail: int = 4) -> str:
     if not value:
         return ""
     return value[:head] + "****" + value[-tail:] if len(value) > head + tail else value[:3] + "****"
+
+
+def _safe_data_dir() -> _Path:
+    target = workflow_persistence.DATA_DIR.resolve()
+    home = _Path.home().resolve()
+    forbidden = {home, home.parent, _Path("/").resolve()}
+    if target in forbidden or not str(target):
+        raise HTTPException(status_code=500, detail=f"数据目录异常，已拒绝清空: {target}")
+    return target
+
+
+def _reset_runtime_caches() -> None:
+    try:
+        from app.routes import jobs
+        jobs._job_store.clear()
+    except Exception as exc:
+        logger.warning("清空岗位内存缓存失败: %s", exc)
+    try:
+        from app.routes import resumes
+        resumes._uploaded_files = []
+        resumes._active_file_id = ""
+    except Exception as exc:
+        logger.warning("清空简历内存缓存失败: %s", exc)
+    try:
+        from app.services import ai_client
+        ai_client._cached_config = {"provider": "openai", "api_key": "", "base_url": "", "model": ""}
+        ai_client._client = None
+    except Exception as exc:
+        logger.warning("清空 AI 配置缓存失败: %s", exc)
+    try:
+        from app.services import business_info
+        business_info._secret_id = ""
+        business_info._secret_key = ""
+        business_info._endpoint = business_info.DEFAULT_ENDPOINT
+        business_info._info_cache.clear()
+    except Exception as exc:
+        logger.warning("清空工商缓存失败: %s", exc)
+    try:
+        from app.services import internet_search
+        os.environ.pop("BAIDU_API_KEY", None)
+        internet_search.QIANFAN_API_KEY = ""
+        internet_search._search_cache.clear()
+    except Exception as exc:
+        logger.warning("清空搜索缓存失败: %s", exc)
+
+
+@router.delete("/local-data")
+def clear_local_data_package() -> dict:
+    """清空本机后端数据包，包括岗位、简历、上传、配置、日志和浏览器登录态。"""
+    data_dir = _safe_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    deleted_items: list[str] = []
+    failed_items: list[dict] = []
+
+    try:
+        from app.services.boss_scraper import _stop_chrome
+        _stop_chrome(clear_session=True)
+    except Exception as exc:
+        logger.warning("清空本地数据前关闭浏览器失败: %s", exc)
+
+    for item in sorted(data_dir.iterdir(), key=lambda path: path.name):
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            deleted_items.append(item.name)
+        except OSError as exc:
+            failed_items.append({"name": item.name, "message": str(exc)})
+
+    _reset_runtime_caches()
+    if failed_items:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "部分本地数据未能删除，请关闭正在运行的浏览器任务后重试",
+                "deleted": deleted_items,
+                "failed": failed_items,
+                "dataDir": str(data_dir),
+            },
+        )
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "cleared": True,
+        "deleted": deleted_items,
+        "count": len(deleted_items),
+        "dataDir": str(data_dir),
+        "message": "本地数据包已清空",
+    }
 
 
 @router.get("/provider")

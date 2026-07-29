@@ -1,6 +1,6 @@
 {
   "name": "boss-workbench-desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "boss 求职助手桌面端",
   "main": "desktop/main.cjs",
