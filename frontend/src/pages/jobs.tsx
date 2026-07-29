@@ -265,20 +265,31 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     }
   }
 
-  async function onEnrichJD() {
-    setLoading("enrich"); setError("");
+  async function onEnrichJD(force = false) {
+    if (force && !confirm("确定重新抓取 JD？已有 JD 内容会被最新详情覆盖。")) return;
+    setLoading(force ? "enrich-force" : "enrich"); setError("");
     try {
-      await enrichJdDetails({ job_ids: selectedJobIds.length > 0 ? selectedJobIds : undefined, max_jobs: 30 });
+      await enrichJdDetails({ job_ids: selectedJobIds.length > 0 ? selectedJobIds : undefined, max_jobs: 30, force });
       await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) { setError(formatApiError(err) || "JD抓取失败"); }
-    finally { setLoading(prev => prev === "enrich" ? "" : prev); }
+    finally {
+      setLoading(prev => prev === "enrich" || prev === "enrich-force" ? "" : prev);
+    }
   }
 
   async function addBlacklist(name: string) {
     const companyName = name.trim();
     if (!companyName) return;
     try {
+      // 先从选中列表中过滤掉该公司的岗位
+      const removeIds = selectedJobIds.filter(id => {
+        const job = jobs.find(j => j.id === id);
+        return job && job.company === companyName;
+      });
+      if (removeIds.length > 0) {
+        dispatch(actions.setSelection(selectedJobIds.filter(id => !removeIds.includes(id))));
+      }
       const r = await addCompanyBlacklist(companyName);
       setBlacklist(r.companies || []);
       setBlacklistInput("");
@@ -687,8 +698,11 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
               <button type="button" className="button-primary" disabled={loading === "capture"} onClick={onCapture}>
                 {loading === "capture" ? "抓取中..." : "开始抓取"}
               </button>
-              <button type="button" className="button-secondary" disabled={loading === "enrich"} onClick={onEnrichJD}>
+              <button type="button" className="button-secondary" disabled={loading === "enrich" || loading === "enrich-force"} onClick={() => onEnrichJD(false)}>
                 {loading === "enrich" ? "获取中..." : "获取 JD 详情"}
+              </button>
+              <button type="button" className="button-secondary" disabled={loading === "enrich" || loading === "enrich-force"} onClick={() => onEnrichJD(true)}>
+                {loading === "enrich-force" ? "重新抓取中..." : "重新抓取 JD"}
               </button>
             </div>
           </div>

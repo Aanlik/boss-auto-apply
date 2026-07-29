@@ -2,11 +2,7 @@
   "name": "boss-workbench-desktop",
   "version": "1.0.0",
   "private": true,
-  "description": "boss 直聘求职端自动化桌面端",
-  "author": {
-    "name": "Aanlik",
-    "email": "Aanlik@users.noreply.github.com"
-  },
+  "description": "boss 求职助手桌面端",
   "main": "desktop/main.cjs",
   "scripts": {
     "desktop:build": "python3 scripts/build_desktop.py",
@@ -15,8 +11,9 @@
   },
   "build": {
     "appId": "com.bossworkbench.desktop",
-    "productName": "boss 直聘求职端自动化",
+    "productName": "boss 求职助手",
     "artifactName": "boss-auto-apply-${version}-${os}-${arch}.${ext}",
+    "icon": "build/icon.png",
     "asar": true,
     "files": [
       "desktop/**/*",
@@ -40,6 +37,7 @@
     ],
     "mac": {
       "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
       "target": [
         "dir",
         "dmg"
@@ -58,7 +56,8 @@
     },
     "linux": {
       "category": "Utility",
-      "maintainer": "Aanlik <Aanlik@users.noreply.github.com>",
+      "icon": "build/icon.png",
+      "maintainer": "boss 求职助手",
       "target": [
         {
           "target": "AppImage",

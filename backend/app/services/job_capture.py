@@ -1,93 +1,11 @@
-"""
-岗位捕获服务。
-提供：示例数据、手动录入、Boss 直聘真实抓取。
-"""
+"""岗位捕获服务：手动录入与 BOSS 直聘真实抓取。"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
+from datetime import datetime, timezone
+
 from app.models.job import JobRecord, JobSource
 
-
-SAMPLE_JOBS: list[dict] = [
-    {
-        "id": "boss-001",
-        "title": "Python 后端工程师",
-        "company": "A 科技有限公司",
-        "city": "深圳",
-        "salary": "20-30K",
-        "jd_text": (
-            "负责 Python、FastAPI、SQLAlchemy 和 Redis 的后端开发。"
-            "参与支付系统与订单系统建设，要求有 3 年以上后端经验，"
-            "熟悉分布式系统设计，有高并发项目经验者优先。"
-        ),
-    },
-    {
-        "id": "boss-002",
-        "title": "Java 后端工程师",
-        "company": "B 信息技术有限公司",
-        "city": "北京",
-        "salary": "15-25K",
-        "jd_text": (
-            "负责 Java、Spring Boot、MySQL 和 Docker 的服务开发。"
-            "关注接口稳定性与性能优化，熟悉微服务架构。"
-        ),
-    },
-    {
-        "id": "boss-003",
-        "title": "前端工程师",
-        "company": "C 互联网公司",
-        "city": "深圳",
-        "salary": "18-28K",
-        "jd_text": (
-            "负责 React、TypeScript、组件库和页面性能优化。"
-            "支持招聘工作台业务，要求熟悉 Node.js 和 Webpack。"
-        ),
-    },
-    {
-        "id": "boss-004",
-        "title": "数据工程师",
-        "company": "D 数据科技有限公司",
-        "city": "深圳",
-        "salary": "25-35K",
-        "jd_text": (
-            "负责大数据平台建设，使用 Spark、Flink、Hadoop 处理海量数据。"
-            "要求熟悉 SQL、Python，有数据仓库建模经验。"
-        ),
-    },
-    {
-        "id": "boss-005",
-        "title": "全栈工程师",
-        "company": "E 创业公司",
-        "city": "杭州",
-        "salary": "20-30K",
-        "jd_text": (
-            "负责前后端全栈开发，前端 React + TypeScript，后端 Python FastAPI。"
-            "要求有独立项目开发能力，熟悉 Docker 部署。"
-        ),
-    },
-]
-
-
-# ---------- 示例数据 ----------
-
-def capture_sample_jobs() -> list[JobSource]:
-    """从示例数据捕获岗位（模拟 Boss 抓取）。"""
-    now = datetime.now(timezone.utc).isoformat()
-    sources: list[JobSource] = []
-    for job in SAMPLE_JOBS:
-        dedupe_key = _make_dedupe_key(job.get("company", ""), job.get("title", ""), job.get("city", ""))
-        sources.append(JobSource(
-            source_type="captured",
-            source_id=job.get("id", ""),
-            raw_payload=job,
-            fetched_at=now,
-            dedupe_key=dedupe_key,
-        ))
-    return sources
-
-
-# ---------- Boss 真实抓取 ----------
 
 def capture_from_boss(
     keyword: str = "Python",
@@ -96,7 +14,7 @@ def capture_from_boss(
     headless: bool = True,
     filters: dict[str, str] | None = None,
 ) -> list[JobSource]:
-    """从 Boss 直聘真实抓取岗位。scrape_jobs_sync 返回 dict 列表。"""
+    """从 BOSS 直聘真实抓取岗位。scrape_jobs_sync 返回 dict 列表。"""
     from app.services.boss_scraper import scrape_jobs_sync
 
     jobs = scrape_jobs_sync(keyword=keyword, city=city, max_pages=max_pages, headless=headless, filters=filters)
@@ -172,6 +90,8 @@ def jobs_from_manual_payload(payload: dict) -> JobRecord:
         city=city,
         salary=payload.get("salary", ""),
         jd_text=payload.get("jd_text", ""),
+        source_url=payload.get("source_url", ""),
+        application_status="active",
         source="manual",
         fetched_at=now,
         dedupe_key=dedupe_key,

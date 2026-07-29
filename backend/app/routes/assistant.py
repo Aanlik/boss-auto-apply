@@ -166,6 +166,40 @@ def get_prompt_versions(kind: str = "", job_id: str = "") -> dict:
     }
 
 
+@router.delete("/prompt-versions")
+def clear_prompt_versions(kind: str = "", job_id: str = "") -> dict:
+    rows = _read_json(_prompt_versions_file(), [])
+    if not isinstance(rows, list):
+        rows = []
+    kept = [
+        row for row in rows
+        if (kind and row.get("kind") != kind) or (job_id and row.get("jobId") != job_id)
+    ]
+    if not kind and not job_id:
+        kept = []
+    deleted = len(rows) - len(kept)
+    write_json_atomic(_prompt_versions_file(), kept)
+    return {
+        "deleted": deleted,
+        "remaining": len(kept),
+    }
+
+
+@router.delete("/prompt-versions/{record_id}")
+def delete_prompt_version(record_id: str) -> dict:
+    rows = _read_json(_prompt_versions_file(), [])
+    if not isinstance(rows, list):
+        rows = []
+    kept = [row for row in rows if str(row.get("id") or "") != record_id]
+    if len(kept) == len(rows):
+        raise HTTPException(status_code=404, detail="版本记录不存在")
+    write_json_atomic(_prompt_versions_file(), kept)
+    return {
+        "deleted": True,
+        "remaining": len(kept),
+    }
+
+
 @router.get("/prompt-versions/compare")
 def compare_prompt_versions(job_id: str = "", kind: str = "deep_report") -> dict:
     rows = _read_json(_prompt_versions_file(), [])

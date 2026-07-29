@@ -443,17 +443,23 @@ def ai_enrich_resume(text: str, fields_missing: list[str]) -> ResumeProfile | No
     except Exception:
         return None
 
-    system = """你是一位专业的简历解析器。从以下简历原文中提取结构化信息。
+    system = """你是一位专业的简历解析器。从以下简历原文中提取完整的结构化信息。
+
+重要规则：
+1. 必须提取简历中的**每一段**工作经历，不能遗漏任何一段
+2. 每段工作经历的 description 要保留原始的详细内容，包括职责、成果、项目等
+3. 必须提取简历中的**每一段**教育经历和项目经历
+4. skills 要提取所有提到的技能关键词
 
 返回 JSON：
 {
   "name": "姓名",
   "title": "当前职位/求职方向",
   "summary": "个人总结",
-  "skills": ["技能1", "技能2"],
+  "skills": ["技能1", "技能2", "...所有技能"],
   "target_titles": ["期望岗位"],
   "work_experience": [
-    {"company": "公司名", "title": "职位", "duration": "时间范围如2020.06-2023.08", "description": "工作描述"}
+    {"company": "公司名", "title": "职位", "duration": "时间范围如2020.06-2023.08", "description": "完整的工作内容描述，保留所有细节"}
   ],
   "education": [
     {"institution": "学校", "degree": "学历", "major": "专业", "graduation": "毕业时间"}
@@ -463,11 +469,11 @@ def ai_enrich_resume(text: str, fields_missing: list[str]) -> ResumeProfile | No
   ]
 }
 
-只返回 JSON，不要解释。如果某字段确实没有，用空字符串/空数组。"""
+只返回 JSON，不要解释。如果某字段确实没有，用空字符串/空数组。work_experience 数组必须包含简历中出现的每一段工作经历。"""
 
-    # 只传前 5000 字符，避免 tokens 过大
+    # 只传前 8000 字符，避免 tokens 过大
     truncated = text[:8000]
-    user = f"以下是一份简历的原文，请提取结构化信息。缺失字段：{', '.join(fields_missing)}。\n\n简历原文：\n{truncated}"
+    user = f"以下是一份简历的原文，请完整提取所有结构化信息，包括每一段工作经历、教育经历和项目经历，不要遗漏。\n\n简历原文：\n{truncated}"
 
     try:
         data = chat_json(system, user)

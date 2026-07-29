@@ -38,8 +38,10 @@ PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -54,6 +56,7 @@ def _parse_time(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+
 def _within_days(value: Any, days: int) -> bool:
     parsed = _parse_time(value)
     if not parsed:
@@ -61,12 +64,15 @@ def _within_days(value: Any, days: int) -> bool:
     return parsed >= datetime.now(timezone.utc) - timedelta(days=max(1, int(days or 7)))
 
 
+
 def data_dir() -> Path:
     return workflow_persistence.DATA_DIR
 
 
+
 def storage_config_file() -> Path:
     return data_dir() / "storage" / "config.json"
+
 
 
 def active_store() -> str:
@@ -75,11 +81,13 @@ def active_store() -> str:
     return "sqlite" if store == "sqlite" else "json"
 
 
+
 def _safe_relative_path(value: str) -> Path:
     rel = Path(str(value or ""))
     if rel.is_absolute() or ".." in rel.parts or not str(rel):
         raise ValueError("invalid backup path")
     return rel
+
 
 
 def log_event(level: str, category: str, message: str, detail: dict | None = None) -> dict:
@@ -99,6 +107,7 @@ def log_event(level: str, category: str, message: str, detail: dict | None = Non
         from app.services import sqlite_kv_store
         sqlite_kv_store.put("maintenance_events", event["id"], event)
     return event
+
 
 
 def list_events(level: str = "", limit: int = 50) -> list[dict]:
@@ -123,6 +132,7 @@ def list_events(level: str = "", limit: int = 50) -> list[dict]:
     return list(reversed(rows))[: max(1, min(int(limit or 50), 200))]
 
 
+
 def log_api_call(category: str, method: str, url: str, status_code: int, duration_ms: int, detail: dict | None = None) -> dict:
     item = {
         "id": f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
@@ -142,6 +152,7 @@ def log_api_call(category: str, method: str, url: str, status_code: int, duratio
         from app.services import sqlite_kv_store
         sqlite_kv_store.put("api_calls", item["id"], item)
     return item
+
 
 
 def list_api_calls(category: str = "", limit: int = 100) -> list[dict]:
@@ -165,349 +176,6 @@ def list_api_calls(category: str = "", limit: int = 100) -> list[dict]:
         rows.append(item)
     return list(reversed(rows))[: max(1, min(int(limit or 100), 500))]
 
-
-def export_full_backup() -> dict:
-    root = data_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    files = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root).as_posix()
-        if rel.startswith("logs/events.jsonl"):
-            continue
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        text = None
-        encoding = "base64"
-        if path.suffix.lower() in BACKUP_TEXT_SUFFIXES:
-            try:
-                text = raw.decode("utf-8")
-                encoding = "utf-8"
-            except UnicodeDecodeError:
-                pass
-        files.append({
-            "path": rel,
-            "encoding": encoding,
-            "content": text if text is not None else base64.b64encode(raw).decode("ascii"),
-            "size": len(raw),
-        })
-    payload = {
-        "kind": "full_workspace_backup",
-        "version": 1,
-        "exportedAt": _now(),
-        "files": files,
-        "total": len(files),
-    }
-    log_event("info", "backup", f"完整备份已生成，包含 {len(files)} 个文件", {"total": len(files)})
-    return payload
-
-
-def _redact_text(value: str) -> str:
-    redacted = PHONE_RE.sub("[PHONE_REDACTED]", value)
-    return EMAIL_RE.sub("[EMAIL_REDACTED]", redacted)
-
-
-def _redact_json(value: Any) -> Any:
-    if isinstance(value, dict):
-        cleaned = {}
-        for key, item in value.items():
-            key_lower = str(key).lower()
-            if any(part in key_lower for part in SENSITIVE_FIELD_PARTS):
-                cleaned[key] = "[SECRET_REDACTED]" if item else item
-            elif any(part in key_lower for part in PRIVACY_FIELD_PARTS):
-                cleaned[key] = "[PRIVACY_REDACTED]" if item else item
-            else:
-                cleaned[key] = _redact_json(item)
-        return cleaned
-    if isinstance(value, list):
-        return [_redact_json(item) for item in value]
-    if isinstance(value, str):
-        return _redact_text(value)
-    return value
-
-
-def export_redacted_backup() -> dict:
-    root = data_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    files = []
-    skipped = []
-    redacted_count = 0
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root).as_posix()
-        if rel.startswith("logs/events.jsonl"):
-            continue
-        if path.suffix.lower() not in BACKUP_TEXT_SUFFIXES:
-            skipped.append({"path": rel, "reason": "binary_file"})
-            continue
-        try:
-            raw_text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            skipped.append({"path": rel, "reason": "read_failed"})
-            continue
-
-        content = _redact_text(raw_text)
-        if path.suffix.lower() == ".json":
-            try:
-                content = json.dumps(_redact_json(json.loads(raw_text)), ensure_ascii=False, indent=2)
-            except json.JSONDecodeError:
-                content = _redact_text(raw_text)
-        elif path.suffix.lower() == ".jsonl":
-            lines = []
-            for line in raw_text.splitlines():
-                try:
-                    lines.append(json.dumps(_redact_json(json.loads(line)), ensure_ascii=False))
-                except json.JSONDecodeError:
-                    lines.append(_redact_text(line))
-            content = "\n".join(lines)
-
-        if content != raw_text:
-            redacted_count += 1
-        files.append({
-            "path": rel,
-            "encoding": "utf-8",
-            "content": content,
-            "size": len(content.encode("utf-8")),
-        })
-
-    payload = {
-        "kind": "redacted_workspace_backup",
-        "version": 1,
-        "exportedAt": _now(),
-        "files": files,
-        "total": len(files),
-        "redactedFiles": redacted_count,
-        "skippedFiles": skipped,
-    }
-    log_event("info", "backup", f"脱敏备份已生成，包含 {len(files)} 个文本文件", {"total": len(files), "redactedFiles": redacted_count, "skippedFiles": len(skipped)})
-    return payload
-
-
-def import_full_backup(payload: dict) -> dict:
-    if payload.get("kind") != "full_workspace_backup":
-        raise ValueError("invalid backup kind")
-    restored = 0
-    skipped = 0
-    root = data_dir()
-    for item in payload.get("files") or []:
-        try:
-            rel = _safe_relative_path(str(item.get("path") or ""))
-            target = root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            content = item.get("content", "")
-            if item.get("encoding") == "base64":
-                raw = base64.b64decode(str(content).encode("ascii"))
-                target.write_bytes(raw)
-            else:
-                target.write_text(str(content), encoding="utf-8")
-            restored += 1
-        except Exception:
-            skipped += 1
-    log_event("info", "restore", f"完整备份恢复完成，恢复 {restored} 个文件", {"restored": restored, "skipped": skipped})
-    return {"restored": restored, "skipped": skipped}
-
-
-def restore_drill(payload: dict) -> dict[str, Any]:
-    backup = payload.get("backup") if isinstance(payload.get("backup"), dict) else payload
-    files = backup.get("files") if isinstance(backup, dict) else []
-    if not isinstance(files, list):
-        files = []
-    valid = []
-    rejected = []
-    for item in files:
-        if not isinstance(item, dict):
-            rejected.append({"reason": "invalid_item"})
-            continue
-        try:
-            rel = _safe_relative_path(str(item.get("path") or ""))
-            target = data_dir() / rel
-            valid.append({
-                "path": rel.as_posix(),
-                "exists": target.exists(),
-                "willOverwrite": target.exists(),
-                "encoding": item.get("encoding") or "text",
-            })
-        except ValueError:
-            rejected.append({"path": item.get("path"), "reason": "invalid_path"})
-    return {
-        "kind": "restore_drill",
-        "valid": len(rejected) == 0,
-        "wouldRestore": len(valid),
-        "wouldOverwrite": sum(1 for item in valid if item["willOverwrite"]),
-        "files": valid[:200],
-        "rejected": rejected[:50],
-        "generatedAt": _now(),
-    }
-
-
-def retention_preview() -> dict:
-    from app.routes import jobs as jobs_route
-    from app.services import workflow_tasks
-
-    expired_jobs = [job for job in jobs_route._all_jobs() if job.lifecycle_status == "suspected_expired"]
-    failed_tasks = [
-        task for task in workflow_tasks.load_tasks(limit=100)
-        if task.get("status") in {"failed", "partial_failed"}
-    ]
-    resume_files = list((data_dir() / "resumes").glob("*.json")) if (data_dir() / "resumes").exists() else []
-    return {
-        "expiredJobs": len(expired_jobs),
-        "failedTasks": len(failed_tasks),
-        "resumeFiles": len(resume_files),
-        "archivePath": str(data_dir() / "archive"),
-    }
-
-
-def cleanup_dry_run() -> dict[str, Any]:
-    preview = retention_preview()
-    root = data_dir()
-    cache_files: list[str] = []
-    for folder in ("visual-regression", "tmp", "cache"):
-        scan_root = root / folder
-        if not scan_root.exists():
-            continue
-        for path in scan_root.rglob("*"):
-            if path.is_file():
-                cache_files.append(path.relative_to(root).as_posix())
-    return {
-        "kind": "cleanup_dry_run",
-        "status": "warn" if preview.get("expiredJobs") or preview.get("failedTasks") or preview.get("resumeFiles") or cache_files else "ok",
-        "summary": {
-            "expiredJobs": preview.get("expiredJobs", 0),
-            "failedTasks": preview.get("failedTasks", 0),
-            "resumeChats": preview.get("resumeFiles", 0),
-            "cacheFiles": len(cache_files),
-        },
-        "targets": [
-            {"key": "expired_jobs", "label": "疑似过期岗位", "count": preview.get("expiredJobs", 0), "action": "确认后归档，不会直接硬删除"},
-            {"key": "failed_tasks", "label": "失败任务", "count": preview.get("failedTasks", 0), "action": "确认后归档旧失败任务"},
-            {"key": "resume_chats", "label": "简历对话缓存", "count": preview.get("resumeFiles", 0), "action": "确认后归档旧对话缓存"},
-            {"key": "cache_files", "label": "临时缓存文件", "count": len(cache_files), "action": "确认后清理临时渲染和缓存"},
-        ],
-        "sampleFiles": cache_files[:10],
-        "archivePath": preview.get("archivePath", ""),
-        "generatedAt": _now(),
-    }
-
-
-def cleanup_retention(options: dict | None = None) -> dict:
-    from app.routes import jobs as jobs_route
-    from app.services import workflow_tasks
-
-    opts = options or {}
-    archived_jobs = 0
-    archived_tasks = 0
-    archived_chats = 0
-    if opts.get("archive_expired_jobs", True):
-        expired = {
-            jid: job.model_dump()
-            for jid, job in list(jobs_route._job_store.items())
-            if job.lifecycle_status == "suspected_expired"
-        }
-        if expired:
-            archive_file = data_dir() / "archive" / "jobs.json"
-            existing = _read_json(archive_file, {})
-            if not isinstance(existing, dict):
-                existing = {}
-            existing.update(expired)
-            write_json_atomic(archive_file, existing)
-            for jid in expired:
-                jobs_route._job_store.pop(jid, None)
-            jobs_route._save_jobs()
-            archived_jobs = len(expired)
-    if opts.get("archive_failed_tasks", False):
-        tasks = workflow_tasks.load_tasks(limit=100)
-        failed = [task for task in tasks if task.get("status") in {"failed", "partial_failed"}]
-        if failed:
-            archive_file = data_dir() / "archive" / "tasks.json"
-            existing = _read_json(archive_file, [])
-            if not isinstance(existing, list):
-                existing = []
-            existing.extend(failed)
-            write_json_atomic(archive_file, existing)
-            remaining = [task for task in tasks if task.get("status") not in {"failed", "partial_failed"}]
-            write_json_atomic(workflow_tasks.TASKS_FILE, remaining)
-            archived_tasks = len(failed)
-    if opts.get("archive_resume_chats", False):
-        resume_dir = data_dir() / "resumes"
-        archive_file = data_dir() / "archive" / "resume_chats.json"
-        archived_payload = _read_json(archive_file, {})
-        if not isinstance(archived_payload, dict):
-            archived_payload = {}
-        if resume_dir.exists():
-            for path in resume_dir.glob("*.json"):
-                entry = _read_json(path, {})
-                chats = entry.get("chats") if isinstance(entry, dict) else {}
-                if chats:
-                    archived_payload[path.stem] = chats
-                    entry["chats"] = {}
-                    write_json_atomic(path, entry)
-                    archived_chats += 1
-            if archived_chats:
-                write_json_atomic(archive_file, archived_payload)
-    log_event("info", "retention", f"数据保留策略已执行，归档岗位 {archived_jobs} 个", {"archivedJobs": archived_jobs, "archivedTasks": archived_tasks, "archivedChats": archived_chats})
-    return {"archivedJobs": archived_jobs, "archivedTasks": archived_tasks, "archivedChats": archived_chats, "preview": retention_preview()}
-
-
-def cleanup_confirm(options: dict | None = None) -> dict[str, Any]:
-    before = cleanup_dry_run()
-    result = cleanup_retention(options or {})
-    after = cleanup_dry_run()
-    payload = {
-        "kind": "cleanup_confirm_result",
-        "generatedAt": _now(),
-        "before": before,
-        "after": after,
-        **result,
-    }
-    log_event("warning", "cleanup", "已确认执行数据清理", {"before": before.get("summary"), "result": result})
-    return payload
-
-
-def retention_rules(options: dict | None = None) -> dict[str, Any]:
-    opts = options or {}
-    return {
-        "suspectAfterDays": max(7, min(int(opts.get("suspect_after_days") or opts.get("suspectAfterDays") or 30), 365)),
-        "archiveAfterDays": max(30, min(int(opts.get("archive_after_days") or opts.get("archiveAfterDays") or 90), 730)),
-        "autoArchiveEnabled": bool(opts.get("auto_archive_enabled") or opts.get("autoArchiveEnabled") or False),
-    }
-
-
-def apply_retention_rules(options: dict | None = None) -> dict[str, Any]:
-    from app.routes import jobs as jobs_route
-
-    rules = retention_rules(options)
-    now = datetime.now(timezone.utc)
-    marked_suspected = 0
-    for job in jobs_route._all_jobs():
-        if job.lifecycle_status != "active":
-            continue
-        last_seen = _parse_time(job.fetched_at or job.captured_at)
-        if not last_seen:
-            continue
-        if last_seen <= now - timedelta(days=rules["suspectAfterDays"]):
-            job.lifecycle_status = "suspected_expired"
-            job.expires_at = _now()
-            job.stale_reason = f"{rules['suspectAfterDays']} 天未更新，待复核"
-            if "疑似过期" not in job.tags:
-                job.tags = [*job.tags, "疑似过期"]
-            marked_suspected += 1
-    if marked_suspected:
-        jobs_route._save_jobs()
-        log_event("info", "retention", f"长期维护规则标记疑似过期岗位 {marked_suspected} 个", {"rules": rules})
-    cleanup = {"archivedJobs": 0, "archivedTasks": 0, "archivedChats": 0}
-    if rules["autoArchiveEnabled"]:
-        cleanup = cleanup_retention({"archive_expired_jobs": True, "archive_failed_tasks": False, "archive_resume_chats": False})
-    return {
-        "rules": rules,
-        "markedSuspected": marked_suspected,
-        "archivedJobs": cleanup.get("archivedJobs", 0),
-        "preview": retention_preview(),
-    }
 
 
 def storage_status() -> dict:
@@ -542,6 +210,7 @@ def storage_status() -> dict:
     }
 
 
+
 def set_primary_storage(active_store_name: str) -> dict:
     store = str(active_store_name or "").lower().strip()
     if store not in {"json", "sqlite"}:
@@ -555,469 +224,6 @@ def set_primary_storage(active_store_name: str) -> dict:
     log_event("info", "storage", f"主存储已切换为 {store}", {"activeStore": store})
     return storage_status()
 
-
-def release_manifest() -> dict:
-    import subprocess
-
-    root = Path(__file__).resolve().parents[3]
-    try:
-        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, text=True, capture_output=True, check=False).stdout.strip()
-    except Exception:
-        commit = ""
-    return {
-        "kind": "release_manifest",
-        "version": 1,
-        "generatedAt": _now(),
-        "commit": commit,
-        "storage": storage_status(),
-        "qualityGates": [
-            {"key": "backend_tests", "command": "pytest -q", "required": True},
-            {"key": "frontend_validate", "command": "pnpm validate", "required": True},
-            {"key": "diff_check", "command": "git diff --check", "required": True},
-            {"key": "security_audit", "endpoint": "/api/maintenance/security/audit", "required": True},
-        ],
-    }
-
-
-def release_notes() -> dict:
-    return {
-        "kind": "release_notes",
-        "version": "1.0",
-        "generatedAt": _now(),
-        "phase": "1.0 正式版",
-        "highlights": [
-            "核心流程已闭环：简历、岗位、JD、尽调、排序、打招呼、跟进。",
-            "上线维护能力已接入：发布体检、安全审计、脱敏备份、人工验收清单。",
-            "长期维护能力已接入：SQLite 主存储、备份恢复、删除恢复、任务中心和投递时间线。",
-        ],
-        "knownRisks": [
-            "真实 BOSS 页面结构可能变化，自动发送前需要先执行页面可用性检测。",
-            "自动化不会绕过验证码或风控，遇到风险提示会停止并记录原因。",
-            "完整备份包含敏感业务数据，演示或排查问题请使用脱敏备份。",
-        ],
-    }
-
-
-def release_acceptance_checklist() -> dict:
-    return {
-        "kind": "release_acceptance_checklist",
-        "version": 1,
-        "generatedAt": _now(),
-        "sections": [
-            {
-                "key": "core_flow",
-                "title": "核心求职流程",
-                "steps": [
-                    "导入或解析一份简历，确认简历模块能展示基础信息和优化建议。",
-                    "抓取一组真实岗位，确认城市、多维筛选、黑名单和重复岗位处理符合预期。",
-                    "补全 JD 详情，抽查至少 3 个岗位，确认噪音已被过滤且岗位正文可读。",
-                    "执行公司尽调，确认工商名称替换、行业分析、搜索证据和风险解释可追溯。",
-                    "运行岗位排序，确认权重模板、推荐理由、简历缺口和下一步建议能解释排序结果。",
-                ],
-            },
-            {
-                "key": "greeting_flow",
-                "title": "打招呼流程",
-                "steps": [
-                    "生成招呼语草稿，确认内容通过长度、中文、模板变量和异常话术校验。",
-                    "执行发送前预检，确认未登录、Cookie 失效、页面风控、网络失败会显示清晰原因。",
-                    "使用人工确认模式发送 1 条测试岗位，确认岗位状态、投递时间线和发送记录同步更新。",
-                    "开启真实自动发送前，确认全局开关、频率模板、单批上限、今日上限和暂停/终止按钮可用。",
-                ],
-            },
-            {
-                "key": "release_safety",
-                "title": "上线安全",
-                "steps": [
-                    "运行发布体检，确认无 error 项；warn 项需要有明确处理或接受理由。",
-                    "导出完整备份并单独保存，再导出脱敏备份用于演示或问题排查。",
-                    "执行安全审计，确认 API Key 未以明文残留，导出文件不包含手机号或邮箱等明显隐私。",
-                    "运行后端测试、前端校验、端到端冒烟和差异格式检查。",
-                ],
-            },
-        ],
-    }
-
-
-def security_audit() -> dict:
-    root = data_dir()
-    checks = []
-    suspicious = []
-    secret_files = [
-        root / "provider.json",
-        root / "baidu_config.json",
-        root / "business_info_config.json",
-    ]
-    for path in secret_files:
-        payload = _read_json(path, {})
-        if not isinstance(payload, dict):
-            continue
-        for key in ("api_key", "secret_key", "secret_id"):
-            value = str(payload.get(key) or "")
-            encrypted = str(payload.get(f"{key}_encrypted") or "")
-            if value and not encrypted:
-                suspicious.append({"path": path.relative_to(root).as_posix(), "field": key})
-    checks.append({
-        "key": "plain_secret_scan",
-        "label": "明文密钥扫描",
-        "status": "warn" if suspicious else "ok",
-        "message": f"发现 {len(suspicious)} 个疑似明文字段。" if suspicious else "未发现已知配置文件中的明文密钥。",
-        "items": suspicious,
-    })
-    checks.append({
-        "key": "local_secret_key",
-        "label": "本地加密主密钥",
-        "status": "ok" if (root / ".secret_key").exists() else "warn",
-        "message": "已检测到本地加密主密钥。" if (root / ".secret_key").exists() else "未检测到 data/.secret_key；如使用环境变量主密钥可忽略。",
-    })
-    dependency_files = [
-        Path(__file__).resolve().parents[3] / "backend" / "pyproject.toml",
-        Path(__file__).resolve().parents[3] / "frontend" / "pnpm-lock.yaml",
-    ]
-    checks.append({
-        "key": "dependency_audit",
-        "label": "依赖审计准备度",
-        "status": "ok" if all(path.exists() for path in dependency_files) else "warn",
-        "message": "已检测到后端依赖声明和前端锁文件，可纳入发布审计。" if all(path.exists() for path in dependency_files) else "依赖声明不完整，发布前需要复核。",
-    })
-    privacy_hits = []
-    phone_re = re.compile(r"1[3-9]\d{9}")
-    email_re = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-    for folder in ("resumes", "uploads", "greetings"):
-        scan_root = root / folder
-        if not scan_root.exists():
-            continue
-        for path in list(scan_root.rglob("*.json"))[:100]:
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            matches = []
-            if phone_re.search(text):
-                matches.append("phone")
-            if email_re.search(text):
-                matches.append("email")
-            if matches:
-                privacy_hits.append({"path": path.relative_to(root).as_posix(), "fields": matches})
-    checks.append({
-        "key": "export_privacy_scan",
-        "label": "导出隐私扫描",
-        "status": "warn" if privacy_hits else "ok",
-        "message": f"发现 {len(privacy_hits)} 个可能包含个人信息的业务文件。" if privacy_hits else "未在常见导出目录发现手机号或邮箱。",
-        "items": privacy_hits[:20],
-    })
-    status = "error" if any(item["status"] == "error" for item in checks) else ("warn" if any(item["status"] == "warn" for item in checks) else "ok")
-    return {"status": status, "checks": checks, "generatedAt": _now()}
-
-
-def privacy_scan() -> dict[str, Any]:
-    root = data_dir()
-    hits: list[dict[str, Any]] = []
-    patterns = {
-        "phone": re.compile(r"1[3-9]\d{9}"),
-        "email": re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
-        "idCard": re.compile(r"\d{17}[\dXx]"),
-    }
-    for folder in ("resumes", "uploads", "jobs", "greetings", "diligence", "assistant"):
-        scan_root = root / folder
-        if not scan_root.exists():
-            continue
-        for path in list(scan_root.rglob("*"))[:500]:
-            if not path.is_file() or path.suffix.lower() not in {".json", ".jsonl", ".txt", ".md", ".csv"}:
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            fields = [key for key, regex in patterns.items() if regex.search(text)]
-            if fields:
-                hits.append({"path": path.relative_to(root).as_posix(), "fields": fields})
-    return {
-        "kind": "privacy_scan",
-        "status": "warn" if hits else "ok",
-        "summary": {"hits": len(hits), "scannedRoots": 6},
-        "hits": hits[:50],
-        "suggestions": [
-            "上线演示前优先导出脱敏备份，不使用完整备份文件演示。",
-            "清理上传目录、测试简历和临时发送记录中的手机号、邮箱等个人信息。",
-            "如需排查问题，优先使用脱敏备份或最小化样本。",
-        ] if hits else ["当前未发现明显手机号、邮箱或身份证号残留。"],
-        "generatedAt": _now(),
-    }
-
-
-def dependency_vulnerability_audit(dry_run: bool = False) -> dict:
-    repo_root = Path(__file__).resolve().parents[3]
-    checks = []
-    planned = [
-        {
-            "key": "frontend_pnpm_audit",
-            "label": "前端依赖漏洞审计",
-            "command": ["pnpm", "audit", "--json"],
-            "cwd": repo_root / "frontend",
-            "available": (repo_root / "frontend" / "pnpm-lock.yaml").exists(),
-        },
-        {
-            "key": "backend_pip_audit",
-            "label": "后端依赖漏洞审计",
-            "command": ["python3", "-m", "pip_audit", "--format", "json"],
-            "cwd": repo_root,
-            "available": importlib.util.find_spec("pip_audit") is not None,
-        },
-    ]
-    for item in planned:
-        if dry_run:
-            checks.append({
-                "key": item["key"],
-                "label": item["label"],
-                "status": "ok" if item["available"] else "warn",
-                "message": "可执行真实依赖审计。" if item["available"] else "审计工具或锁文件不可用。",
-                "command": " ".join(item["command"]),
-            })
-            continue
-        if not item["available"]:
-            checks.append({
-                "key": item["key"],
-                "label": item["label"],
-                "status": "warn",
-                "message": "审计工具或锁文件不可用，发布前需补齐后再执行。",
-                "command": " ".join(item["command"]),
-            })
-            continue
-        try:
-            result = subprocess.run(
-                item["command"],
-                cwd=item["cwd"],
-                text=True,
-                capture_output=True,
-                timeout=35,
-                check=False,
-            )
-            output = (result.stdout or result.stderr or "").strip()
-            vulnerable = result.returncode not in {0}
-            message = "未发现阻断级漏洞。" if not vulnerable else "依赖审计发现风险，请查看命令输出并升级依赖。"
-            checks.append({
-                "key": item["key"],
-                "label": item["label"],
-                "status": "warn" if vulnerable else "ok",
-                "message": message,
-                "command": " ".join(item["command"]),
-                "exitCode": result.returncode,
-                "outputPreview": output[:1200],
-            })
-        except subprocess.TimeoutExpired:
-            checks.append({
-                "key": item["key"],
-                "label": item["label"],
-                "status": "warn",
-                "message": "依赖审计超时，请在终端手动执行。",
-                "command": " ".join(item["command"]),
-            })
-    status = "warn" if any(item["status"] != "ok" for item in checks) else "ok"
-    return {"status": status, "checks": checks, "dryRun": dry_run, "generatedAt": _now()}
-
-
-def release_preflight() -> dict:
-    health = run_health_check()
-    checks = list(health.get("checks") or [])
-    storage = storage_status()
-    preview = retention_preview()
-    recent_errors = list_events(level="error", limit=5)
-
-    checks.extend([
-        {
-            "key": "storage_backup",
-            "label": "完整数据备份",
-            "status": "warn",
-            "message": "上线前建议导出完整备份，并保存在可信位置。",
-            "action": "设置页执行完整备份导出",
-        },
-        {
-            "key": "storage_mode",
-            "label": "数据存储模式",
-            "status": "ok" if storage["json"]["ready"] else "error",
-            "message": storage["sqlite"]["message"],
-            "action": "如需迁移，可先执行 SQLite 快照迁移",
-        },
-        {
-            "key": "retention",
-            "label": "数据保留策略",
-            "status": "warn" if preview["expiredJobs"] or preview["failedTasks"] else "ok",
-            "message": f"疑似过期岗位 {preview['expiredJobs']} 个，失败任务 {preview['failedTasks']} 个。",
-            "action": "上线前归档疑似过期岗位和失败任务",
-        },
-        {
-            "key": "recent_errors",
-            "label": "近期错误日志",
-            "status": "warn" if recent_errors else "ok",
-            "message": f"最近发现 {len(recent_errors)} 条错误日志。" if recent_errors else "未发现近期错误日志。",
-            "action": "打开维护日志复核错误详情" if recent_errors else "",
-        },
-    ])
-    if any(item.get("status") == "error" for item in checks):
-        status = "error"
-    elif any(item.get("status") == "warn" for item in checks):
-        status = "warn"
-    else:
-        status = "ok"
-    return {
-        "status": status,
-        "summary": {
-            "total": len(checks),
-            "ok": sum(1 for item in checks if item.get("status") == "ok"),
-            "warn": sum(1 for item in checks if item.get("status") == "warn"),
-            "error": sum(1 for item in checks if item.get("status") == "error"),
-        },
-        "checks": checks,
-        "generatedAt": _now(),
-    }
-
-
-def storage_migration_wizard() -> dict:
-    storage = storage_status()
-    sqlite_info = storage["sqlite"]
-    backups = sqlite_info.get("backups") or []
-    migrated = bool(sqlite_info.get("exists"))
-    verified = sqlite_info.get("integrity", {}).get("status") == "ok"
-    primary_sqlite = storage.get("activeStore") == "sqlite"
-    steps = [
-        {
-            "key": "backup",
-            "label": "创建迁移前备份",
-            "status": "done" if backups else "todo",
-            "action": "点击“创建数据库备份”或先导出完整数据。",
-        },
-        {
-            "key": "migrate",
-            "label": "执行 SQLite 快照迁移",
-            "status": "done" if migrated else "todo",
-            "action": "点击“执行快照迁移”。",
-        },
-        {
-            "key": "verify",
-            "label": "校验数据库完整性",
-            "status": "done" if migrated and verified else ("todo" if migrated else "blocked"),
-            "action": "迁移后查看完整性状态，必要时预览最近备份。",
-        },
-        {
-            "key": "set_primary",
-            "label": "设为主存储",
-            "status": "done" if primary_sqlite else ("todo" if migrated and verified else "blocked"),
-            "action": "校验正常后点击“设为主存储”。",
-        },
-        {
-            "key": "rollback",
-            "label": "保留回滚路径",
-            "status": "available" if migrated else "blocked",
-            "action": "如果迁移后异常，可点击“回滚 JSON”。",
-        },
-    ]
-    if primary_sqlite and verified:
-        next_step = {"label": "迁移已完成", "action": "保持定期备份即可。"}
-    else:
-        next_step = next(({"label": step["label"], "action": step["action"]} for step in steps if step["status"] == "todo"), {"label": "等待前置步骤", "action": "先完成未阻断的迁移步骤。"})
-    return {
-        "activeStore": storage["activeStore"],
-        "sqlitePath": sqlite_info["path"],
-        "steps": steps,
-        "nextStep": next_step,
-        "generatedAt": _now(),
-    }
-
-
-def migrate_to_sqlite() -> dict:
-    from app.services import sqlite_kv_store
-
-    root = data_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    sqlite_path = root / "boss_workbench.sqlite3"
-    backup = sqlite_kv_store.create_backup() if sqlite_path.exists() else None
-    conn = sqlite3.connect(sqlite_path)
-    snapshot_count = 0
-    resumes_imported = 0
-    maintenance_events_imported = 0
-    api_calls_imported = 0
-    try:
-        conn.execute("CREATE TABLE IF NOT EXISTS json_snapshots (path TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT NOT NULL)")
-        for path in sorted(root.rglob("*.json")):
-            if "archive" in path.relative_to(root).parts:
-                continue
-            rel = path.relative_to(root).as_posix()
-            conn.execute(
-                "INSERT OR REPLACE INTO json_snapshots(path, content, updated_at) VALUES (?, ?, ?)",
-                (rel, path.read_text(encoding="utf-8"), _now()),
-            )
-            snapshot_count += 1
-        conn.commit()
-    finally:
-        conn.close()
-
-    for path in sorted((root / "resumes").glob("*.json")) if (root / "resumes").exists() else []:
-        entry = _read_json(path, None)
-        if isinstance(entry, dict):
-            sqlite_kv_store.put("resumes", path.stem, entry)
-            resumes_imported += 1
-
-    def import_jsonl(path: Path, namespace: str) -> int:
-        imported = 0
-        if not path.exists():
-            return imported
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(item, dict):
-                continue
-            key = str(item.get("id") or "").strip()
-            if not key:
-                continue
-            sqlite_kv_store.put(namespace, key, item)
-            imported += 1
-        return imported
-
-    maintenance_events_imported = import_jsonl(root / "logs" / "events.jsonl", "maintenance_events")
-    api_calls_imported = import_jsonl(root / "logs" / "api_calls.jsonl", "api_calls")
-    log_event(
-        "info",
-        "storage",
-        f"SQLite 迁移完成，快照 {snapshot_count} 个文件、简历 {resumes_imported} 份、日志 {maintenance_events_imported + api_calls_imported} 条",
-        {
-            "snapshotTables": snapshot_count,
-            "resumesImported": resumes_imported,
-            "maintenanceEventsImported": maintenance_events_imported,
-            "apiCallsImported": api_calls_imported,
-        },
-    )
-    status = storage_status()
-    status.update({
-        "snapshotTables": snapshot_count,
-        "resumesImported": resumes_imported,
-        "maintenanceEventsImported": maintenance_events_imported,
-        "apiCallsImported": api_calls_imported,
-        "migrationBackup": backup,
-    })
-    return status
-
-
-def rollback_sqlite_to_json() -> dict:
-    sqlite_path = data_dir() / "boss_workbench.sqlite3"
-    restored = 0
-    if sqlite_path.exists():
-        conn = sqlite3.connect(sqlite_path)
-        try:
-            rows = conn.execute("SELECT path, content FROM json_snapshots").fetchall()
-            for rel, content in rows:
-                target = data_dir() / _safe_relative_path(rel)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
-                restored += 1
-        finally:
-            conn.close()
-    log_event("info", "storage", f"SQLite 快照回滚完成，恢复 {restored} 个 JSON 文件", {"restored": restored})
-    status = storage_status()
-    status["restored"] = restored
-    return status
 
 
 def weekly_report(days: int = 7) -> dict[str, Any]:
@@ -1090,9 +296,11 @@ def weekly_report(days: int = 7) -> dict[str, Any]:
     }
 
 
+
 def _date_key(value: Any) -> str:
     parsed = _parse_time(value) or datetime.now(timezone.utc)
     return parsed.date().isoformat()
+
 
 
 def _empty_day_series(window_days: int) -> list[dict[str, Any]]:
@@ -1110,6 +318,7 @@ def _empty_day_series(window_days: int) -> list[dict[str, Any]]:
         }
         for offset in range(window_days - 1, -1, -1)
     ]
+
 
 
 def trend_report(days: int = 30) -> dict[str, Any]:
@@ -1182,6 +391,7 @@ def trend_report(days: int = 30) -> dict[str, Any]:
     }
 
 
+
 def _quality_action(key: str, label: str, page: str, reason: str, count: int, severity: str = "warn") -> dict[str, Any]:
     return {
         "key": key,
@@ -1192,6 +402,7 @@ def _quality_action(key: str, label: str, page: str, reason: str, count: int, se
         "action": label,
         "reason": reason,
     }
+
 
 
 def data_quality_center() -> dict[str, Any]:
@@ -1240,6 +451,7 @@ def data_quality_center() -> dict[str, Any]:
     }
 
 
+
 def repair_data_quality(actions: list[str] | None = None) -> dict[str, Any]:
     from app.routes import jobs as jobs_route
 
@@ -1266,303 +478,6 @@ def repair_data_quality(actions: list[str] | None = None) -> dict[str, Any]:
         log_event("info", "data_quality", f"数据质量一键修复更新 {updated} 个岗位", {"actions": sorted(selected), "updated": updated})
     return {"updated": updated, "actions": sorted(selected), "details": details[:50], "quality": data_quality_center()}
 
-
-def production_guard() -> dict[str, Any]:
-    from app.services.runtime_mode import get_runtime_mode
-
-    mode = get_runtime_mode()
-    preflight = release_preflight()
-    redacted_ready = export_redacted_backup().get("kind") == "redacted_workspace_backup"
-    checks = [
-        {
-            "key": "runtime_mode",
-            "label": "运行模式",
-            "status": "ok" if mode == "production" else "warn",
-            "message": f"当前为 {mode} 模式",
-            "action": "上线前建议使用 production 模式",
-        },
-        {
-            "key": "preflight",
-            "label": "上线体检",
-            "status": "ok" if preflight.get("status") == "ok" else "warn",
-            "message": f"体检状态：{preflight.get('status')}",
-            "action": "处理体检中的 warn/error 项",
-        },
-        {
-            "key": "redacted_backup",
-            "label": "脱敏备份",
-            "status": "ok" if redacted_ready else "warn",
-            "message": "可生成脱敏备份" if redacted_ready else "脱敏备份不可用",
-            "action": "上线前导出脱敏备份用于演示或交付",
-        },
-    ]
-    status = "ok" if all(item["status"] == "ok" for item in checks) else "warn"
-    return {
-        "mode": mode,
-        "status": status,
-        "locked": status == "ok",
-        "checks": checks,
-        "summary": {
-            "total": len(checks),
-            "ok": sum(1 for item in checks if item["status"] == "ok"),
-            "warn": sum(1 for item in checks if item["status"] == "warn"),
-        },
-        "generatedAt": _now(),
-    }
-
-
-def online_acceptance_report() -> dict[str, Any]:
-    preflight = release_preflight()
-    guard = production_guard()
-    storage = storage_status()
-    pdf_status = "unknown"
-    try:
-        from app.routes.maintenance import get_pdf_visual_regression
-
-        pdf_status = str(get_pdf_visual_regression().get("status") or "unknown")
-    except Exception:
-        pdf_status = "error"
-    checks = [
-        {"key": "backend_tests", "label": "后端测试", "status": "manual", "command": "cd backend && pytest -q"},
-        {"key": "frontend_validate", "label": "前端校验", "status": "manual", "command": "cd frontend && pnpm validate"},
-        {"key": "playwright", "label": "端到端测试", "status": "manual", "command": "cd frontend && pnpm exec playwright test"},
-        {"key": "release_preflight", "label": "上线体检", "status": preflight.get("status"), "summary": preflight.get("summary")},
-        {"key": "production_guard", "label": "生产保护", "status": guard.get("status"), "summary": guard.get("summary")},
-        {"key": "pdf_visual", "label": "PDF 渲染", "status": pdf_status},
-        {"key": "storage", "label": "存储状态", "status": "ok" if storage.get("json", {}).get("ready") else "warn", "activeStore": storage.get("activeStore")},
-    ]
-    return {
-        "kind": "online_acceptance_report",
-        "version": "beta",
-        "generatedAt": _now(),
-        "status": "ok" if all(item.get("status") in {"ok", "manual"} for item in checks) else "warn",
-        "checks": checks,
-        "nextActions": [
-            "上线前重新运行后端全量测试、前端校验和 Playwright。",
-            "导出完整备份和脱敏备份。",
-            "人工验收 BOSS 登录、抓取、JD、尽调、排序、PDF、打招呼链路。",
-        ],
-    }
-
-
-def release_acceptance_suite() -> dict[str, Any]:
-    checklist = release_acceptance_checklist()
-    preflight = release_preflight()
-    privacy = privacy_scan()
-    guard = production_guard()
-    sections = []
-    for section in checklist.get("sections", []):
-        steps = section.get("steps") if isinstance(section.get("steps"), list) else []
-        sections.append({
-            "key": section.get("key"),
-            "title": section.get("title"),
-            "status": "manual",
-            "total": len(steps),
-            "steps": [{"label": step, "status": "manual"} for step in steps],
-        })
-    machine_checks = [
-        {"key": "release_preflight", "label": "上线体检", "status": preflight.get("status"), "summary": preflight.get("summary")},
-        {"key": "production_guard", "label": "生产保护", "status": guard.get("status"), "summary": guard.get("summary")},
-        {"key": "privacy_scan", "label": "隐私扫描", "status": privacy.get("status"), "summary": privacy.get("summary")},
-    ]
-    status = "error" if any(item.get("status") == "error" for item in machine_checks) else ("warn" if any(item.get("status") == "warn" for item in machine_checks) else "ok")
-    return {
-        "kind": "release_acceptance_suite",
-        "status": status,
-        "generatedAt": _now(),
-        "sections": sections,
-        "machineChecks": machine_checks,
-        "nextActions": [
-            "先处理机器检查中的 warn/error，再执行人工验收清单。",
-            "真实 BOSS 链路使用灰度模式先验收单条，再放开批量。",
-        ],
-    }
-
-
-def release_version_snapshot() -> dict[str, Any]:
-    manifest = release_manifest()
-    notes = release_notes()
-    preflight = release_preflight()
-    return {
-        "kind": "release_version_snapshot",
-        "version": notes.get("version") or "1.0",
-        "commit": manifest.get("commit", ""),
-        "generatedAt": _now(),
-        "phase": notes.get("phase", ""),
-        "status": preflight.get("status", "warn"),
-        "summary": preflight.get("summary", {}),
-        "highlights": notes.get("highlights", []),
-        "knownRisks": notes.get("knownRisks", []),
-        "qualityGates": manifest.get("qualityGates", []),
-    }
-
-
-def release_check_suite() -> dict[str, Any]:
-    diagnostics = diagnostic_center()
-    privacy = privacy_scan()
-    cleanup = cleanup_dry_run()
-    storage = storage_status()
-    backup_ready = export_redacted_backup().get("kind") == "redacted_workspace_backup"
-    checks = [
-        {"key": "diagnostics", "label": "错误诊断中心", "status": diagnostics.get("status"), "summary": diagnostics.get("summary")},
-        {"key": "privacy", "label": "隐私扫描", "status": privacy.get("status"), "summary": privacy.get("summary")},
-        {"key": "cleanup", "label": "清理预演", "status": cleanup.get("status"), "summary": cleanup.get("summary")},
-        {"key": "backup", "label": "脱敏备份", "status": "ok" if backup_ready else "warn", "summary": {"ready": backup_ready}},
-        {"key": "storage", "label": "存储状态", "status": "ok" if storage.get("json", {}).get("ready") else "error", "summary": {"activeStore": storage.get("activeStore")}},
-        {"key": "backend", "label": "后端测试", "status": "manual", "command": "cd backend && pytest -q"},
-        {"key": "frontend", "label": "前端校验", "status": "manual", "command": "cd frontend && pnpm validate"},
-        {"key": "playwright", "label": "浏览器验收", "status": "manual", "command": "cd frontend && pnpm exec playwright test"},
-    ]
-    machine = [item for item in checks if item.get("status") != "manual"]
-    status = "error" if any(item.get("status") == "error" for item in machine) else ("warn" if any(item.get("status") == "warn" for item in machine) else "ok")
-    return {
-        "kind": "release_check_suite",
-        "status": status,
-        "generatedAt": _now(),
-        "summary": {
-            "total": len(checks),
-            "ok": sum(1 for item in checks if item.get("status") == "ok"),
-            "warn": sum(1 for item in checks if item.get("status") == "warn"),
-            "error": sum(1 for item in checks if item.get("status") == "error"),
-            "manual": sum(1 for item in checks if item.get("status") == "manual"),
-        },
-        "checks": checks,
-        "nextActions": [
-            "运行手动门禁：后端测试、前端校验和 Playwright。",
-            "处理诊断、隐私扫描和清理预演中的 warn/error。",
-            "通过后生成 Release Record。",
-        ],
-    }
-
-
-def _release_records_file() -> Path:
-    return data_dir() / "release" / "records.json"
-
-
-def list_release_records(limit: int = 20) -> dict[str, Any]:
-    rows = _read_json(_release_records_file(), [])
-    if not isinstance(rows, list):
-        rows = []
-    return {"records": rows[: max(1, min(int(limit or 20), 100))], "total": len(rows)}
-
-
-def create_release_record(payload: dict) -> dict[str, Any]:
-    version = str(payload.get("version") or release_notes().get("version") or "1.0").strip()
-    operator = str(payload.get("operator") or "").strip() or "未填写"
-    decision = str(payload.get("decision") or "review").strip()
-    notes = [str(item).strip() for item in payload.get("notes", []) if str(item).strip()] if isinstance(payload.get("notes"), list) else []
-    record = {
-        "id": f"release-{int(datetime.now().timestamp() * 1000)}",
-        "version": version,
-        "operator": operator,
-        "decision": decision if decision in {"ready", "hold", "review"} else "review",
-        "notes": notes,
-        "createdAt": _now(),
-        "snapshot": release_version_snapshot(),
-        "checkSuite": release_check_suite(),
-    }
-    rows = _read_json(_release_records_file(), [])
-    if not isinstance(rows, list):
-        rows = []
-    rows = [record, *rows][:100]
-    write_json_atomic(_release_records_file(), rows)
-    log_event("info", "release", f"发布记录已生成: {version}", {"recordId": record["id"], "decision": record["decision"]})
-    return {"record": record, "total": len(rows)}
-
-
-def diagnostic_center() -> dict[str, Any]:
-    health = run_health_check()
-    privacy = privacy_scan()
-    storage = storage_status()
-    try:
-        from app.routes.greetings import greeting_recovery_panel
-
-        recovery = greeting_recovery_panel()
-    except Exception:
-        recovery = {"summary": {"failed": 0, "retryable": 0}, "groups": []}
-    try:
-        from app.routes.maintenance import get_pdf_visual_regression
-
-        pdf = get_pdf_visual_regression()
-        pdf_status = str(pdf.get("status") or "warn")
-        pdf_message = "PDF 真实渲染正常" if pdf_status == "ok" else "PDF 渲染检查需要关注"
-    except Exception as exc:
-        pdf_status = "warn"
-        pdf_message = f"PDF 检查不可用: {str(exc)[:80]}"
-    checks = list(health.get("checks") or [])
-    checks.extend([
-        {
-            "key": "storage",
-            "label": "存储状态",
-            "status": "ok" if storage.get("json", {}).get("ready") else "error",
-            "message": storage.get("sqlite", {}).get("message", ""),
-            "action": "设置页查看存储迁移向导",
-        },
-        {
-            "key": "privacy_scan",
-            "label": "隐私扫描",
-            "status": privacy.get("status", "warn"),
-            "message": f"发现 {privacy.get('summary', {}).get('hits', 0)} 处明显隐私数据",
-            "action": "使用脱敏备份或清理测试数据",
-        },
-        {
-            "key": "pdf_visual",
-            "label": "PDF 渲染",
-            "status": pdf_status if pdf_status in {"ok", "warn", "error"} else "warn",
-            "message": pdf_message,
-            "action": "设置页刷新 PDF 真实渲染检查",
-        },
-        {
-            "key": "greeting_recovery",
-            "label": "打招呼失败恢复",
-            "status": "warn" if int(recovery.get("summary", {}).get("failed", 0)) else "ok",
-            "message": f"失败 {recovery.get('summary', {}).get('failed', 0)}，可重试 {recovery.get('summary', {}).get('retryable', 0)}",
-            "action": "打招呼页查看失败恢复台",
-        },
-    ])
-    for item in checks:
-        item["repairAction"] = _diagnostic_repair_action(str(item.get("key") or ""))
-    repair_actions = [item for item in checks if item.get("status") != "ok"]
-    status = "error" if any(item.get("status") == "error" for item in checks) else ("warn" if any(item.get("status") == "warn" for item in checks) else "ok")
-    return {
-        "kind": "diagnostic_center",
-        "status": status,
-        "summary": {
-            "total": len(checks),
-            "ok": sum(1 for item in checks if item.get("status") == "ok"),
-            "warn": sum(1 for item in checks if item.get("status") == "warn"),
-            "error": sum(1 for item in checks if item.get("status") == "error"),
-        },
-        "checks": checks,
-        "repairActions": [
-            {
-                "key": item.get("key"),
-                "label": item.get("label"),
-                "status": item.get("status"),
-                "message": item.get("message"),
-                "repairAction": item.get("repairAction"),
-            }
-            for item in repair_actions
-        ],
-        "generatedAt": _now(),
-    }
-
-
-def _diagnostic_repair_action(key: str) -> dict[str, Any]:
-    mapping = {
-        "runtime_mode": {"type": "navigate", "page": "settings", "label": "切换生产模式", "description": "在设置页的数据模式中切换为生产数据"},
-        "ai_provider": {"type": "navigate", "page": "settings", "label": "配置 AI", "description": "在设置页补充 AI 供应商和 API Key"},
-        "baidu_search": {"type": "navigate", "page": "settings", "label": "配置搜索", "description": "在设置页补充百度搜索 API Key"},
-        "business_api": {"type": "navigate", "page": "settings", "label": "配置工商 API", "description": "在设置页补充腾讯云工商 API 凭证"},
-        "boss_login": {"type": "navigate", "page": "jobs", "label": "检查 BOSS 登录", "description": "到岗位模块重新登录或检查 Cookie 状态"},
-        "frontend_build": {"type": "command", "command": "cd frontend && pnpm validate", "label": "重新构建前端", "description": "运行前端校验并生成发布产物"},
-        "data_dir": {"type": "manual", "page": "settings", "label": "检查数据目录权限", "description": "确认 data 目录可读写"},
-        "storage": {"type": "navigate", "page": "settings", "label": "查看存储向导", "description": "在设置页查看 SQLite 迁移、备份和回滚状态"},
-        "privacy_scan": {"type": "export_redacted_backup", "page": "settings", "label": "导出脱敏备份", "description": "先导出脱敏备份，再清理测试数据或个人信息"},
-        "pdf_visual": {"type": "refresh_endpoint", "endpoint": "/api/maintenance/release/pdf-visual-regression", "page": "settings", "label": "刷新 PDF 检查", "description": "重新生成 PDF 真实渲染检查"},
-        "greeting_recovery": {"type": "navigate", "page": "greeting", "label": "查看失败恢复台", "description": "按失败原因处理或转人工"},
-    }
-    return mapping.get(key, {"type": "manual", "page": "dashboard", "label": "查看详情", "description": "查看诊断详情后手动处理"})
 
 
 def dashboard_summary() -> dict[str, Any]:
@@ -1611,6 +526,7 @@ def dashboard_summary() -> dict[str, Any]:
         "readiness": _dashboard_readiness(jobs_summary, diligence_summary, ranking_summary, decisions_summary),
         "generatedAt": _now(),
     }
+
 
 
 def onboarding_guide() -> dict[str, Any]:
@@ -1677,6 +593,7 @@ def onboarding_guide() -> dict[str, Any]:
     }
 
 
+
 def onboarding_wizard() -> dict[str, Any]:
     guide = onboarding_guide()
     next_key = guide.get("nextStep", {}).get("key")
@@ -1706,6 +623,7 @@ def onboarding_wizard() -> dict[str, Any]:
     }
 
 
+
 def review_center() -> dict[str, Any]:
     from app.routes import jobs as jobs_route
 
@@ -1729,8 +647,10 @@ def review_center() -> dict[str, Any]:
     }
 
 
+
 def _readiness_action(label: str, page: str, reason: str) -> dict[str, str]:
     return {"label": label, "page": page, "reason": reason}
+
 
 
 def _dashboard_readiness(

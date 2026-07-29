@@ -177,6 +177,26 @@ def queue_retry_task(task_id: str) -> tuple[dict, dict]:
     return retry, source
 
 
+def clear_recovery_tasks() -> dict:
+    tasks = load_tasks(limit=100)
+    remaining = [task for task in tasks if task.get("status") not in {"failed", "partial_failed"}]
+    removed = len(tasks) - len(remaining)
+    _save_tasks(remaining)
+    return {"removed": removed, "remaining": len(remaining)}
+
+
+def delete_task(task_id: str) -> dict:
+    tasks = load_tasks(limit=100)
+    target = next((task for task in tasks if task.get("id") == task_id), None)
+    if not target:
+        raise ValueError("task not found")
+    if target.get("status") == "running":
+        raise PermissionError("running task cannot be deleted")
+    remaining = [task for task in tasks if task.get("id") != task_id]
+    _save_tasks(remaining)
+    return {"deleted": True, "task": target, "remaining": len(remaining)}
+
+
 def update_task(task_id: str, **updates) -> dict:
     tasks = load_tasks(limit=100)
     for task in tasks:

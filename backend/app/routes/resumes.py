@@ -30,14 +30,46 @@ def _store_path(file_id: str) -> Path:
     return STORE_DIR / f"{file_id}.json"
 
 
+def _optimizations_file() -> Path:
+    STORE_DIR.mkdir(parents=True, exist_ok=True)
+    return STORE_DIR / "optimizations.json"
+
+
+def _load_optimizations() -> dict:
+    path = _optimizations_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_job_optimization(job_id: str, result: ResumeOptimizationResult) -> None:
+    if not job_id:
+        return
+    optimizations = _load_optimizations()
+    optimizations[job_id] = result.model_dump()
+    write_json_atomic(_optimizations_file(), optimizations)
+
+
 
 
 def _merge_profile(base: ResumeProfile, enriched: ResumeProfile | None) -> ResumeProfile:
     """合并用户编辑的 base 与 AI 补充的 enriched。
-    标量字段优先用户值，列表字段（经历/教育/项目）优先 AI 结构化结果。"""
+    标量字段优先用户值；列表字段取条目更多的那一方，避免 AI 只提取部分导致丢失。"""
     if not enriched:
         return base
-    
+
+    def _pick_list(base_list, enriched_list):
+        """取条目更多的一方，都不为空时取更长的。"""
+        if not enriched_list:
+            return base_list
+        if not base_list:
+            return enriched_list
+        return enriched_list if len(enriched_list) >= len(base_list) else base_list
+
     return ResumeProfile(
         name=base.name or (enriched.name or ""),
         title=base.title or (enriched.title or ""),
@@ -47,13 +79,13 @@ def _merge_profile(base: ResumeProfile, enriched: ResumeProfile | None) -> Resum
         birth=(base.birth or getattr(enriched, "birth", None) or ""),
         location=(base.location or getattr(enriched, "location", None) or ""),
         summary=base.summary or (enriched.summary or ""),
-        skills=(enriched.skills if enriched.skills else base.skills),
-        target_titles=(enriched.target_titles if enriched.target_titles else base.target_titles),
+        skills=_pick_list(base.skills, enriched.skills),
+        target_titles=_pick_list(base.target_titles, enriched.target_titles),
         target_city=(base.target_city or getattr(enriched, "target_city", None) or ""),
         salary_expectation=(base.salary_expectation or getattr(enriched, "salary_expectation", None) or ""),
-        work_experience=(enriched.work_experience if enriched.work_experience else base.work_experience),
-        education=(enriched.education if enriched.education else base.education),
-        projects=(enriched.projects if enriched.projects else base.projects),
+        work_experience=_pick_list(base.work_experience, enriched.work_experience),
+        education=_pick_list(base.education, enriched.education),
+        projects=_pick_list(base.projects, enriched.projects),
     )
 
 def _save_entry(file_id: str, entry: dict):
@@ -373,9 +405,26 @@ def _update_active(key: str, value):
             continue
 
 
+def _persist_job_jd_analysis(job_id: str, analysis: dict) -> None:
+    if not job_id:
+        return
+    try:
+        from app.routes import jobs as jobs_route
+
+        job = jobs_route._job_store.get(job_id)
+        if not job:
+            return
+        job.jd_analysis = analysis
+        jobs_route._save_jobs()
+    except Exception:
+        import logging
+        logging.getLogger("resumes").exception("保存岗位 JD 分析失败: %s", job_id)
+
+
 # ── JD 分析 ──
 @router.post("/analyze-jd", response_model=JDAnalysis)
 async def analyze_jd_endpoint(payload: dict) -> JDAnalysis:
+    job_id = str(payload.get("job_id") or "").strip()
     job_title = payload.get("title", "")
     company = payload.get("company", "")
     jd_text = payload.get("jd_text", "")
@@ -385,7 +434,9 @@ async def analyze_jd_endpoint(payload: dict) -> JDAnalysis:
     try:
         loop = asyncio.get_event_loop()
         analysis = await loop.run_in_executor(None, analyze_jd, job_title, company, jd_text, chat_history)
-        _update_active("jd", analysis.model_dump())
+        analysis_data = analysis.model_dump()
+        _update_active("jd", analysis_data)
+        _persist_job_jd_analysis(job_id, analysis_data)
         return analysis
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI 分析失败: {e}")
@@ -409,6 +460,7 @@ async def optimize_resume_endpoint(payload: dict) -> ResumeOptimizationResult:
     job_title = target_job.get("title", "") if isinstance(target_job, dict) else getattr(target_job, "title", "")
     company = target_job.get("company", "") if isinstance(target_job, dict) else getattr(target_job, "company", "")
     jd_text = target_job.get("jd_text", "") if isinstance(target_job, dict) else getattr(target_job, "jd_text", "")
+    job_id = str(payload.get("job_id") or (target_job.get("id", "") if isinstance(target_job, dict) else getattr(target_job, "id", "")) or "")
     chat_history = payload.get("chat_history") or []
 
     try:
@@ -416,9 +468,19 @@ async def optimize_resume_endpoint(payload: dict) -> ResumeOptimizationResult:
         result = await loop.run_in_executor(None, lambda: ai_optimize(profile=profile, evaluation=evaluation, jd_analysis=jd_analysis,
                            job_title=job_title, company=company, jd_text=jd_text, chat_history=chat_history))
         _update_active("optimization", result.model_dump())
+        _save_job_optimization(job_id, result)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI 优化失败: {e}")
+
+
+@router.get("/optimizations")
+def list_resume_optimizations() -> dict:
+    optimizations = _load_optimizations()
+    return {
+        "optimizations": optimizations,
+        "total": len(optimizations),
+    }
 
 
 # ── PDF 导出 ──

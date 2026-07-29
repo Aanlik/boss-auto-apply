@@ -6,6 +6,7 @@ import ChatPanel from "../components/ChatPanel";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
 import { buildDiligenceEvidence } from "../lib/workflowInsights";
 import AiFeedbackButtons from "../components/AiFeedbackButtons";
+import { resolveDiligencePrimaryAction } from "../lib/diligenceActions";
 
 type CardState = { jdExpanded: boolean; ddExpanded: boolean; chatExpanded: boolean };
 type BatchProgress = { kind: "jd" | "dd"; done: number; total: number; current: string } | null;
@@ -43,12 +44,25 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
   // 加载岗位，同时清空之前的尽调缓存
   useEffect(() => {
     poolJobs().then(r => {
-      const filtered = (r.jobs || []).filter((j: JobPosting) => selectedJobIds.includes(j.id));
-      setJobs(filtered);
+      const all = r.jobs || [];
+      const selected = all.filter((j: JobPosting) => selectedJobIds.includes(j.id));
+      setJobs(selected);
+      const savedAnalyses = selected.reduce<Record<string, NonNullable<JobPosting["jd_analysis"]>>>((acc, job: JobPosting) => {
+        if (job.jd_analysis) acc[job.id] = job.jd_analysis;
+        return acc;
+      }, {});
+      if (Object.keys(savedAnalyses).length > 0) {
+        dispatch(actions.setJdAnalyses({ ...savedAnalyses, ...jdAnalysesRef.current }));
+      }
+      const removedFromSelection = selectedJobIds.filter(id => !selected.some(j => j.id === id));
+      if (removedFromSelection.length > 0) {
+        dispatch(actions.setSelection(selected.map(j => j.id)));
+        setError(prev => prev || `已自动同步选择：${removedFromSelection.length} 个岗位因黑名单或下架被移除`);
+      }
     }).catch((err) => {
       console.warn("[diligence] 加载岗位失败:", err);
     });
-  }, [selectedJobIds]);
+  }, [selectedJobIds, dispatch]);
 
   function toggleLocal(id: string) {
     setLocalSelection(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
@@ -92,7 +106,7 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
   async function onAnalyzeJD(job: JobPosting) {
     setLoading(prev => ({ ...prev, [job.id]: true })); setError("");
     try {
-      const data = await analyzeJD({ title: job.title, company: job.company, jd_text: job.jd_text });
+      const data = await analyzeJD({ job_id: job.id, title: job.title, company: job.company, jd_text: job.jd_text });
       // 使用 ref 拿到最新累积数据，防止覆盖其他已完成的分析
       dispatch(actions.setJdAnalyses({ ...jdAnalysesRef.current, [job.id]: data }));
       setCardStates(prev => {
@@ -104,17 +118,18 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
   }
 
   // ── 一键 JD 分析 ──
-  async function analyzeSelectedJD() {
+  async function analyzeSelectedJD(targetIds?: string[]) {
     // 先收集本地累积结果
     const accumulated = { ...jdAnalysesRef.current };
-    const targets = jobs.filter(job => localSelection.includes(job.id) && !accumulated[job.id]);
+    const explicitTargets = targetIds ? new Set(targetIds) : null;
+    const targets = jobs.filter(job => explicitTargets ? explicitTargets.has(job.id) : localSelection.includes(job.id) && !accumulated[job.id]);
     if (targets.length === 0) return;
     setBatchProgress({ kind: "jd", done: 0, total: targets.length, current: targets[0].title });
     for (const job of targets) {
       setLoading(prev => ({ ...prev, [job.id]: true }));
       setBatchProgress(prev => prev ? { ...prev, current: job.title } : prev);
       try {
-        const data = await analyzeJD({ title: job.title, company: job.company, jd_text: job.jd_text });
+        const data = await analyzeJD({ job_id: job.id, title: job.title, company: job.company, jd_text: job.jd_text });
         accumulated[job.id] = data;
         // 每完成一个立即写到 store
         dispatch(actions.setJdAnalyses({ ...accumulated }));
@@ -165,9 +180,10 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
   }
 
   // ── 一键尽调 ──
-  async function diligenceSelected() {
+  async function diligenceSelected(targetIds?: string[]) {
     const accumulatedReports = { ...diligenceRef.current };
-    const targets = jobs.filter(job => localSelection.includes(job.id) && !diligenceForJob(job));
+    const explicitTargets = targetIds ? new Set(targetIds) : null;
+    const targets = jobs.filter(job => explicitTargets ? explicitTargets.has(job.id) : localSelection.includes(job.id) && !diligenceForJob(job));
     if (targets.length === 0) return;
     setBatchProgress({ kind: "dd", done: 0, total: targets.length, current: targets[0].company });
     for (const job of targets) {
@@ -198,11 +214,40 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
     [jobs]
   );
 
-  const jdPending = localSelection.filter(id => !jdAnalyses[id]).length;
-  const ddPending = useMemo(() => {
-    const selCompanies = new Set(jobs.filter(j => localSelection.includes(j.id)).map(j => j.company));
-    return [...selCompanies].filter(c => !diligenceIndex[c]).length;
-  }, [localSelection, jobs, diligenceIndex]);
+  const primaryAction = useMemo(() => resolveDiligencePrimaryAction({
+    jobs,
+    selectedJobIds: localSelection,
+    jdAnalyses,
+    diligenceReports,
+  }), [jobs, localSelection, jdAnalyses, diligenceReports]);
+  const primaryActionBusy = batchProgress !== null || primaryAction.targetIds.some(id => loading[id] || loading[id + "-dd"]);
+
+  async function runPrimaryAction() {
+    if (primaryAction.disabled || primaryActionBusy) return;
+    if (primaryAction.kind === "analyze_jd") {
+      await analyzeSelectedJD(primaryAction.targetIds);
+    } else if (primaryAction.kind === "diligence" || primaryAction.kind === "rediligence") {
+      await diligenceSelected(primaryAction.targetIds);
+    }
+  }
+
+  function primaryActionForJob(job: JobPosting) {
+    return resolveDiligencePrimaryAction({
+      jobs: [job],
+      selectedJobIds: [job.id],
+      jdAnalyses,
+      diligenceReports,
+    });
+  }
+
+  async function runPrimaryActionForJob(job: JobPosting) {
+    const action = primaryActionForJob(job);
+    if (action.kind === "analyze_jd") {
+      await onAnalyzeJD(job);
+    } else if (action.kind === "diligence" || action.kind === "rediligence") {
+      await onCompanyDiligence(job);
+    }
+  }
 
   function goToRanking() {
     if (localSelection.length === 0) return;
@@ -214,18 +259,14 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
     <section className="page-shell">
       <div className="page-heading">
         <div className="stack">
-          <p className="page-kicker">第三步</p>
+          <p className="page-kicker">公司尽调</p>
           <h2 className="page-title">公司尽调 & JD 分析</h2>
           <p className="page-copy">千帆智能搜索 + AI 总结 → AI 整合分析，综合评估公司风险与前景。</p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-	          <button type="button" className="button-secondary" onClick={analyzeSelectedJD}
-	            disabled={jdPending === 0 || batchProgress?.kind === "jd"}>
-	            {batchProgress?.kind === "jd" ? `JD分析 ${batchProgress.done}/${batchProgress.total}` : `一键JD分析 (${jdPending})`}
-	          </button>
-	          <button type="button" className="button-primary" onClick={diligenceSelected}
-	            disabled={ddPending === 0 || batchProgress?.kind === "dd"}>
-	            {batchProgress?.kind === "dd" ? `尽调 ${batchProgress.done}/${batchProgress.total}` : `一键尽调 (${ddPending})`}
+	          <button type="button" className="button-primary" onClick={runPrimaryAction}
+	            disabled={primaryAction.disabled || primaryActionBusy}>
+	            {batchProgress?.kind === "jd" ? `JD分析 ${batchProgress.done}/${batchProgress.total}` : batchProgress?.kind === "dd" ? `尽调 ${batchProgress.done}/${batchProgress.total}` : primaryAction.label}
 	          </button>
           {localSelection.length > 0 && (
             <button type="button" className="button-primary" onClick={goToRanking}
@@ -284,6 +325,8 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
         const cs = cardStates[job.id] || { jdExpanded: false, ddExpanded: false, chatExpanded: false };
         const busyJd = loading[job.id];
         const busyDd = loading[job.id + "-dd"];
+        const cardAction = primaryActionForJob(job);
+        const cardBusy = busyJd || busyDd;
 
         return (
           <div key={job.id} className={`panel panel-strong${sel ? " job-card--selected" : ""}`}>
@@ -312,13 +355,9 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
                       </span>
                     </>
                   )}
-                  <button type="button" className="button-secondary button-secondary--sm"
-                    disabled={busyJd} onClick={() => onAnalyzeJD(job)}>
-                    {analysis ? "重析JD" : busyJd ? "分析中…" : "AI 分析 JD"}
-                  </button>
                   <button type="button" className="button-primary button-secondary--sm"
-                    disabled={busyDd} onClick={() => onCompanyDiligence(job)}>
-                    {diligence ? "重返尽调" : busyDd ? "尽调中…" : "公司尽调"}
+                    disabled={cardAction.disabled || cardBusy} onClick={() => runPrimaryActionForJob(job)}>
+                    {busyJd ? "分析中…" : busyDd ? "尽调中…" : cardAction.kind === "analyze_jd" ? "AI 分析 JD" : cardAction.kind === "diligence" ? "公司尽调" : "重新公司尽调"}
                   </button>
                   {diligence && (
                     <>
@@ -417,7 +456,7 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
                           title="与 AI 讨论 JD 分析" placeholder="讨论 JD 分析结果…"
                           onApply={async (messages) => {
                             try {
-                              const data = await analyzeJD({ title: job.title, company: job.company, jd_text: job.jd_text }, messages);
+                              const data = await analyzeJD({ job_id: job.id, title: job.title, company: job.company, jd_text: job.jd_text }, messages);
                               dispatch(actions.setJdAnalyses({ ...jdAnalysesRef.current, [job.id]: data }));
                               dispatch(actions.mergeChatMessage(job.id, messages));
                             } catch { setError("应用分析失败"); }

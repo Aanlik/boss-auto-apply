@@ -113,3 +113,41 @@ def test_deep_report_includes_user_preferences(tmp_path, monkeypatch):
     body = response.json()
     assert body["preferences"]["stability"] == 90
     assert any("稳定性" in item for item in body["preferenceSignals"])
+
+
+def test_prompt_versions_can_delete_one_record(tmp_path, monkeypatch):
+    import app.routes.assistant as assistant_route
+    from app.services.workflow_persistence import write_json_atomic
+
+    versions_file = tmp_path / "prompt_versions.json"
+    monkeypatch.setattr(assistant_route, "_prompt_versions_file", lambda: versions_file)
+    write_json_atomic(versions_file, [
+        {"id": "v-1", "kind": "deep_report", "jobId": "job-1"},
+        {"id": "v-2", "kind": "deep_report", "jobId": "job-2"},
+    ])
+
+    response = client.delete("/api/assistant/prompt-versions/v-1")
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+    remaining = client.get("/api/assistant/prompt-versions").json()["versions"]
+    assert [item["id"] for item in remaining] == ["v-2"]
+
+
+def test_prompt_versions_can_clear_by_kind(tmp_path, monkeypatch):
+    import app.routes.assistant as assistant_route
+    from app.services.workflow_persistence import write_json_atomic
+
+    versions_file = tmp_path / "prompt_versions.json"
+    monkeypatch.setattr(assistant_route, "_prompt_versions_file", lambda: versions_file)
+    write_json_atomic(versions_file, [
+        {"id": "v-1", "kind": "deep_report", "jobId": "job-1"},
+        {"id": "v-2", "kind": "resume", "jobId": "job-2"},
+    ])
+
+    response = client.delete("/api/assistant/prompt-versions?kind=deep_report")
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == 1
+    remaining = client.get("/api/assistant/prompt-versions").json()["versions"]
+    assert [item["id"] for item in remaining] == ["v-2"]

@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo } from "react";
 import { useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
-import { exportRankingsUrl, getRankingResults, getRankingWeights, getRankingWeightTemplates, rankJobs, saveRankingWeights } from "../lib/api";
-import { filterRankingsBySelectedJobs } from "../lib/rankings";
+import { exportRankingsUrl, getRankingResults, getRankingWeights, getRankingWeightTemplates, listJobPool, rankJobs, saveRankingWeights } from "../lib/api";
+import { filterRankingsBySelectedJobs, findUnrankedSelectedJobs } from "../lib/rankings";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
-import type { RankingWeightTemplate, RankingWeights } from "../lib/types";
+import type { JobPosting, RankingWeightTemplate, RankingWeights } from "../lib/types";
 import AiFeedbackButtons from "../components/AiFeedbackButtons";
 
 export default function RankedJobsPage({ onNavigate }: { onNavigate?: (page: string) => void }) {
@@ -12,12 +12,17 @@ export default function RankedJobsPage({ onNavigate }: { onNavigate?: (page: str
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [localSelection, setLocalSelection] = useState<string[]>([]);
+  const [jobs, setJobs] = useState<JobPosting[]>([]);
   const [weights, setWeights] = useState<RankingWeights>({ company_weight: 0.4, match_weight: 0.6 });
   const [templates, setTemplates] = useState<Record<string, RankingWeightTemplate>>({});
   const diligenceDone = Object.keys(diligenceReports).length > 0;
   const visibleRankingResults = useMemo(
     () => filterRankingsBySelectedJobs(rankingResults, selectedJobIds),
     [rankingResults, selectedJobIds],
+  );
+  const unrankedSelectedJobs = useMemo(
+    () => findUnrankedSelectedJobs(jobs, selectedJobIds, rankingResults),
+    [jobs, selectedJobIds, rankingResults],
   );
 
   useEffect(() => { setLocalSelection([...selectedJobIds]); }, [selectedJobIds]);
@@ -34,12 +39,16 @@ export default function RankedJobsPage({ onNavigate }: { onNavigate?: (page: str
     getRankingWeightTemplates()
       .then(r => setTemplates(r.templates || {}))
       .catch(() => {});
+    listJobPool()
+      .then(r => setJobs(r.jobs || []))
+      .catch(() => {});
   }, [dispatch]);
 
   async function onStartRanking() {
     setLoading(true); setError("");
     try {
       const ids = localSelection.length > 0 ? localSelection : selectedJobIds;
+      dispatch(actions.setSelection(ids));
       const data = await rankJobs(ids, resumeProfile, diligenceReports, weights);
       if (data.error) { setError(data.error); return; }
       dispatch(actions.setRankingResults(data.rankings || []));
@@ -83,6 +92,7 @@ export default function RankedJobsPage({ onNavigate }: { onNavigate?: (page: str
         <div className="stack"><p className="page-kicker">第四步</p><h2 className="page-title">综合排序</h2><p className="page-copy">公司尽调得分 + AI 简历匹配度分析，综合排序并给出推荐理由。勾选后进入打招呼。</p></div>
         <div style={{ display: "flex", gap: 8 }}>
           {visibleRankingResults.length > 0 && <span className="tag tag--active">已排序 {visibleRankingResults.length} 个</span>}
+          {unrankedSelectedJobs.length > 0 && <span className="tag tag--muted">待排序 {unrankedSelectedJobs.length} 个</span>}
           {localSelection.length > 0 && <span className="tag">{localSelection.length} 个已选</span>}
           {(visibleRankingResults.length > 0 || localSelection.length > 0) && <button type="button" className="button-primary" onClick={passToGreeting}>进入打招呼 →</button>}
         </div>
@@ -128,8 +138,15 @@ export default function RankedJobsPage({ onNavigate }: { onNavigate?: (page: str
                   </div>
                 )}
               </div>
-              <button type="button" className="button-primary" disabled={loading} onClick={onStartRanking}>{loading ? "AI 分析中…" : visibleRankingResults.length > 0 ? "重新排序" : "开始综合排序"}</button>
+              <button type="button" className="button-primary" disabled={loading} onClick={onStartRanking}>{loading ? "AI 分析中…" : unrankedSelectedJobs.length > 0 ? "补齐排序" : visibleRankingResults.length > 0 ? "重新排序" : "开始综合排序"}</button>
             </div>
+            {unrankedSelectedJobs.length > 0 && (
+              <div className="workflow-recovery-item workflow-todo-item" style={{ gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.5fr) auto", marginTop: 12 }}>
+                <span>有 {unrankedSelectedJobs.length} 个已选岗位还没有排序结果</span>
+                <small>{unrankedSelectedJobs.map(job => `${job.company} · ${job.title}`).join("；")}</small>
+                <button type="button" className="button-secondary button-secondary--sm" disabled={loading} onClick={onStartRanking}>立即补齐</button>
+              </div>
+            )}
             {visibleRankingResults.length > 0 && (
               <div style={{ marginTop: 16 }}>
                 {visibleRankingResults.map((r, i) => {

@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("核心工作台入口可打开并显示流程状态", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByText("boss 直聘求职端自动化")).toBeVisible();
+  await expect(page.getByText("boss 求职助手")).toBeVisible();
   await expect(page.getByText("全流程状态")).toBeVisible();
   await page.getByRole("button", { name: "仪表盘" }).click();
   await expect(page.getByText("求职流程仪表盘")).toBeVisible();
@@ -11,11 +11,13 @@ test("核心工作台入口可打开并显示流程状态", async ({ page }) => 
 test("设置面板可以打开维护入口", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: /设置/ }).click();
-  await expect(page.getByText("完整数据维护")).toBeVisible();
-  await expect(page.getByRole("strong").filter({ hasText: "错误诊断中心" })).toBeVisible();
-  await expect(page.getByRole("strong").filter({ hasText: "数据清理预演" })).toBeVisible();
+  await expect(page.getByText("AI 供应商")).toBeVisible();
+  await expect(page.getByText("配置备份")).toBeVisible();
+  await expect(page.getByText("岗位导入向导")).toBeVisible();
+  await expect(page.getByText("求职偏好")).toBeVisible();
+  await expect(page.getByText("本机数据")).toBeVisible();
   await expect(page.getByRole("link", { name: "下载 CSV 模板" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "导出完整数据" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "导出脱敏配置" })).toBeVisible();
 });
 
 test("帮助中心可以打开并展示模块修复动作", async ({ page }) => {
@@ -25,9 +27,9 @@ test("帮助中心可以打开并展示模块修复动作", async ({ page }) => 
   await page.locator(".help-tabs").getByRole("button", { name: "打招呼" }).click();
   await expect(page.getByText("推荐步骤")).toBeVisible();
   await expect(page.getByText("完成信号")).toBeVisible();
-  await expect(page.getByText("发送前预检")).toBeVisible();
-  await expect(page.getByText("查看失败恢复台")).toBeVisible();
-  await expect(page.getByText("灰度模式")).toBeVisible();
+  await expect(page.locator(".help-content").getByRole("button", { name: "发送前预检" })).toBeVisible();
+  await expect(page.locator(".help-content").getByRole("button", { name: "检查页面可用性" })).toBeVisible();
+  await expect(page.locator(".help-glossary").getByText("灰度模式", { exact: true })).toBeVisible();
 });
 
 test("岗位、尽调和排序模块可以依次访问", async ({ page }) => {

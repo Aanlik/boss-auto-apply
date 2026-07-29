@@ -65,34 +65,6 @@ def test_greeting_validation_blocks_ai_error_and_template_variables():
     assert results["ok"]["ok"] is True
 
 
-def test_greeting_dry_run_generates_drafts_and_audit_without_marking_sent(tmp_path, monkeypatch):
-    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
-    jobs_route._job_store["job-1"] = JobRecord(
-        id="job-1",
-        title="产品经理",
-        company="示例科技",
-        city="上海",
-        salary="20-30K",
-        jd_text="负责产品规划、需求分析和跨团队协作。",
-        keywords=["产品规划", "需求分析"],
-        source_url="https://example.com/job/1",
-    )
-
-    body = client.post("/api/greetings/dry-run", json={"job_ids": ["job-1"]}).json()
-
-    assert body["summary"]["drafted"] == 1
-    assert body["summary"]["sent"] == 0
-    assert body["records"][0]["status"] == "draft"
-    assert "产品经理" in body["records"][0]["message"]
-    assert jobs_route._job_store["job-1"].greeted is False
-
-    drafts = client.get("/api/greetings/drafts").json()["greetings"]
-    records = client.get("/api/greetings/send-records").json()["records"]
-    assert drafts["job-1"] == body["records"][0]["message"]
-    assert records[-1]["jobId"] == "job-1"
-    assert records[-1]["status"] == "draft"
-
-
 def test_greeting_send_requires_confirmation_and_blocks_invalid_message(tmp_path, monkeypatch):
     jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
     jobs_route._job_store["job-1"] = JobRecord(
@@ -287,6 +259,132 @@ def test_greeting_browser_auto_mode_invokes_sender_and_marks_sent(tmp_path, monk
     assert jobs_route._job_store["job-1"].application_status == "greeted"
 
 
+def test_greeting_browser_auto_closes_browser_after_task(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+    _enable_auto_send()
+
+    closed = []
+    monkeypatch.setattr(greeting_route, "execute_browser_greeting", lambda job, message: {"ok": True, "status": "sent", "message": "已自动发送"})
+    monkeypatch.setattr(greeting_route, "close_browser_after_greeting_task", lambda: closed.append(True))
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        city="上海",
+        jd_text="负责产品规划",
+        source_url="https://example.com/job/1",
+    )
+
+    body = client.post("/api/greetings/send", json={
+        "job_ids": ["job-1"],
+        "messages": {"job-1": "您好，我对贵司的产品经理岗位很感兴趣，过往有需求分析经验，希望有机会进一步沟通。"},
+        "confirm": True,
+        "mode": "browser_auto",
+    }).json()
+
+    assert body["summary"]["sent"] == 1
+    assert closed == [True]
+
+
+def test_greeting_browser_auto_schedules_browser_close_after_response_boundary(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+    _enable_auto_send()
+
+    class FakeBackgroundTasks:
+        def __init__(self):
+            self.tasks = []
+
+        def add_task(self, fn, *args, **kwargs):
+            self.tasks.append((fn, args, kwargs))
+
+    closed = []
+    monkeypatch.setattr(greeting_route, "execute_browser_greeting", lambda job, message: {"ok": True, "status": "sent", "message": "已自动发送"})
+    monkeypatch.setattr(greeting_route, "close_browser_after_greeting_task", lambda: closed.append(True))
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        city="上海",
+        jd_text="负责产品规划",
+        source_url="https://example.com/job/1",
+    )
+
+    background_tasks = FakeBackgroundTasks()
+    body = greeting_route.send_greetings(greeting_route.GreetingSendRequest(
+        job_ids=["job-1"],
+        messages={"job-1": "您好，我对贵司的产品经理岗位很感兴趣，过往有需求分析经验，希望有机会进一步沟通。"},
+        confirm=True,
+        mode="browser_auto",
+    ), background_tasks=background_tasks)
+
+    assert body["summary"]["sent"] == 1
+    assert closed == []
+    assert len(background_tasks.tasks) == 1
+
+    fn, args, kwargs = background_tasks.tasks[0]
+    fn(*args, **kwargs)
+    assert closed == [True]
+
+
+def test_greeting_manual_confirm_does_not_close_browser(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+
+    closed = []
+    monkeypatch.setattr(greeting_route, "close_browser_after_greeting_task", lambda: closed.append(True))
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        city="上海",
+        jd_text="负责产品规划",
+        source_url="https://example.com/job/1",
+    )
+
+    body = client.post("/api/greetings/send", json={
+        "job_ids": ["job-1"],
+        "messages": {"job-1": "您好，我对贵司的产品经理岗位很感兴趣，过往有需求分析经验，希望有机会进一步沟通。"},
+        "confirm": True,
+        "mode": "manual_confirm",
+    }).json()
+
+    assert body["summary"]["sent"] == 1
+    assert closed == []
+
+
+def test_boss_greeting_script_clicks_nearest_actionable_chat_button():
+    from app.services.boss_scraper import GREETING_SEND_JS_TEMPLATE
+
+    assert "function nearestActionable" in GREETING_SEND_JS_TEMPLATE
+    assert "function actionableByText" in GREETING_SEND_JS_TEMPLATE
+    assert "function chatInput" in GREETING_SEND_JS_TEMPLATE
+    assert ".startchat-dialog textarea" in GREETING_SEND_JS_TEMPLATE
+    assert "ipt-search" in GREETING_SEND_JS_TEMPLATE
+    assert "candidates.sort" in GREETING_SEND_JS_TEMPLATE
+    assert "clickElement(chatButton)" in GREETING_SEND_JS_TEMPLATE
+    assert ".closest('button,a" in GREETING_SEND_JS_TEMPLATE
+
+
+def test_cdp_eval_js_waits_for_async_greeting_script():
+    from app.services.boss_scraper import CDPSession
+
+    captured = {}
+    cdp = CDPSession.__new__(CDPSession)
+
+    def fake_send(method, params=None, sid=None, timeout=30):
+        captured["method"] = method
+        captured["params"] = params
+        return {"result": {"result": {"value": "ok"}}}
+
+    cdp.send = fake_send
+
+    assert cdp.eval_js("(async function(){ return 'ok'; })()", "sid-1") == "ok"
+    assert captured["method"] == "Runtime.evaluate"
+    assert captured["params"]["awaitPromise"] is True
+
+
 def test_greeting_browser_auto_mode_blocks_when_sender_reports_risk(tmp_path, monkeypatch):
     jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
     from app.routes import greetings as greeting_route
@@ -432,6 +530,41 @@ def test_greeting_retry_failed_replays_failed_job_ids(tmp_path, monkeypatch):
     retried = client.post(f"/api/greetings/retry-failed/{first['taskId']}").json()
 
     assert retried["summary"]["sent"] == 1
+    assert jobs_route._job_store["job-1"].application_status == "greeted"
+
+
+def test_workflow_retry_executes_failed_greeting_task(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+    _enable_auto_send()
+
+    outcomes = [
+        {"ok": False, "status": "failed", "failureCode": "input_not_found", "message": "未找到聊天输入框"},
+        {"ok": True, "status": "sent", "message": "已自动发送"},
+    ]
+
+    monkeypatch.setattr(greeting_route, "execute_browser_greeting", lambda job, message: outcomes.pop(0))
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        city="上海",
+        jd_text="负责产品规划",
+        source_url="https://example.com/job/1",
+    )
+    message = "您好，我对贵司的产品经理岗位很感兴趣，过往有需求分析经验，希望有机会进一步沟通。"
+    first = client.post("/api/greetings/send", json={
+        "job_ids": ["job-1"],
+        "messages": {"job-1": message},
+        "confirm": True,
+        "mode": "browser_auto",
+    }).json()
+
+    retried = client.post(f"/api/workflow/tasks/{first['taskId']}/retry").json()
+
+    assert retried["task"]["status"] == "completed"
+    assert retried["task"]["sourceTaskId"] == first["taskId"]
+    assert retried["result"]["summary"]["sent"] == 1
     assert jobs_route._job_store["job-1"].application_status == "greeted"
 
 
@@ -598,3 +731,9 @@ def test_greeting_followups_marks_sent_jobs_after_window(tmp_path, monkeypatch):
     assert body["summary"]["pendingFollowups"] == 1
     assert body["items"][0]["jobId"] == "job-1"
     assert body["items"][0]["windowHours"] >= 72
+
+
+def test_greeting_recovery_panel_endpoint_is_removed():
+    response = client.get("/api/greetings/recovery-panel")
+
+    assert response.status_code == 404

@@ -154,10 +154,20 @@ export default function ResumesPage() {
   async function onDelete(id: string) {
     await deleteUploadedFile(id).catch(() => {});
     if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
-    setFiles(p => p.filter(f => f.id !== id));
+    const remaining = files.filter(f => f.id !== id);
+    setFiles(remaining);
     if (fileId === id) {
+      // 删除的是当前活跃附件：清除左侧数据
       setProfile(null); setFileId(""); setDisplayName(""); setResumeText(""); setEvaluation(null);
       setParseStatus(""); pollingRef.current = ""; evalRef.current = ""; dispatch(actions.setResumeProfile(null));
+      // 如果还有剩余附件，自动加载第一个
+      if (remaining.length > 0) {
+        const next = remaining[0];
+        try {
+          const d = await loadResume(next.id);
+          if (d.profile) { setProfile(d.profile); setFileId(d.file_id || next.id); setDisplayName(next.filename); setResumeText(d.raw_text || ""); pollingRef.current = d.file_id || next.id; }
+        } catch {}
+      }
     }
   }
 

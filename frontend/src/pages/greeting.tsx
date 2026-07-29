@@ -5,7 +5,6 @@ import {
   checkGreetingSelectorHealth,
   aiOptimizeResume,
   controlGreetingSend,
-  dryRunGreetings,
   exportResumePdf,
   getGreetingAutoSendSettings,
   getGreetingAcceptancePlan,
@@ -16,9 +15,9 @@ import {
   getGreetingFrequencyProfiles,
   getGreetingProgress,
   getGreetingReplies,
-  getGreetingRecoveryPanel,
   getGreetingStats,
   getGreetingSafetySummary,
+  listResumeOptimizations,
 	  tagJob,
 	  confirmSendRecord,
 	  updateSendRecord,
@@ -34,8 +33,9 @@ import {
   recommendPdfTemplate,
   previewResumePdf,
 } from "../lib/api";
-import type { GreetingAcceptancePlan, GreetingAcceptanceRecord, GreetingCandidateResponse, GreetingDryRunResponse, GreetingFinalConfirmation, GreetingFollowups, GreetingFrequencyProfile, GreetingPreflight, GreetingProgress, GreetingRecoveryPanel, GreetingReplyRecord, GreetingSafetySummary, GreetingSelectorHealth, GreetingSendResponse, GreetingStats, GreetingValidationResult, JobPosting } from "../lib/types";
+import type { GreetingAcceptancePlan, GreetingAcceptanceRecord, GreetingCandidateResponse, GreetingFinalConfirmation, GreetingFollowups, GreetingFrequencyProfile, GreetingPreflight, GreetingProgress, GreetingReplyRecord, GreetingSafetySummary, GreetingSelectorHealth, GreetingSendResponse, GreetingStats, GreetingValidationResult, JobPosting } from "../lib/types";
 import { useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
+import { resolveGreetingBatchActions } from "../lib/greetingActions";
 import ChatPanel from "../components/ChatPanel";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
 
@@ -77,7 +77,6 @@ export default function GreetingPage() {
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState("");
   const [pdfPreviewTitle, setPdfPreviewTitle] = useState("");
   const [candidateResult, setCandidateResult] = useState<GreetingCandidateResponse | null>(null);
-  const [dryRunResult, setDryRunResult] = useState<GreetingDryRunResponse | null>(null);
   const [sendResult, setSendResult] = useState<GreetingSendResponse | null>(null);
   const [validationResults, setValidationResults] = useState<Record<string, GreetingValidationResult>>({});
   const [workbenchLoading, setWorkbenchLoading] = useState("");
@@ -96,7 +95,6 @@ export default function GreetingPage() {
   const [acceptanceRecords, setAcceptanceRecords] = useState<GreetingAcceptanceRecord[]>([]);
   const [replyRecords, setReplyRecords] = useState<GreetingReplyRecord[]>([]);
   const [followups, setFollowups] = useState<GreetingFollowups | null>(null);
-  const [recoveryPanel, setRecoveryPanel] = useState<GreetingRecoveryPanel | null>(null);
   const [finalConfirmation, setFinalConfirmation] = useState<GreetingFinalConfirmation | null>(null);
   const [greetingFilter, setGreetingFilter] = useState<GreetingBatchFilter>("selected");
   const [greetingSelectedIds, setGreetingSelectedIds] = useState<string[]>([]);
@@ -108,10 +106,14 @@ export default function GreetingPage() {
   useEffect(() => {
     poolJobs().then(r => {
       const all: JobPosting[] = r.jobs || [];
-      setJobs(all);
+      // 如果有从排序模块传入的 selectedJobIds，只保留这些岗位
+      const filtered = selectedJobIds.length > 0
+        ? all.filter(j => selectedJobIds.includes(j.id))
+        : all;
+      setJobs(filtered);
       const g: Record<string, boolean> = {};
       const t: Record<string, string[]> = {};
-      all.forEach((j) => { if (j.greeted) g[j.id] = true; if (j.tags?.length) t[j.id] = j.tags; });
+      filtered.forEach((j) => { if (j.greeted) g[j.id] = true; if (j.tags?.length) t[j.id] = j.tags; });
       setGreetedStatus(g);
       setCustomTags(t);
     }).catch((err) => {
@@ -145,6 +147,13 @@ export default function GreetingPage() {
         if (Object.keys(next).length > 0) setGreetedStatus(prev => ({ ...prev, ...next }));
       })
       .catch(() => {});
+    listResumeOptimizations()
+      .then(r => {
+        if (r.optimizations && Object.keys(r.optimizations).length > 0) {
+          dispatch(actions.setOptimizations({ ...optimizations, ...r.optimizations }));
+        }
+      })
+      .catch(() => {});
   }, [dispatch]);
 
   useEffect(() => {
@@ -155,10 +164,9 @@ export default function GreetingPage() {
       getGreetingStats(),
       getGreetingSafetySummary(),
       getGreetingFollowups(),
-      getGreetingRecoveryPanel(),
       getGreetingAcceptanceRecords(),
       getGreetingReplies(),
-    ]).then(([settingsResult, profilesResult, progressResult, statsResult, safetyResult, followupResult, recoveryResult, acceptanceResult, repliesResult]) => {
+    ]).then(([settingsResult, profilesResult, progressResult, statsResult, safetyResult, followupResult, acceptanceResult, repliesResult]) => {
       setAutoSendEnabled(!!settingsResult.settings.auto_send_enabled);
       setGrayModeEnabled(settingsResult.settings.gray_mode_enabled !== false);
       setFrequencyProfiles(profilesResult.profiles || settingsResult.profiles || []);
@@ -166,7 +174,6 @@ export default function GreetingPage() {
       setGreetingStats(statsResult);
       setSafetySummary(safetyResult);
       setFollowups(followupResult);
-      setRecoveryPanel(recoveryResult);
       setAcceptanceRecords(acceptanceResult.records || []);
       setReplyRecords(repliesResult.records || []);
     }).catch((err) => {
@@ -183,7 +190,7 @@ export default function GreetingPage() {
     if (jdAnalyses[job.id]) return jdAnalyses[job.id];
     setLoading(prev => ({ ...prev, [job.id + "-jd"]: "分析中…" }));
     try {
-      const data = await analyzeJD({ title: job.title, company: job.company, jd_text: job.jd_text });
+      const data = await analyzeJD({ job_id: job.id, title: job.title, company: job.company, jd_text: job.jd_text });
       dispatch(actions.setJdAnalyses({ ...jdAnalyses, [job.id]: data }));
       return data;
     } catch { return null; }
@@ -195,7 +202,7 @@ export default function GreetingPage() {
     setLoading(prev => ({ ...prev, [job.id + "-opt"]: "生成中…" })); setError("");
     try {
       const jdA = await ensureJDAnalysis(job);
-      const data = await aiOptimizeResume(resumeProfile, { title: job.title, company: job.company, jd_text: job.jd_text }, null, jdA || undefined);
+      const data = await aiOptimizeResume(resumeProfile, { id: job.id, title: job.title, company: job.company, jd_text: job.jd_text }, null, jdA || undefined);
       dispatch(actions.setOptimizations({ ...optimizations, [job.id]: data }));
     } catch (err) { setError(err instanceof Error ? err.message : "优化失败"); }
     finally { setLoading(prev => ({ ...prev, [job.id + "-opt"]: "" })); }
@@ -212,6 +219,68 @@ export default function GreetingPage() {
 	      await saveGreetingDrafts(next);
 	    } catch (err) { setError(err instanceof Error ? err.message : "生成失败"); }
 	    finally { setLoading(prev => ({ ...prev, [job.id + "-greet"]: "" })); }
+	  }
+
+	  // —— 批量操作 ——
+	  async function batchGenerateGreetings() {
+	    const targets = greetingTargetIds.length > 0 ? greetingTargetIds : filteredGreetingJobs.map(j => j.id);
+	    if (targets.length === 0) { setError("没有可生成话术的岗位"); return; }
+	    setWorkbenchLoading(`生成中 0/${targets.length}…`);
+	    setError("");
+	    try {
+	      const next = { ...greetingTexts };
+	      for (let i = 0; i < targets.length; i++) {
+	        const job = jobs.find(j => j.id === targets[i]);
+	        if (!job) continue;
+	        setWorkbenchLoading(`生成中 ${i + 1}/${targets.length}…`);
+	        const jdA = await ensureJDAnalysis(job);
+	        const skills = resumeProfile?.skills?.join("、") || "相关技术";
+	        const highlights = jdA?.must_have_skills?.slice(0, 3).join("、") || job.keywords?.slice(0, 3).join("、") || "岗位要求";
+	        next[targets[i]] = `您好，我对贵司的「${job.title}」岗位非常感兴趣。我有 ${skills} 方面的经验，熟悉 ${highlights} 等技术，希望能有机会进一步沟通。`;
+	      }
+	      dispatch(actions.setGreetingTexts(next));
+	      await saveGreetingDrafts(next);
+	    } catch (err) { setError(err instanceof Error ? err.message : "批量生成失败"); }
+	    finally { setWorkbenchLoading(""); }
+	  }
+
+	  async function batchRegenerateGreetings() {
+	    const targets = greetingTargetIds.filter(id => greetingTexts[id]);
+	    if (targets.length === 0) { setError("没有需要重新生成的话术"); return; }
+	    const next = { ...greetingTexts };
+	    targets.forEach(id => delete next[id]);
+	    dispatch(actions.setGreetingTexts(next));
+	    await batchGenerateGreetings();
+	  }
+
+	  function copyAllGreetings() {
+	    const targets = greetingTargetIds.length > 0 ? greetingTargetIds : filteredGreetingJobs.map(j => j.id);
+	    const lines = targets
+      .map(id => { const job = jobs.find(j => j.id === id); const msg = greetingTexts[id]; return job && msg ? `${job.company} · ${job.title}：\n${msg}` : null; })
+	      .filter(Boolean);
+	    if (lines.length === 0) { setError("没有可复制的话术"); return; }
+    navigator.clipboard.writeText(lines.join("\n\n")).then(() => { setCopiedId("all"); setTimeout(() => setCopiedId(null), 2000); }).catch(() => {});
+	  }
+
+	  async function batchOptimizeResume() {
+	    const targets = requireGreetingTargets("AI 优化简历");
+	    if (!targets) return;
+	    if (!resumeProfile) { setError("请先上传简历"); return; }
+	    setWorkbenchLoading(`AI 优化中 0/${targets.length}…`);
+	    setError("");
+	    try {
+        const nextOptimizations = { ...optimizations };
+	      for (let i = 0; i < targets.length; i++) {
+	        const job = jobs.find(j => j.id === targets[i]);
+	        if (!job) continue;
+	        setWorkbenchLoading(`AI 优化中 ${i + 1}/${targets.length}…`);
+	        const jdA = await ensureJDAnalysis(job);
+	        const data = await aiOptimizeResume(resumeProfile, { id: job.id, title: job.title, company: job.company, jd_text: job.jd_text }, null, jdA || undefined);
+          nextOptimizations[targets[i]] = data;
+	        dispatch(actions.setOptimizations({ ...nextOptimizations }));
+	      }
+	    } catch (err) { setError(err instanceof Error ? err.message : "AI 优化失败"); }
+	    finally { setWorkbenchLoading(""); }
 	  }
 
 	  async function markGreeted(jobId: string) {
@@ -276,6 +345,11 @@ export default function GreetingPage() {
   const greetingTargetSet = useMemo(() => new Set(greetingTargetIds), [greetingTargetIds]);
   const visibleSelectedCount = filteredGreetingJobs.filter(job => greetingTargetSet.has(job.id)).length;
   const currentFilterLabel = GREETING_BATCH_FILTERS.find(item => item.key === greetingFilter)?.label || "当前范围";
+  const batchActions = resolveGreetingBatchActions({
+    selectedCount: greetingTargetIds.length,
+    hasResumeProfile: Boolean(resumeProfile),
+    isBusy: Boolean(workbenchLoading),
+  });
 
   function requireGreetingTargets(actionLabel = "批量操作") {
     if (greetingTargetIds.length === 0) {
@@ -322,33 +396,6 @@ export default function GreetingPage() {
       setCandidateResult(await getGreetingCandidates(targetIds));
     } catch (err) {
       setError(err instanceof Error ? err.message : "候选筛选失败");
-    } finally {
-      setWorkbenchLoading("");
-    }
-  }
-
-  async function onDryRunGreetings() {
-    const targetIds = requireGreetingTargets("生成草稿");
-    if (!targetIds) return;
-    setWorkbenchLoading("生成草稿中…");
-    setError("");
-    try {
-      const result = await dryRunGreetings({
-        job_ids: targetIds,
-        resume_summary: resumeProfile?.summary || resumeProfile?.title || "",
-        style: "稳妥自然",
-      });
-      setDryRunResult(result);
-      const next = { ...greetingTexts };
-      result.records.forEach(record => {
-        if (record.message) next[record.jobId] = record.message;
-      });
-      dispatch(actions.setGreetingTexts(next));
-      if (!candidateResult) {
-        await refreshGreetingCandidates();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "dry-run 失败");
     } finally {
       setWorkbenchLoading("");
     }
@@ -432,7 +479,7 @@ export default function GreetingPage() {
     setWorkbenchLoading("预检中…");
     setError("");
     try {
-      setPreflightResult(await preflightGreetings({ job_ids: targetIds, messages, mode: "browser_auto" }));
+      setPreflightResult(await preflightGreetings({ job_ids: targetIds, messages, mode: autoSendEnabled ? "browser_auto" : "manual_confirm" }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "发送前预检失败");
     } finally {
@@ -628,7 +675,7 @@ export default function GreetingPage() {
     <section className="page-shell">
       <div className="page-heading">
         <div className="stack">
-          <p className="page-kicker">第五步</p>
+          <p className="page-kicker">智能打招呼</p>
           <h2 className="page-title">打招呼语与简历修订</h2>
           <p className="page-copy">根据岗位 JD 生成定制打招呼语，AI 逐岗位优化简历并支持导出。</p>
         </div>
@@ -636,12 +683,14 @@ export default function GreetingPage() {
 
       {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}
       {pdfPreviewUrl && (
-        <div className="pdf-preview-dialog" role="dialog" aria-label="PDF 简历预览">
-          <div className="pdf-preview-dialog__header">
-            <strong>PDF 简历预览 · {pdfPreviewTitle}</strong>
-            <button type="button" className="button-quiet" onClick={() => setPdfPreviewUrl("")}>关闭</button>
+        <div className="pdf-preview-overlay" role="presentation" onClick={() => setPdfPreviewUrl("")}>
+          <button type="button" className="pdf-preview-close" onClick={() => setPdfPreviewUrl("")} aria-label="关闭 PDF 简历预览">关闭</button>
+          <div className="pdf-preview-dialog" role="dialog" aria-label="PDF 简历预览" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === "Escape") setPdfPreviewUrl(""); }} tabIndex={-1}>
+            <div className="pdf-preview-dialog__header">
+              <strong>PDF 简历预览 · {pdfPreviewTitle}</strong>
+            </div>
+            <iframe title="PDF 简历预览" src={pdfPreviewUrl} />
           </div>
-          <iframe title="PDF 简历预览" src={pdfPreviewUrl} />
         </div>
       )}
 
@@ -654,27 +703,55 @@ export default function GreetingPage() {
           <div className="panel-inner">
             <div className="page-section__top">
               <div>
-                <p className="page-kicker">智能打招呼工作台</p>
+                <p className="page-kicker">boss 求职助手</p>
                 <h3 className="section-title">先生成、校验和审核，再由你决定是否发送</h3>
-                <p className="text-muted">支持 dry-run、人工确认和真实自动发送；真实发送需先打开总开关并通过预检。</p>
+                <p className="text-muted">支持人工确认和真实自动发送；真实发送需先打开总开关并通过预检。</p>
               </div>
-              <div className="toolbar-row toolbar-row--wrap">
-                <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={() => refreshGreetingCandidates()}>
-                  筛选候选
-                </button>
-                <button type="button" className="button-primary" disabled={!!workbenchLoading} onClick={onDryRunGreetings}>
-                  {workbenchLoading || "dry-run 生成草稿"}
-                </button>
-                <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={validateCurrentGreetings}>
-                  校验当前话术
-                </button>
-                <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={confirmSelectedGreetingsSent}>
-                  确认已人工发送
-                </button>
-                <button type="button" className="button-primary" disabled={!!workbenchLoading || !autoSendEnabled} onClick={autoSendSelectedGreetings}>
-                  自动打开 BOSS 发送
-                </button>
-              </div>
+            </div>
+
+            <div className="greeting-action-grid">
+              <section className="greeting-action-group greeting-action-group--primary" aria-label="准备话术">
+                <span className="greeting-action-group__label">准备话术</span>
+                <div className="toolbar-row toolbar-row--wrap">
+                  <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={() => refreshGreetingCandidates()}>
+                    筛选候选
+                  </button>
+                  <button type="button" className="button-primary" disabled={!!workbenchLoading} onClick={batchGenerateGreetings}>
+                    {workbenchLoading || "生成话术"}
+                  </button>
+                  <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={copyAllGreetings}>
+                    {copiedId === "all" ? "已复制" : "复制话术"}
+                  </button>
+                </div>
+              </section>
+              <section className="greeting-action-group" aria-label="发送">
+                <span className="greeting-action-group__label">发送</span>
+                <div className="toolbar-row toolbar-row--wrap">
+                  <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={confirmSelectedGreetingsSent}>
+                    确认已人工发送
+                  </button>
+                  <button type="button" className="button-primary" disabled={!!workbenchLoading || !autoSendEnabled} onClick={autoSendSelectedGreetings}>
+                    自动打开 BOSS 发送
+                  </button>
+                </div>
+              </section>
+              <details className="greeting-action-group greeting-action-group--details">
+                <summary>更多与安全</summary>
+                <div className="greeting-more-actions">
+                  <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={validateCurrentGreetings}>校验当前话术</button>
+                  <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={batchRegenerateGreetings}>重新生成</button>
+                  <button type="button" className="button-secondary" disabled={!batchActions.canOptimizeResume} title={batchActions.optimizeResumeTitle} onClick={batchOptimizeResume}>AI 优化简历</button>
+                  <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={runPreflight}>发送前预检</button>
+                  <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={() => getGreetingSafetySummary().then(setSafetySummary).catch(() => {})}>刷新安全阈值</button>
+                  <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={runSelectorHealth}>检测页面可用性</button>
+                  <button type="button" className="button-secondary" onClick={loadAcceptancePlan}>人工验收步骤</button>
+                  <button type="button" className="button-quiet" onClick={() => updateControl("pause")}>暂停</button>
+                  <button type="button" className="button-quiet" onClick={() => updateControl("resume")}>继续</button>
+                  <button type="button" className="button-quiet button-danger" onClick={() => updateControl("stop")}>终止</button>
+                  <span>控制状态：{progress?.control.state === "paused" ? "已暂停" : progress?.control.state === "stopped" ? "已终止" : "运行中"}</span>
+                  {progress?.task && <span>当前任务：{progress.task.done}/{progress.task.total} · {progress.task.message || progress.task.status}</span>}
+                </div>
+              </details>
             </div>
 
             <div className="greeting-selection-panel">
@@ -696,12 +773,6 @@ export default function GreetingPage() {
                   <span>本次已选 <strong>{greetingTargetIds.length}</strong></span>
                   <span>当前范围已选 <strong>{visibleSelectedCount}</strong></span>
                 </div>
-              </div>
-              <div className="greeting-selection-actions">
-                <button type="button" className="button-secondary" onClick={selectVisibleGreetingJobs}>选择当前筛选</button>
-                <button type="button" className="button-secondary" onClick={unselectVisibleGreetingJobs}>取消当前筛选</button>
-                <button type="button" className="button-secondary" onClick={invertVisibleGreetingJobs}>反选当前筛选</button>
-                <button type="button" className="button-quiet" onClick={() => setGreetingSelectedIds([])}>清空本次选择</button>
               </div>
             </div>
 
@@ -774,19 +845,6 @@ export default function GreetingPage() {
               <small>{grayModeEnabled ? "灰度模式会要求先成功发送 1 个岗位，再开放批量真实发送。" : "遇到登录失效、验证码或风控会停止剩余岗位。"}</small>
             </div>
 
-            <div className="greeting-control-strip">
-              <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={runPreflight}>发送前预检</button>
-              <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={() => getGreetingSafetySummary().then(setSafetySummary).catch(() => {})}>刷新安全阈值</button>
-              <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={() => getGreetingRecoveryPanel().then(setRecoveryPanel).catch(() => {})}>刷新失败恢复</button>
-              <button type="button" className="button-secondary" disabled={!!workbenchLoading} onClick={runSelectorHealth}>检测页面可用性</button>
-              <button type="button" className="button-secondary" onClick={loadAcceptancePlan}>人工验收步骤</button>
-              <button type="button" className="button-quiet" onClick={() => updateControl("pause")}>暂停</button>
-              <button type="button" className="button-quiet" onClick={() => updateControl("resume")}>继续</button>
-              <button type="button" className="button-quiet button-danger" onClick={() => updateControl("stop")}>终止</button>
-              <span>控制状态：{progress?.control.state === "paused" ? "已暂停" : progress?.control.state === "stopped" ? "已终止" : "运行中"}</span>
-              {progress?.task && <span>当前任务：{progress.task.done}/{progress.task.total} · {progress.task.message || progress.task.status}</span>}
-            </div>
-
             {safetySummary && (
               <div className={`greeting-preflight greeting-preflight--${safetySummary.status === "blocked" ? "error" : safetySummary.status}`}>
                 <strong>自动发送安全阈值：{safetySummary.status === "blocked" ? "建议暂停" : safetySummary.status === "warn" ? "需关注" : "正常"}</strong>
@@ -811,21 +869,6 @@ export default function GreetingPage() {
                 <span className="tag tag--muted">有效话术 {finalConfirmation.summary.validMessages}</span>
                 <span className="tag tag--muted">链接 {finalConfirmation.links.length}</span>
                 {finalConfirmation.riskItems.map(item => <span key={item} className="tag tag--red">{item}</span>)}
-              </div>
-            )}
-
-            {recoveryPanel && recoveryPanel.summary.failed > 0 && (
-              <div className="greeting-acceptance-plan">
-                <strong>失败恢复台 · 失败 {recoveryPanel.summary.failed} · 可重试 {recoveryPanel.summary.retryable}</strong>
-                {recoveryPanel.groups.map(group => (
-                  <div key={group.category} className="greeting-acceptance-step">
-                    <span>{group.count}</span>
-                    <div>
-                      <b>{group.label}</b>
-                      <p>{group.action}</p>
-                    </div>
-                  </div>
-                ))}
               </div>
             )}
 
@@ -877,15 +920,11 @@ export default function GreetingPage() {
               </div>
               <div className="greeting-metric">
                 <span>可生成</span>
-                <strong>{candidateResult?.summary.candidateCount ?? dryRunResult?.summary.drafted ?? "-"}</strong>
+                <strong>{candidateResult?.summary.candidateCount ?? "-"}</strong>
               </div>
               <div className="greeting-metric">
                 <span>已跳过</span>
-                <strong>{candidateResult?.summary.skippedCount ?? dryRunResult?.summary.skipped ?? "-"}</strong>
-              </div>
-              <div className="greeting-metric">
-                <span>dry-run 发送</span>
-                <strong>{dryRunResult?.summary.sent ?? 0}</strong>
+                <strong>{candidateResult?.summary.skippedCount ?? "-"}</strong>
               </div>
               <div className="greeting-metric">
                 <span>确认已发</span>
@@ -930,10 +969,10 @@ export default function GreetingPage() {
               </div>
             )}
 
-            {(candidateResult?.skipped.length || dryRunResult?.skipped.length) ? (
+            {(candidateResult?.skipped.length) ? (
               <div className="greeting-skip-list">
                 <strong>跳过原因</strong>
-                {(candidateResult?.skipped || dryRunResult?.skipped || []).slice(0, 6).map(item => (
+                {(candidateResult?.skipped || []).slice(0, 6).map(item => (
                   <span key={`${item.jobId}-${item.reason}`} className="tag tag--muted">
                     {item.company} · {item.reason}
                   </span>
@@ -941,21 +980,6 @@ export default function GreetingPage() {
               </div>
             ) : null}
 
-            {dryRunResult?.records.length ? (
-              <div className="greeting-draft-list">
-                {dryRunResult.records.map(record => (
-                  <div key={record.jobId} className="greeting-draft-row">
-                    <div>
-                      <strong>{record.company} · {record.title}</strong>
-                      <p>{record.message}</p>
-                    </div>
-                    <span className={`tag ${record.validationOk ? "tag--green" : "tag--red"}`}>
-                      {record.validationOk ? "校验通过" : record.validationReasons.join("、")}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
           </div>
         </div>
       )}
@@ -1151,7 +1175,7 @@ export default function GreetingPage() {
                       if (!resumeProfile) { setError("请先上传简历"); return; }
                       try {
                         const jdA = await ensureJDAnalysis(job);
-                        const data = await aiOptimizeResume(resumeProfile, { title: job.title, company: job.company, jd_text: job.jd_text }, null, jdA || undefined, messages);
+                        const data = await aiOptimizeResume(resumeProfile, { id: job.id, title: job.title, company: job.company, jd_text: job.jd_text }, null, jdA || undefined, messages);
                         dispatch(actions.setOptimizations({ ...optimizations, [job.id]: data }));
                         dispatch(actions.mergeChatMessage(job.id, messages));
                       } catch { setError("应用优化失败"); }

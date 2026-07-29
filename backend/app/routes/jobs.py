@@ -26,11 +26,10 @@ from app.services.company_blacklist import (
 from app.services.job_capture import _make_dedupe_key
 from app.services.job_filters import filter_jobs_by_model
 from app.services.job_ingest import (
-    ingest_sample_jobs, ingest_manual_job, ingest_from_boss, normalize_job,
+    ingest_manual_job, ingest_from_boss, normalize_job,
 )
 from app.services.workflow_tasks import complete_task, fail_task, partial_fail_task, start_task
 from app.services.maintenance_service import active_store, log_api_call, log_event
-from app.services.runtime_mode import is_demo_allowed
 
 logger = logging.getLogger("jobs_route")
 
@@ -56,6 +55,9 @@ def _save_jobs():
     """持久化全部岗位到磁盘。写入失败时记录日志。"""
     data = {jid: job.model_dump() for jid, job in _job_store.items()}
     try:
+        if JOBS_FILE.exists():
+            backup = JOBS_FILE.with_suffix(".json.bak")
+            backup.write_text(JOBS_FILE.read_text(encoding="utf-8"), encoding="utf-8")
         write_json_atomic(JOBS_FILE, data)
         if active_store() == "sqlite":
             from app.services import job_sqlite_store
@@ -419,22 +421,6 @@ def delete_search_preset(preset_id: str) -> dict:
     return {"deleted": preset_id, "total": len(next_presets)}
 
 
-@router.post("/capture")
-def capture_sample() -> dict:
-    """从示例数据抓取岗位。"""
-    if not is_demo_allowed():
-        raise HTTPException(status_code=403, detail="示例抓取仅在 demo/test 模式可用，生产模式请使用 BOSS 真实抓取或手动录入")
-    existing = _dedupe_keys()
-    try:
-        new_jobs = ingest_sample_jobs(existing_dedupe_keys=existing)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"抓取失败: {e}")
-    for job in new_jobs:
-        _job_store[job.id] = job
-    _save_jobs()
-    return {"captured": len(new_jobs), "total": len(_job_store)}
-
-
 @router.post("/capture/boss/login")
 def boss_login() -> dict:
     """打开浏览器让用户登录 Boss 直聘，保存 session。"""
@@ -452,17 +438,32 @@ def enrich_jd_details(payload: dict) -> dict:
     from app.services.boss_scraper import enrich_jobs_with_details
     job_ids = payload.get("job_ids", [])
     max_jobs = min(int(payload.get("max_jobs", 20)), 50)
+    force = bool(payload.get("force", False))
     
-    jobs_to_enrich = [_job_store[jid] for jid in job_ids if jid in _job_store]
-    if not jobs_to_enrich:
-        jobs_to_enrich = list(_job_store.values())
+    requested_jobs = [_job_store[jid] for jid in job_ids if jid in _job_store]
+    if not requested_jobs:
+        requested_jobs = list(_job_store.values())
+    skipped_existing_jd = 0 if force else sum(1 for job in requested_jobs if (job.jd_text or "").strip())
+    jobs_to_enrich = requested_jobs if force else [job for job in requested_jobs if not (job.jd_text or "").strip()]
     task = start_task(
         "jd_enrich",
         "获取 JD 详情",
         total=min(len(jobs_to_enrich), max_jobs),
-        payload={"job_ids": job_ids, "max_jobs": max_jobs},
+        payload={"job_ids": job_ids, "max_jobs": max_jobs, "force": force},
         idempotency_key=f"jd_enrich:{','.join(sorted(job.id for job in jobs_to_enrich))}:{max_jobs}",
     )
+
+    if not jobs_to_enrich:
+        message = "没有缺少 JD 的岗位需要抓取" if not force else "没有可重新抓取 JD 的岗位"
+        result = {
+            "enriched": 0,
+            "removed_duplicates": 0,
+            "removed_by_blacklist": 0,
+            "skipped_existing_jd": skipped_existing_jd,
+            "message": message,
+        }
+        complete_task(task["id"], done=0, message=message)
+        return result
     
     try:
         start_time = datetime.now()
@@ -480,6 +481,8 @@ def enrich_jd_details(payload: dict) -> dict:
                 "hasJd": bool((job.jd_text or "").strip()),
             })
         message = f"JD 详情补充完成，成功 {int(enriched or 0)} 个"
+        if skipped_existing_jd:
+            message += f"，跳过已有 JD {skipped_existing_jd} 个"
         if removed_duplicates:
             message += f"，重复过滤 {removed_duplicates} 个"
         if removed:
@@ -488,6 +491,7 @@ def enrich_jd_details(payload: dict) -> dict:
             "enriched": int(enriched or 0),
             "removed_duplicates": removed_duplicates,
             "removed_by_blacklist": removed,
+            "skipped_existing_jd": skipped_existing_jd,
             "message": message,
         }
         total = min(len(jobs_to_enrich), max_jobs)
@@ -519,9 +523,9 @@ def retry_failed_jd_details(task_id: str) -> dict:
 
 @router.get("/capture/boss/status")
 def boss_login_status() -> dict:
-    """检查 BOSS 直聘登录状态。"""
+    """检查 BOSS 直聘登录状态（仅检查本地标记，不触发浏览器页面）。"""
     from app.services.boss_scraper import check_login_status
-    return check_login_status()
+    return check_login_status(probe=False)
 
 
 @router.get("/capture/boss/filter-options")

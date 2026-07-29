@@ -1,5 +1,5 @@
 // ============================================================
-//  BOSS 直聘 AI 求职工作台 — 类型定义 v2
+//  boss 求职助手 — 类型定义 v2
 //  核心变化：从单选改为多选批次流转
 // ============================================================
 
@@ -62,6 +62,7 @@ export type JobPosting = {
   salary_min: number;
   salary_max: number;
   jd_text: string;
+  jd_analysis?: JDAnalysis;
   keywords: string[];
   structured_summary: string;
   source: string;
@@ -128,7 +129,7 @@ export type GreetingValidationResult = {
   length: number;
 };
 
-export type GreetingDryRunRecord = {
+export type GreetingRecord = {
   jobId: string;
   company: string;
   title: string;
@@ -136,20 +137,7 @@ export type GreetingDryRunRecord = {
   message: string;
   validationOk: boolean;
   validationReasons: string[];
-  dryRun: boolean;
   updatedAt: string;
-};
-
-export type GreetingDryRunResponse = {
-  summary: {
-    total: number;
-    drafted: number;
-    sent: number;
-    skipped: number;
-    failed: number;
-  };
-  records: GreetingDryRunRecord[];
-  skipped: GreetingSkippedCandidate[];
 };
 
 export type GreetingSendResponse = {
@@ -162,10 +150,11 @@ export type GreetingSendResponse = {
     batchLimit: number;
     remainingBeforeSend: number;
   };
-  records: GreetingDryRunRecord[];
+  records: GreetingRecord[];
   skipped: GreetingSkippedCandidate[];
   taskId: string;
 };
+
 
 export type GreetingFrequencyProfile = {
   key: "conservative" | "standard" | "fast" | string;
@@ -472,176 +461,6 @@ export type WorkflowHealthCheck = {
   checks: HealthCheckItem[];
 };
 
-export type MaintenanceLogEvent = {
-  id: string;
-  time: string;
-  level: "info" | "warning" | "error";
-  category: string;
-  message: string;
-  detail?: Record<string, unknown>;
-};
-
-export type ReleasePreflight = {
-  status: HealthCheckStatus;
-  summary: {
-    total: number;
-    ok: number;
-    warn: number;
-    error: number;
-  };
-  checks: HealthCheckItem[];
-  generatedAt: string;
-};
-
-export type ReleaseManifest = {
-  kind: "release_manifest";
-  version: number;
-  generatedAt: string;
-  commit: string;
-  qualityGates: Array<{ key: string; command?: string; endpoint?: string; required: boolean }>;
-};
-
-export type ReleaseNotes = {
-  kind: "release_notes";
-  version: string;
-  generatedAt: string;
-  phase: string;
-  highlights: string[];
-  knownRisks: string[];
-};
-
-export type ReleaseAcceptanceChecklist = {
-  kind: "release_acceptance_checklist";
-  version: number;
-  generatedAt: string;
-  sections: Array<{
-    key: string;
-    title: string;
-    steps: string[];
-  }>;
-};
-
-export type DependencyAudit = {
-  status: HealthCheckStatus;
-  dryRun: boolean;
-  generatedAt: string;
-  checks: Array<HealthCheckItem & {
-    command?: string;
-    exitCode?: number;
-    outputPreview?: string;
-  }>;
-};
-
-export type PdfVisualRegression = {
-  status: HealthCheckStatus;
-  checks: Record<string, {
-    status: HealthCheckStatus | "unavailable";
-    reason: string;
-    previewPath: string;
-    previewDataUrl: string;
-    pages: Array<{ path: string; width: number; height: number; nonWhiteRatio: number; inkRatio: number }>;
-  }>;
-};
-
-export type SecurityAudit = {
-  status: HealthCheckStatus;
-  checks: Array<HealthCheckItem & { items?: Array<Record<string, unknown>> }>;
-  generatedAt: string;
-};
-
-export type PrivacyScan = {
-  kind: "privacy_scan";
-  status: HealthCheckStatus;
-  summary: { hits: number; scannedRoots: number };
-  hits: Array<{ path: string; fields: string[] }>;
-  suggestions: string[];
-  generatedAt: string;
-};
-
-export type ReleaseAcceptanceSuite = {
-  kind: "release_acceptance_suite";
-  status: HealthCheckStatus;
-  generatedAt: string;
-  sections: Array<{ key: string; title: string; status: string; total: number; steps: Array<{ label: string; status: string }> }>;
-  machineChecks: Array<{ key: string; label: string; status: HealthCheckStatus; summary?: Record<string, unknown> }>;
-  nextActions: string[];
-};
-
-export type ReleaseVersionSnapshot = {
-  kind: "release_version_snapshot";
-  version: string;
-  commit: string;
-  generatedAt: string;
-  phase: string;
-  status: HealthCheckStatus;
-  summary: Record<string, unknown>;
-  highlights: string[];
-  knownRisks: string[];
-  qualityGates: ReleaseManifest["qualityGates"];
-};
-
-export type ReleaseCheckSuite = {
-  kind: "release_check_suite";
-  status: HealthCheckStatus;
-  generatedAt: string;
-  summary: { total: number; ok: number; warn: number; error: number; manual: number };
-  checks: Array<{ key: string; label: string; status: HealthCheckStatus | "manual"; command?: string; summary?: Record<string, unknown> }>;
-  nextActions: string[];
-};
-
-export type ReleaseRecord = {
-  id: string;
-  version: string;
-  operator: string;
-  decision: "ready" | "hold" | "review" | string;
-  notes: string[];
-  createdAt: string;
-  snapshot: ReleaseVersionSnapshot;
-  checkSuite: ReleaseCheckSuite;
-};
-
-export type GreetingRecoveryPanel = {
-  summary: { failed: number; groups: number; retryable: number };
-  groups: Array<{ category: string; label: string; action: string; count: number; retryable: number; records: Array<Record<string, unknown>> }>;
-  recommendations: string[];
-};
-
-export type CleanupDryRun = {
-  kind: "cleanup_dry_run";
-  status: HealthCheckStatus;
-  summary: { expiredJobs: number; failedTasks: number; resumeChats: number; cacheFiles: number };
-  targets: Array<{ key: string; label: string; count: number; action: string }>;
-  sampleFiles: string[];
-  archivePath: string;
-  generatedAt: string;
-};
-
-export type CleanupConfirmResult = {
-  kind: "cleanup_confirm_result";
-  generatedAt: string;
-  before: CleanupDryRun;
-  after: CleanupDryRun;
-  archivedJobs: number;
-  archivedTasks: number;
-  archivedChats: number;
-  preview: { expiredJobs: number; failedTasks: number; resumeFiles: number; archivePath: string };
-};
-
-export type DiagnosticCenter = {
-  kind: "diagnostic_center";
-  status: HealthCheckStatus;
-  summary: { total: number; ok: number; warn: number; error: number };
-  checks: Array<HealthCheckItem>;
-  repairActions: Array<{
-    key: string;
-    label: string;
-    status: HealthCheckStatus;
-    message: string;
-    repairAction: NonNullable<HealthCheckItem["repairAction"]>;
-  }>;
-  generatedAt: string;
-};
-
 export type HelpCenter = {
   kind: "help_center";
   version: number;
@@ -661,34 +480,6 @@ export type HelpCenter = {
   principles: string[];
   faq: Array<{ question: string; answer: string; page: string }>;
   glossary: Array<{ term: string; meaning: string }>;
-};
-
-export type StorageStatus = {
-  activeStore: string;
-  json: { path: string; ready: boolean };
-  sqlite: {
-    path: string;
-    exists: boolean;
-    migrationReady: boolean;
-    message: string;
-    schemaVersion: number;
-    targetSchemaVersion: number;
-    integrity: { status: "ok" | "missing" | "error"; message: string };
-    backups: Array<{ path: string; size: number; updatedAt: string }>;
-  };
-};
-
-export type StorageMigrationWizard = {
-  activeStore: string;
-  sqlitePath: string;
-  steps: Array<{
-    key: string;
-    label: string;
-    status: "done" | "todo" | "blocked" | "available";
-    action: string;
-  }>;
-  nextStep: { label: string; action: string };
-  generatedAt: string;
 };
 
 export type DashboardSummary = {
@@ -747,15 +538,6 @@ export type OnboardingWizard = OnboardingGuide & {
   primaryPage: string;
   steps: Array<OnboardingGuide["steps"][number] & { index: number; stateLabel: string; blockers: string[]; primary: boolean }>;
   tips: string[];
-};
-
-export type RuntimeModeStatus = {
-  mode: "production" | "demo" | "test";
-  source: "env" | "local";
-  demoAllowed: boolean;
-  dataScope: string;
-  lockedByEnv: boolean;
-  warning: string;
 };
 
 export type JobsImportWizard = {
@@ -1212,7 +994,6 @@ export type WorkflowState = {
   /** 聊天消息（key = jobId） — 切换页面不丢失 */
   chatMessages: Record<string, Array<{ role: string; content: string }>>;
 };
-
 
 // ---- AI 评估 / 优化 ----
 

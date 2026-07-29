@@ -10,6 +10,7 @@ class JobRecord(BaseModel):
     salary_min: int = 0          # 薪资下限，自动解析
     salary_max: int = 0          # 薪资上限，自动解析
     jd_text: str = ""
+    jd_analysis: dict = Field(default_factory=dict)
     keywords: list[str] = Field(default_factory=list)
     structured_summary: str = ""  # AI 或规则生成的 JD 摘要
     source: str = "manual"       # manual / captured / imported
@@ -29,6 +30,7 @@ class JobRecord(BaseModel):
     application_status: str = "pending"  # pending / greeted / applied / interviewing / rejected / abandoned
     application_note: str = ""
     application_updated_at: str = ""
+    application_history: list[dict] = Field(default_factory=list)
     decision_status: str = "undecided"  # undecided / recommended / watching / abandoned / risky
     status_history: list[dict] = Field(default_factory=list)
 

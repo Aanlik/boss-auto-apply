@@ -18,7 +18,6 @@ from app.services import workflow_persistence
 from app.services.workflow_persistence import write_json_atomic
 from app.services.secret_store import decrypt_secret, encrypt_secret
 from app.services import preferences as preferences_service
-from app.services.runtime_mode import runtime_mode_status, set_runtime_mode
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 _EXPORT_TOKENS: dict[str, float] = {}
@@ -81,17 +80,8 @@ def delete_provider_config() -> dict:
     return {"configured": False, "message": "配置已清除"}
 
 
-@router.get("/runtime-mode")
-def get_runtime_mode_status() -> dict:
-    return runtime_mode_status()
 
 
-@router.post("/runtime-mode")
-def save_runtime_mode(payload: dict) -> dict:
-    try:
-        return set_runtime_mode(str(payload.get("mode") or ""))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/provider/test")

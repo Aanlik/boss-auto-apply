@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import os
 import shutil
-import sys
 from pathlib import Path
 
 from app.services.workflow_persistence import DATA_DIR, _read_json
-from app.services.runtime_mode import get_runtime_mode
+from app.services.boss_scraper import check_login_status
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -29,18 +28,16 @@ def _check(key: str, label: str, status: str, message: str, action: str = "") ->
 
 def run_health_check() -> dict:
     desktop = _is_desktop()
-    checks = [_runtime_mode_check()]
+    checks = []
     if desktop:
         checks.extend([
             _desktop_backend_check(),
             _browser_runtime_check(),
-            _python_check(desktop=True),
             _pnpm_check(desktop=True),
             _frontend_build_check(desktop=True),
         ])
     else:
         checks.extend([
-            _python_check(),
             _pnpm_check(),
             _frontend_build_check(),
         ])
@@ -61,13 +58,6 @@ def run_health_check() -> dict:
     return {"status": status, "runtime": "desktop" if desktop else "development", "checks": checks}
 
 
-def _runtime_mode_check() -> dict:
-    mode = get_runtime_mode()
-    if mode == "production":
-        return _check("runtime_mode", "运行模式", "ok", "当前为生产模式")
-    return _check("runtime_mode", "运行模式", "warn", f"当前为 {mode} 模式", "上线前切换为 production")
-
-
 def _desktop_backend_check() -> dict:
     return _check("desktop_backend", "桌面端后端", "ok", "后端运行环境已内置在安装包内")
 
@@ -77,16 +67,6 @@ def _browser_runtime_check() -> dict:
     if executable and Path(executable).exists():
         return _check("browser_runtime", "内置浏览器", "ok", "Chromium 已随安装包内置")
     return _check("browser_runtime", "内置浏览器", "warn", "未检测到内置 Chromium 路径", "BOSS 抓取会尝试使用系统 Chrome")
-
-
-def _python_check(desktop: bool = False) -> dict:
-    if desktop:
-        item = _check("python", "Python 运行环境", "ok", "桌面端已内置 Python 运行环境", "仅源码开发需要单独安装 Python")
-        item["optional"] = True
-        return item
-    version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    status = "ok" if sys.version_info >= (3, 10) else "warn"
-    return _check("python", "Python 运行环境", status, f"当前版本 {version}", "建议使用 Python 3.10+")
 
 
 def _pnpm_check(desktop: bool = False) -> dict:
@@ -156,11 +136,17 @@ def _business_api_check() -> dict:
 
 
 def _boss_login_check() -> dict:
-    session_files = [
-        DATA_DIR / "boss" / "storage_state.json",
-        DATA_DIR / "boss_storage_state.json",
-        ROOT_DIR / "boss_storage_state.json",
-    ]
-    if any(path.exists() for path in session_files):
-        return _check("boss_login", "BOSS 登录状态", "ok", "已检测到登录缓存")
-    return _check("boss_login", "BOSS 登录状态", "warn", "未检测到登录缓存", "抓取前先完成 BOSS 登录")
+    try:
+        status = check_login_status(probe=False)
+    except Exception as exc:
+        return _check("boss_login", "BOSS 登录状态", "warn", f"登录状态检测失败: {exc}", "请重新打开岗位模块并检测 BOSS 登录")
+
+    if isinstance(status, dict) and status.get("logged_in"):
+        message = status.get("message") or "已检测到有效登录状态"
+        return _check("boss_login", "BOSS 登录状态", "ok", message)
+
+    reason = str((status or {}).get("reason") or "")
+    action = str((status or {}).get("action") or "")
+    if reason in {"cookie_expired", "restricted"}:
+        return _check("boss_login", "BOSS 登录状态", "error", status.get("message") or "登录已过期", action or "重新登录 BOSS 并再次检测")
+    return _check("boss_login", "BOSS 登录状态", "warn", status.get("message") or "未检测到有效登录状态", action or "抓取前先完成 BOSS 登录")

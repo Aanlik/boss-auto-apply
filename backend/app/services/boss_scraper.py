@@ -98,21 +98,85 @@ GREETING_SEND_JS_TEMPLATE = r"""(async function(){
         const style = window.getComputedStyle(el);
         return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
     }
-    function byText(selectors, texts) {
-        const nodes = Array.from(document.querySelectorAll(selectors));
-        return nodes.find(el => visible(el) && texts.some(text => (el.innerText || el.textContent || '').trim().includes(text)));
+    function nearestActionable(el) {
+        if (!el) return null;
+        return el.closest('button,a,[role="button"],.btn,.btn-startchat,.start-chat,.op-btn,.btn-greet') || el;
     }
-    let chatButton = byText('button,a,span,div', ['立即沟通','立即投递','投递简历','继续沟通']);
+    function actionableByText(selectors, texts) {
+        const nodes = Array.from(document.querySelectorAll(selectors));
+        const candidates = nodes
+            .filter(visible)
+            .map(el => ({source: el, target: nearestActionable(el)}))
+            .filter(item => item.target && visible(item.target))
+            .filter(item => {
+                const text = (item.target.innerText || item.target.textContent || item.source.innerText || item.source.textContent || '').trim();
+                return texts.some(t => text.includes(t));
+            });
+        candidates.sort((a, b) => {
+            const ar = a.target.getBoundingClientRect();
+            const br = b.target.getBoundingClientRect();
+            const aArea = ar.width * ar.height;
+            const bArea = br.width * br.height;
+            const aNative = /^(A|BUTTON)$/.test(a.target.tagName) ? 0 : 1;
+            const bNative = /^(A|BUTTON)$/.test(b.target.tagName) ? 0 : 1;
+            return aNative - bNative || aArea - bArea;
+        });
+        return candidates[0] ? candidates[0].target : null;
+    }
+    function clickElement(el) {
+        const target = nearestActionable(el);
+        if (!target || !visible(target)) return false;
+        target.scrollIntoView({block:'center', inline:'center'});
+        ['pointerdown','mousedown','mouseup','click'].forEach(type => {
+            target.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window}));
+        });
+        if (typeof target.click === 'function') target.click();
+        return true;
+    }
+    async function waitFor(fn, timeoutMs, intervalMs) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            const value = fn();
+            if (value) return value;
+            await sleep(intervalMs || 250);
+        }
+        return null;
+    }
+    function chatInput() {
+        const selectors = [
+            '.startchat-dialog textarea',
+            '.startchat-dialog .input-area',
+            '.dialog-wrap textarea',
+            '.dialog-wrap [contenteditable="true"]',
+            'textarea.input-area',
+            '#chat-input',
+            '[class*="chat-input"]',
+            '[contenteditable="true"]',
+            'textarea'
+        ].join(',');
+        const inputs = Array.from(document.querySelectorAll(selectors))
+            .filter(visible)
+            .filter(el => !String(el.className || '').includes('ipt-search'))
+            .filter(el => !String(el.getAttribute('type') || '').toLowerCase().includes('search'));
+        inputs.sort((a, b) => {
+            const aDialog = a.closest('.startchat-dialog,.dialog-wrap') ? 0 : 1;
+            const bDialog = b.closest('.startchat-dialog,.dialog-wrap') ? 0 : 1;
+            const aTextarea = a.tagName === 'TEXTAREA' ? 0 : 1;
+            const bTextarea = b.tagName === 'TEXTAREA' ? 0 : 1;
+            return aDialog - bDialog || aTextarea - bTextarea;
+        });
+        return inputs[0] || null;
+    }
+    let chatButton = actionableByText('button,a,span,div', ['立即沟通','立即投递','投递简历','继续沟通']);
     if (!chatButton) {
         return JSON.stringify({ok:false, status:'failed', failureCode:'button_not_found', message:'未找到立即沟通按钮'});
     }
-    chatButton.click();
-    await sleep(1800);
-
-    let input = Array.from(document.querySelectorAll('#chat-input, textarea, [contenteditable="true"], [class*="chat-input"], [placeholder*="请输入"]')).find(visible);
-    if (!input) {
-        input = Array.from(document.querySelectorAll('[contenteditable="true"]')).find(visible);
+    if (!clickElement(chatButton)) {
+        return JSON.stringify({ok:false, status:'failed', failureCode:'button_click_failed', message:'立即沟通按钮不可点击'});
     }
+    await sleep(1200);
+
+    let input = await waitFor(chatInput, 8000, 300);
     if (!input) {
         return JSON.stringify({ok:false, status:'failed', failureCode:'input_not_found', message:'未找到聊天输入框'});
     }
@@ -120,7 +184,11 @@ GREETING_SEND_JS_TEMPLATE = r"""(async function(){
     const message = __MESSAGE_JSON__;
     input.focus();
     if ('value' in input) {
-        input.value = message;
+        const proto = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(input, message);
+        else input.value = message;
+        input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:message}));
         input.dispatchEvent(new Event('input', {bubbles:true}));
         input.dispatchEvent(new Event('change', {bubbles:true}));
     } else {
@@ -130,11 +198,13 @@ GREETING_SEND_JS_TEMPLATE = r"""(async function(){
     }
     await sleep(800);
 
-    let sendButton = byText('button,span,div,a', ['发送']);
+    let sendButton = await waitFor(() => actionableByText('button,span,div,a,[role="button"]', ['发送']), 5000, 250);
     if (!sendButton) {
         return JSON.stringify({ok:false, status:'failed', failureCode:'send_button_not_found', message:'未找到发送按钮'});
     }
-    sendButton.click();
+    if (!clickElement(sendButton)) {
+        return JSON.stringify({ok:false, status:'failed', failureCode:'send_button_click_failed', message:'发送按钮不可点击'});
+    }
     await sleep(1200);
 
     const afterText = (document.body && document.body.innerText || '').toLowerCase();
@@ -152,13 +222,33 @@ GREETING_SELECTOR_HEALTH_JS = r"""(function(){
         const style = window.getComputedStyle(el);
         return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
     }
-    function byText(selectors, texts) {
-        const nodes = Array.from(document.querySelectorAll(selectors));
-        return nodes.find(el => visible(el) && texts.some(text => (el.innerText || el.textContent || '').trim().includes(text)));
+    function nearestActionable(el) {
+        if (!el) return null;
+        return el.closest('button,a,[role="button"],.btn,.btn-startchat,.start-chat,.op-btn,.btn-greet') || el;
     }
-    const chatButton = byText('button,a,span,div', ['立即沟通','立即投递','投递简历','继续沟通']);
+    function actionableByText(selectors, texts) {
+        const candidates = Array.from(document.querySelectorAll(selectors))
+            .filter(visible)
+            .map(el => ({source: el, target: nearestActionable(el)}))
+            .filter(item => item.target && visible(item.target))
+            .filter(item => {
+                const text = (item.target.innerText || item.target.textContent || item.source.innerText || item.source.textContent || '').trim();
+                return texts.some(t => text.includes(t));
+            });
+        candidates.sort((a, b) => {
+            const ar = a.target.getBoundingClientRect();
+            const br = b.target.getBoundingClientRect();
+            const aArea = ar.width * ar.height;
+            const bArea = br.width * br.height;
+            const aNative = /^(A|BUTTON)$/.test(a.target.tagName) ? 0 : 1;
+            const bNative = /^(A|BUTTON)$/.test(b.target.tagName) ? 0 : 1;
+            return aNative - bNative || aArea - bArea;
+        });
+        return candidates[0] ? candidates[0].target : null;
+    }
+    const chatButton = actionableByText('button,a,span,div', ['立即沟通','立即投递','投递简历','继续沟通']);
     const input = Array.from(document.querySelectorAll('#chat-input, textarea, [contenteditable="true"], [class*="chat-input"], [placeholder*="请输入"]')).find(visible);
-    const sendButton = byText('button,span,div,a', ['发送']);
+    const sendButton = actionableByText('button,span,div,a', ['发送']);
     const risk = ['验证码','滑块','拼图','captcha','verify','操作太频繁','稍后再试','账号异常','限制使用'].some(t => bodyText.includes(t.toLowerCase()));
     const checks = [
         {key:'page_risk', status:risk ? 'error' : 'ok', message:risk ? '检测到验证码或风控提示' : '未检测到明显风控提示'},
@@ -203,7 +293,7 @@ class CDPSession:
 
     def eval_js(self, js, sid):
         """在页面中执行 JS 并返回结果。"""
-        r = self.send("Runtime.evaluate", {"expression": js, "returnByValue": True}, sid)
+        r = self.send("Runtime.evaluate", {"expression": js, "returnByValue": True, "awaitPromise": True}, sid)
         result = r.get("result", {})
         if "exceptionDetails" in result:
             exc = result["exceptionDetails"]
@@ -321,7 +411,7 @@ def _launch_chrome(url="about:blank"):
     return False
 
 
-def _stop_chrome():
+def _stop_chrome(clear_session: bool = False):
     """仅停止我们启动的 CDP Chrome 进程（不影响用户正常 Chrome）。"""
     try:
         # macOS/Linux: 按端口精确匹配，避免误杀用户 Chrome
@@ -340,10 +430,10 @@ def _stop_chrome():
     except Exception:
         pass
     _time.sleep(0.5)
-    # 清除登录标记
-    session_file = Path(CDP_PROFILE) / ".boss_logged_in"
-    if session_file.exists():
-        session_file.unlink()
+    if clear_session:
+        session_file = Path(CDP_PROFILE) / ".boss_logged_in"
+        if session_file.exists():
+            session_file.unlink()
 
 
 # ============================================================
@@ -413,9 +503,11 @@ async def boss_login_and_save_session(headless=False):
         raise RuntimeError("Chrome 启动失败")
 
     _time.sleep(2)
-    cdp = CDPSession(CDP_PORT)
+    cdp = None
+    tid = None
 
     try:
+        cdp = CDPSession(CDP_PORT)
         tid, sid = cdp.create_page()
         cdp.navigate("https://www.zhipin.com/web/user/?intent=0&ka=header-geek", sid)
 
@@ -436,25 +528,27 @@ async def boss_login_and_save_session(headless=False):
                 # 保存登录成功标记
                 session_file = Path(CDP_PROFILE) / ".boss_logged_in"
                 session_file.write_text(datetime.now(timezone.utc).isoformat())
-                cdp.send("Target.closeTarget", {"targetId": tid})
-                cdp.close()
                 return {"status": "ok", "message": f"登录成功（{result.get('salary_sample','')}）"}
             if result["status"] == "restricted":
-                cdp.close()
-                _stop_chrome()
                 return {"status": "error", "message": "Boss 接口被限制，请稍后重试"}
 
-        cdp.send("Target.closeTarget", {"targetId": tid})
-        cdp.close()
         return {"status": "timeout", "message": "登录超时（5分钟）"}
 
     except Exception as e:
         logger.error("登录异常: %s", e)
-        try:
-            cdp.close()
-        except Exception:
-            pass
         return {"status": "error", "message": str(e)}
+    finally:
+        if tid and cdp:
+            try:
+                cdp.send("Target.closeTarget", {"targetId": tid})
+            except Exception:
+                pass
+        if cdp:
+            try:
+                cdp.close()
+            except Exception:
+                pass
+        _stop_chrome()
 
 
 # ============================================================
@@ -570,11 +664,7 @@ async def scrape_boss_jobs(keyword="Python", city="深圳", max_pages=3, headles
                 cdp.close()
             except Exception:
                 pass
-        if cdp:
-            try:
-                cdp.close()
-            except Exception:
-                pass
+        _stop_chrome()
 
 
 def login_boss_sync(headless=False):
@@ -669,6 +759,7 @@ def check_boss_greeting_selectors_sync(job_url: str) -> dict:
                 cdp.close()
             except Exception:
                 pass
+        _stop_chrome()
 
 
 # ============================================================
@@ -782,14 +873,16 @@ def enrich_jobs_with_details(jobs, max_jobs=30):
                 cdp.close()
             except Exception:
                 pass
+        _stop_chrome()
         _detail_enrich_running = False
 
 
-def check_login_status() -> dict:
+def check_login_status(*, probe: bool = True) -> dict:
     """检查 BOSS 直聘是否已登录。
     
-    Chrome 运行时做一次轻量 API 探测验证 Cookie 有效性；
-    Chrome 未运行时退化为文件检查（避免冷启动延迟）。
+    probe=True（默认）时，Chrome 运行中会通过 CDP 实际导航验证 Cookie 有效性；
+    probe=False 时仅检查本地登录标记文件，不触发浏览器页面。
+    Chrome 未运行时始终退化为文件检查。
     """
     session_file = Path(CDP_PROFILE) / ".boss_logged_in"
     if not session_file.exists():
@@ -804,7 +897,7 @@ def check_login_status() -> dict:
         return _session_file_status(session_file)
 
     # Chrome 运行中 → 实际探测登录态，防止 Cookie 过期误报
-    if _chrome_running():
+    if probe and _chrome_running():
         try:
             cdp = CDPSession(CDP_PORT)
             tid, sid = cdp.create_page()

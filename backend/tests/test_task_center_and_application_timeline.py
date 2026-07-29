@@ -69,6 +69,71 @@ def test_workflow_recovery_actions_are_button_ready(tmp_path, monkeypatch):
     assert action["primary"] is True
 
 
+def test_clear_failed_workflow_tasks_keeps_active_and_completed_tasks(tmp_path, monkeypatch):
+    from app.services import workflow_persistence, workflow_tasks
+
+    monkeypatch.setattr(workflow_persistence, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(workflow_tasks, "TASKS_FILE", tmp_path / "workflow" / "tasks.json")
+    running = workflow_tasks.start_task("boss_capture", "抓取岗位", total=10)
+    completed = workflow_tasks.start_task("ranking", "岗位评分", total=1)
+    workflow_tasks.complete_task(completed["id"], done=1, message="已完成")
+    failed = workflow_tasks.start_task("greeting_send", "自动打招呼", total=1)
+    workflow_tasks.fail_task(failed["id"], "未找到立即沟通按钮", error_code="button_not_found", retryable=True)
+    partial = workflow_tasks.start_task("jd_enrich", "JD 分析", total=3)
+    workflow_tasks.partial_fail_task(partial["id"], done=1, total=3, message="部分 JD 缺失", error_code="missing_jd")
+
+    response = client.delete("/api/workflow/tasks/failed")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["removed"] == 2
+    assert body["remaining"] == 2
+    task_ids = {task["id"] for task in workflow_tasks.load_tasks(limit=100)}
+    assert running["id"] in task_ids
+    assert completed["id"] in task_ids
+    assert failed["id"] not in task_ids
+    assert partial["id"] not in task_ids
+
+
+def test_retry_unsupported_workflow_task_does_not_create_stuck_queue(tmp_path, monkeypatch):
+    from app.services import workflow_persistence, workflow_tasks
+
+    monkeypatch.setattr(workflow_persistence, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(workflow_tasks, "TASKS_FILE", tmp_path / "workflow" / "tasks.json")
+    failed = workflow_tasks.start_task("unknown_module", "未知任务", total=1)
+    workflow_tasks.fail_task(failed["id"], "暂不支持自动重试", error_code="unknown", retryable=True)
+
+    response = client.post(f"/api/workflow/tasks/{failed['id']}/retry")
+
+    assert response.status_code == 409
+    tasks = workflow_tasks.load_tasks(limit=100)
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == failed["id"]
+    assert tasks[0]["status"] == "failed"
+
+
+def test_delete_stuck_queued_workflow_task(tmp_path, monkeypatch):
+    from app.services import workflow_persistence, workflow_tasks
+
+    monkeypatch.setattr(workflow_persistence, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(workflow_tasks, "TASKS_FILE", tmp_path / "workflow" / "tasks.json")
+    source = workflow_tasks.start_task("unknown_module", "源任务", total=1)
+    workflow_tasks.fail_task(source["id"], "失败", retryable=True)
+    queued, _ = workflow_tasks.queue_retry_task(source["id"])
+    running = workflow_tasks.start_task("boss_capture", "抓取中", total=3)
+
+    response = client.delete(f"/api/workflow/tasks/{queued['id']}")
+    running_response = client.delete(f"/api/workflow/tasks/{running['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+    assert running_response.status_code == 409
+    task_ids = {task["id"] for task in workflow_tasks.load_tasks(limit=100)}
+    assert queued["id"] not in task_ids
+    assert source["id"] in task_ids
+    assert running["id"] in task_ids
+
+
 def test_application_crm_board_groups_jobs_by_status(monkeypatch):
     import app.routes.jobs as jobs_route
 

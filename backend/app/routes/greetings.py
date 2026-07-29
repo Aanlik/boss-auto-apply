@@ -3,10 +3,26 @@ from __future__ import annotations
 from datetime import datetime
 import time
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services import workflow_persistence
+from app.services.boss_scraper import send_boss_greeting_sync
+
+
+def execute_browser_greeting(job, message: str) -> dict:
+    """通过 CDP 自动在 BOSS 直聘岗位页发送招呼语。"""
+    url = getattr(job, "source_url", None) or ""
+    if not url:
+        return {"ok": False, "status": "failed", "failureCode": "missing_url", "message": "岗位缺少来源链接"}
+    return send_boss_greeting_sync(url, message)
+
+
+def close_browser_after_greeting_task() -> None:
+    """关闭本应用为 BOSS 自动化启动的 CDP Chrome。"""
+    from app.services.boss_scraper import _stop_chrome
+
+    _stop_chrome()
 from app.services.greeting_workbench import (
     build_greeting_candidates,
     build_greeting_record,
@@ -39,11 +55,6 @@ class GreetingValidateItem(BaseModel):
 class GreetingValidateRequest(BaseModel):
     items: list[GreetingValidateItem] = Field(default_factory=list)
 
-
-class GreetingDryRunRequest(BaseModel):
-    job_ids: list[str] = Field(default_factory=list)
-    resume_summary: str = ""
-    style: str = "稳妥自然"
 
 
 class GreetingSendRequest(BaseModel):
@@ -113,6 +124,42 @@ def _all_jobs():
 
 def _jobs_by_id() -> dict:
     return {job.id: job for job in _all_jobs()}
+
+
+def _skip_item(job, reason: str) -> dict:
+    return {
+        "jobId": job.id,
+        "title": getattr(job, "title", ""),
+        "company": getattr(job, "company", ""),
+        "city": getattr(job, "city", ""),
+        "salary": getattr(job, "salary", ""),
+        "reason": reason,
+    }
+
+
+def sleep_between_greetings(seconds: float):
+    import time as _time
+    _time.sleep(max(0, seconds))
+
+
+def _save_jobs():
+    from app.routes.jobs import _save_jobs as jobs_save
+    jobs_save()
+
+
+def _append_application_history(job, status: str, previous: str, note: str) -> dict:
+    entry = {
+        "status": status,
+        "previous": previous,
+        "note": note,
+        "time": datetime.now().isoformat(),
+    }
+    history = getattr(job, "application_history", None)
+    if not isinstance(history, list):
+        history = []
+    history.append(entry)
+    job.application_history = history
+    return entry
 
 
 FREQUENCY_PROFILES = [
@@ -642,57 +689,6 @@ def greeting_followups(now: str = "") -> dict:
     return {"summary": {"pendingFollowups": len(items)}, "items": items}
 
 
-def _failure_category(record: dict) -> tuple[str, str, str]:
-    text = f"{record.get('failureCode') or ''} {record.get('note') or ''} {record.get('failureMessage') or ''}".lower()
-    if any(key in text for key in ("risk", "captcha", "验证码", "风控")):
-        return ("risk_control", "页面风控", "暂停自动发送，人工检查 BOSS 页面后再重试")
-    if any(key in text for key in ("button", "selector", "输入框", "按钮", "页面结构")):
-        return ("page_changed", "页面结构变化", "先运行页面可用性检测，再更新选择器或转人工")
-    if any(key in text for key in ("login", "cookie", "未登录", "登录")):
-        return ("login", "登录状态异常", "重新登录 BOSS 并刷新安全阈值")
-    if any(key in text for key in ("network", "timeout", "网络", "超时")):
-        return ("network", "网络失败", "检查网络后重试失败任务")
-    if "validation" in text or "校验" in text:
-        return ("validation", "话术校验失败", "修改招呼语后再发送")
-    return ("unknown", "其他失败", "查看失败记录并选择重试或转人工")
-
-
-@router.get("/recovery-panel")
-def greeting_recovery_panel() -> dict:
-    failed = [record for record in load_send_records() if record.get("status") in {"failed", "blocked"}]
-    groups: dict[str, dict] = {}
-    for record in failed:
-        category, label, action = _failure_category(record)
-        group = groups.setdefault(category, {
-            "category": category,
-            "label": label,
-            "action": action,
-            "count": 0,
-            "retryable": 0,
-            "records": [],
-        })
-        group["count"] += 1
-        if category in {"network", "page_changed", "login", "unknown"}:
-            group["retryable"] += 1
-        group["records"].append(record)
-    ordered = sorted(groups.values(), key=lambda item: (-item["count"], item["category"]))
-    for group in ordered:
-        group["records"] = group["records"][-10:]
-    return {
-        "summary": {
-            "failed": len(failed),
-            "groups": len(ordered),
-            "retryable": sum(int(group["retryable"]) for group in ordered),
-        },
-        "groups": ordered,
-        "recommendations": [
-            "风控和验证码优先转人工，不连续重试。",
-            "页面结构变化先做页面可用性检测，再决定是否继续自动发送。",
-            "网络失败可在灰度模式下重试单条。",
-        ],
-    }
-
-
 @router.post("/candidates")
 def greeting_candidates(payload: GreetingCandidateRequest) -> dict:
     return build_greeting_candidates(_all_jobs(), payload.job_ids)
@@ -700,7 +696,7 @@ def greeting_candidates(payload: GreetingCandidateRequest) -> dict:
 
 @router.post("/validate")
 def validate_greetings(payload: GreetingValidateRequest) -> dict:
-    recent_messages = [str(record.get("message") or "") for record in load_send_records()]
+    recent_messages = [str(record.get("message") or "") for record in load_send_records() if not record.get("dryRun")]
     results = []
     for item in payload.items:
         validation = validate_greeting(item.message, recent_messages=recent_messages)
@@ -720,80 +716,25 @@ def validate_greetings(payload: GreetingValidateRequest) -> dict:
     }
 
 
-@router.post("/dry-run")
-def dry_run_greetings(payload: GreetingDryRunRequest) -> dict:
-    job_index = _jobs_by_id()
-    candidates = build_greeting_candidates(list(job_index.values()), payload.job_ids)
-    drafts = load_greetings()
-    records = []
-    for candidate in candidates["candidates"]:
-        job = job_index.get(candidate["jobId"])
-        if not job:
-            continue
-        message = generate_greeting(job, resume_summary=payload.resume_summary, style=payload.style)
-        record = build_greeting_record(job, message, status="draft", dry_run=True)
-        drafts[job.id] = message
-        save_send_record(job.id, record["status"], "dry-run 生成草稿，未真实发送", message=message, dry_run=True)
-        records.append(record)
-    save_greetings({str(k): str(v) for k, v in drafts.items()})
-    return {
-        "summary": {
-            "total": candidates["summary"]["total"],
-            "drafted": len(records),
-            "sent": 0,
-            "skipped": len(candidates["skipped"]),
-            "failed": sum(1 for item in records if item["status"] == "failed"),
-        },
-        "records": records,
-        "skipped": candidates["skipped"],
-    }
-
-
-def _append_application_history(job, status: str, previous: str, note: str) -> dict:
-    entry = {
-        "kind": "application",
-        "status": status,
-        "previous": previous,
-        "note": note,
-        "at": datetime.now().isoformat(),
-    }
-    job.status_history = [*(job.status_history or []), entry][-100:]
-    return entry
-
-
-def _save_jobs():
-    from app.routes.jobs import _save_jobs as jobs_save
-
-    jobs_save()
-
-
-def execute_browser_greeting(job, message: str) -> dict:
-    from app.services.boss_scraper import send_boss_greeting_sync
-
-    return send_boss_greeting_sync(job.source_url, message)
-
-
-def sleep_between_greetings(seconds: int) -> None:
-    time.sleep(max(0, min(int(seconds or 0), 30)))
-
-
-def _skip_item(job, reason: str) -> dict:
-    return {
-        "jobId": job.id,
-        "title": job.title,
-        "company": job.company,
-        "city": job.city,
-        "salary": job.salary,
-        "decisionStatus": job.decision_status,
-        "applicationStatus": job.application_status,
-        "jdReady": bool((job.jd_text or "").strip()),
-        "riskLevel": "high" if job.decision_status == "risky" else "normal",
-        "reason": reason,
-    }
 
 
 @router.post("/send")
-def send_greetings(payload: GreetingSendRequest) -> dict:
+def send_greetings_endpoint(payload: GreetingSendRequest, background_tasks: BackgroundTasks) -> dict:
+    return send_greetings(payload, background_tasks=background_tasks)
+
+
+def send_greetings(payload: GreetingSendRequest, background_tasks: BackgroundTasks | None = None) -> dict:
+    browser_auto = payload.mode == "browser_auto"
+    result = _send_greetings_impl(payload)
+    if browser_auto:
+        if background_tasks is not None:
+            background_tasks.add_task(close_browser_after_greeting_task)
+        else:
+            close_browser_after_greeting_task()
+    return result
+
+
+def _send_greetings_impl(payload: GreetingSendRequest) -> dict:
     if not payload.confirm:
         raise HTTPException(status_code=400, detail="发送前必须人工确认")
     if payload.mode not in {"manual_confirm", "browser_auto"}:
@@ -881,6 +822,7 @@ def send_greetings(payload: GreetingSendRequest) -> dict:
         job.application_note = "自动发送已完成" if payload.mode == "browser_auto" else "人工确认已打招呼"
         job.application_updated_at = datetime.now().isoformat()
         entry = _append_application_history(job, "greeted", previous, job.application_note)
+        job.status_history.append({"kind": "application", "status": "greeted", "previous": previous, "note": job.application_note, "time": job.application_updated_at})
         record = build_greeting_record(job, message, status="sent", dry_run=False)
         save_send_record(job.id, "sent", job.application_note, message=message, dry_run=False)
         records.append(record)

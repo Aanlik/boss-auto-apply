@@ -5,6 +5,7 @@ from app.services.system_health import run_health_check
 
 
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
+RETRY_EXECUTORS = {"greeting_send", "jd_enrich"}
 
 
 @router.get("/tasks")
@@ -87,13 +88,70 @@ def workflow_health_check() -> dict:
     return run_health_check()
 
 
+@router.delete("/tasks/failed")
+def clear_failed_workflow_tasks() -> dict:
+    return workflow_tasks.clear_recovery_tasks()
+
+
+@router.delete("/tasks/{task_id}")
+def delete_workflow_task(task_id: str) -> dict:
+    try:
+        return workflow_tasks.delete_task(task_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    except PermissionError:
+        raise HTTPException(status_code=409, detail="运行中的任务不能删除，请先终止或等待完成")
+
+
 @router.post("/tasks/{task_id}/retry", status_code=202)
 def retry_workflow_task(task_id: str, response: Response) -> dict:
     try:
+        source = workflow_tasks.get_task(task_id)
+        if not source:
+            raise ValueError("task not found")
+        if not source.get("retryable"):
+            raise PermissionError("task is not retryable")
+        if source.get("type") not in RETRY_EXECUTORS:
+            raise NotImplementedError("task retry executor not found")
         task, source = workflow_tasks.queue_retry_task(task_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="任务不存在")
     except PermissionError:
         raise HTTPException(status_code=409, detail="该任务不支持重试")
+    except NotImplementedError:
+        raise HTTPException(status_code=409, detail="该任务暂不支持自动重试，请处理后删除或清空")
+    result = None
+    try:
+        if source.get("type") == "greeting_send":
+            from app.routes.greetings import retry_failed_greetings
+
+            result = retry_failed_greetings(source["id"])
+        elif source.get("type") == "jd_enrich":
+            from app.routes.jobs import retry_failed_jd_details
+
+            result = retry_failed_jd_details(source["id"])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        workflow_tasks.fail_task(task["id"], str(exc), error_code="RETRY_FAILED", action="检查失败原因后再次重试")
+        raise HTTPException(status_code=500, detail=f"重试执行失败: {exc}")
+    if result is not None:
+        workflow_tasks.complete_task(task["id"], done=task.get("total"), message="重试已执行")
+        task = workflow_tasks.get_task(task["id"]) or task
     response.status_code = 202
-    return {"task": task, "sourceTask": source}
+    return {"task": task, "sourceTask": source, "result": result}
+
+
+@router.get("/selection")
+def get_selection() -> dict:
+    from app.services.workflow_persistence import load_selection
+    return {"selectedJobIds": load_selection()}
+
+
+@router.post("/selection")
+def save_selection(payload: dict) -> dict:
+    from app.services.workflow_persistence import save_selection as _save
+    ids = payload.get("selectedJobIds", [])
+    if not isinstance(ids, list):
+        raise HTTPException(status_code=400, detail="selectedJobIds must be a list")
+    return {"selectedJobIds": _save([str(i) for i in ids])}

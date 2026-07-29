@@ -1,4 +1,4 @@
-import type { AiFeedbackDomain, AiFeedbackRecord, AiFeedbackSummary, AiPreferenceProfile, ApplicationBoard, ApplicationFunnel, ApplicationStrategy, ApplicationTimeline, AssistantPromptVersionCompare, AssistantPromptVersions, BossCaptureFilters, BossFilterOptions, BossLoginStatus, CleanupConfirmResult, CleanupDryRun, CompanyBlacklistItem, DashboardSummary, DashboardTrendReport, DataQualityCenter, DataQualityRepairResult, DeepReportSections, DependencyAudit, DiagnosticCenter, FollowupReminder, GreetingAcceptancePlan, GreetingAcceptanceRecord, GreetingAutoSendSettings, GreetingCandidateResponse, GreetingDryRunResponse, GreetingFinalConfirmation, GreetingFollowups, GreetingFrequencyProfile, GreetingPreflight, GreetingProgress, GreetingRecoveryPanel, GreetingReplyRecord, GreetingSafetySummary, GreetingSelectorHealth, GreetingSendResponse, GreetingStats, GreetingTemplateEffectiveness, GreetingValidationResult, HelpCenter, InterviewPrep, JdQualityInsight, JobApplicationStatus, JobComparison, JobDecisionStatus, JobPosting, JobPoolQuality, JobSearchPreset, JobsImportWizard, MaintenanceLogEvent, OnboardingWizard, PdfTemplateRecommendation, PdfVisualRegression, PrivacyScan, ProviderConfig, ProviderPreset, RankingWeightTemplate, RankingWeights, ReleaseAcceptanceChecklist, ReleaseAcceptanceSuite, ReleaseCheckSuite, ReleaseNotes, ReleasePreflight, ReleaseRecord, ReleaseVersionSnapshot, ResumeRewriteAdvice, ResumeVersion, RiskExplanation, RuntimeModeStatus, StorageMigrationWizard, StorageStatus, UserPreferences, WeeklyReport, WorkflowCenter, WorkflowHealthCheck, WorkflowRuntimeTask } from "./types";
+import type { AiFeedbackDomain, AiFeedbackRecord, AiFeedbackSummary, AiPreferenceProfile, ApplicationBoard, ApplicationFunnel, ApplicationStrategy, ApplicationTimeline, AssistantPromptVersionCompare, AssistantPromptVersions, BossCaptureFilters, BossFilterOptions, BossLoginStatus, CompanyBlacklistItem, DashboardSummary, DashboardTrendReport, DataQualityCenter, DataQualityRepairResult, DeepReportSections, FollowupReminder, GreetingAcceptancePlan, GreetingAcceptanceRecord, GreetingAutoSendSettings, GreetingCandidateResponse, GreetingFinalConfirmation, GreetingFollowups, GreetingFrequencyProfile, GreetingPreflight, GreetingProgress, GreetingReplyRecord, GreetingSafetySummary, GreetingSelectorHealth, GreetingSendResponse, GreetingStats, GreetingTemplateEffectiveness, GreetingValidationResult, HelpCenter, InterviewPrep, JdQualityInsight, JobApplicationStatus, JobComparison, JobDecisionStatus, JobPosting, JobPoolQuality, JobSearchPreset, JobsImportWizard, OnboardingWizard, PdfTemplateRecommendation, ProviderConfig, ProviderPreset, RankingWeightTemplate, RankingWeights, ResumeRewriteAdvice, ResumeVersion, RiskExplanation, UserPreferences, WeeklyReport, WorkflowCenter, WorkflowHealthCheck, WorkflowRuntimeTask } from "./types";
 import { formatApiError } from "./workflowInsights";
 
 // ---------- 简历 ----------
@@ -17,7 +17,6 @@ export async function parseResumeFile(file: File): Promise<{
   form.append("file", file);
   return fetchJson("/api/resumes/parse", { method: "POST", body: form });
 }
-
 
 // ---------- 岗位 ----------
 
@@ -107,7 +106,7 @@ export async function bossLogin(): Promise<{ status: string; message: string }> 
   return fetchJson("/api/jobs/capture/boss/login", { method: "POST" });
 }
 
-export async function enrichJdDetails(payload: { job_ids?: string[]; max_jobs?: number } = {}): Promise<{ enriched: number; message: string }> {
+export async function enrichJdDetails(payload: { job_ids?: string[]; max_jobs?: number; force?: boolean } = {}): Promise<{ enriched: number; skipped_existing_jd?: number; message: string }> {
   return fetchJson("/api/jobs/enrich-jd", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -314,6 +313,14 @@ export async function retryWorkflowTask(taskId: string): Promise<{ task: Workflo
   return fetchJson(`/api/workflow/tasks/${taskId}/retry`, { method: "POST" });
 }
 
+export async function clearFailedWorkflowTasks(): Promise<{ removed: number; remaining: number }> {
+  return fetchJson("/api/workflow/tasks/failed", { method: "DELETE" });
+}
+
+export async function deleteWorkflowTask(taskId: string): Promise<{ deleted: boolean; task: WorkflowRuntimeTask; remaining: number }> {
+  return fetchJson(`/api/workflow/tasks/${taskId}`, { method: "DELETE" });
+}
+
 export async function getDashboardSummary(): Promise<DashboardSummary> {
   return fetchJson("/api/dashboard/summary");
 }
@@ -322,7 +329,7 @@ export async function getOnboardingGuide(): Promise<import("./types").Onboarding
   return fetchJson("/api/dashboard/onboarding");
 }
 
-export async function getOnboardingWizard(): Promise<OnboardingWizard> {
+export async function getOnboardingWizard(): Promise<import("./types").OnboardingWizard> {
   return fetchJson("/api/dashboard/onboarding/wizard");
 }
 
@@ -420,6 +427,15 @@ export async function compareAssistantPromptVersions(jobId = "", kind = "deep_re
   return fetchJson(`/api/assistant/prompt-versions/compare?${qs.toString()}`);
 }
 
+export async function clearAssistantPromptVersions(kind = ""): Promise<{ deleted: number; remaining: number }> {
+  const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+  return fetchJson(`/api/assistant/prompt-versions${query}`, { method: "DELETE" });
+}
+
+export async function deleteAssistantPromptVersion(recordId: string): Promise<{ deleted: boolean; remaining: number }> {
+  return fetchJson(`/api/assistant/prompt-versions/${encodeURIComponent(recordId)}`, { method: "DELETE" });
+}
+
 export function exportAssistantDeepReportUrl(jobId = "", format: "md" | "json" | "pdf" = "md"): string {
   const qs = new URLSearchParams();
   if (jobId) qs.set("job_id", jobId);
@@ -455,184 +471,6 @@ export async function getAiFeedbackSummary(): Promise<AiFeedbackSummary> {
 
 export async function getAiPreferenceProfile(): Promise<AiPreferenceProfile> {
   return fetchJson("/api/feedback/preference-profile");
-}
-
-export async function exportFullBackup(): Promise<unknown> {
-  return fetchJson("/api/maintenance/backup/export");
-}
-
-export async function exportRedactedBackup(): Promise<unknown> {
-  return fetchJson("/api/maintenance/backup/export-redacted");
-}
-
-export async function importFullBackup(payload: unknown): Promise<{ restored: number; skipped: number }> {
-  return fetchJson("/api/maintenance/backup/import", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function previewRestoreDrill(backup: unknown): Promise<{ kind: string; valid: boolean; wouldRestore: number; wouldOverwrite: number; files: Array<{ path: string; exists: boolean; willOverwrite: boolean }>; rejected: Array<Record<string, unknown>> }> {
-  return fetchJson("/api/maintenance/backup/restore-drill", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ backup }),
-  });
-}
-
-export async function getMaintenanceLogs(level = "", limit = 50): Promise<{ events: MaintenanceLogEvent[] }> {
-  const qs = new URLSearchParams();
-  if (level) qs.set("level", level);
-  qs.set("limit", String(limit));
-  return fetchJson(`/api/maintenance/logs?${qs.toString()}`);
-}
-
-export async function getRetentionPreview(): Promise<{ expiredJobs: number; failedTasks: number; resumeFiles: number; archivePath: string }> {
-  return fetchJson("/api/maintenance/retention/preview");
-}
-
-export async function getRetentionRules(): Promise<{ suspectAfterDays: number; archiveAfterDays: number; autoArchiveEnabled: boolean }> {
-  return fetchJson("/api/maintenance/retention/rules");
-}
-
-export async function applyRetentionRules(payload: { suspect_after_days?: number; archive_after_days?: number; auto_archive_enabled?: boolean } = {}): Promise<{ markedSuspected: number; archivedJobs: number; preview: unknown }> {
-  return fetchJson("/api/maintenance/retention/rules/apply", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function cleanupRetention(payload: { archive_expired_jobs?: boolean } = {}): Promise<{ archivedJobs: number; preview: unknown }> {
-  return fetchJson("/api/maintenance/retention/cleanup", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function getCleanupDryRun(): Promise<CleanupDryRun> {
-  return fetchJson("/api/maintenance/cleanup/dry-run");
-}
-
-export async function confirmCleanup(payload: { archive_expired_jobs?: boolean; archive_failed_tasks?: boolean; archive_resume_chats?: boolean } = {}): Promise<CleanupConfirmResult> {
-  return fetchJson("/api/maintenance/cleanup/confirm", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function getStorageStatus(): Promise<StorageStatus> {
-  return fetchJson("/api/maintenance/storage");
-}
-
-export async function getReleasePreflight(): Promise<ReleasePreflight> {
-  return fetchJson("/api/maintenance/release/preflight");
-}
-
-export async function getReleaseCheckSuite(): Promise<ReleaseCheckSuite> {
-  return fetchJson("/api/maintenance/release/check-suite");
-}
-
-export async function getProductionGuard(): Promise<{ mode: string; status: "ok" | "warn" | "error"; locked: boolean; checks: Array<{ key: string; label: string; status: "ok" | "warn" | "error"; message: string; action: string }>; summary: { total: number; ok: number; warn: number }; generatedAt: string }> {
-  return fetchJson("/api/maintenance/release/production-guard");
-}
-
-export async function getOnlineReport(): Promise<{ kind: string; status: "ok" | "warn" | "error"; generatedAt: string; checks: Array<Record<string, unknown>>; nextActions: string[] }> {
-  return fetchJson("/api/maintenance/release/online-report");
-}
-
-export async function getReleaseAcceptanceSuite(): Promise<ReleaseAcceptanceSuite> {
-  return fetchJson("/api/maintenance/release/acceptance-suite");
-}
-
-export async function getReleaseVersionSnapshot(): Promise<ReleaseVersionSnapshot> {
-  return fetchJson("/api/maintenance/release/version-snapshot");
-}
-
-export async function listReleaseRecords(): Promise<{ records: ReleaseRecord[]; total: number }> {
-  return fetchJson("/api/maintenance/release/records");
-}
-
-export async function createReleaseRecord(payload: { version?: string; operator?: string; decision?: "ready" | "hold" | "review"; notes?: string[] }): Promise<{ record: ReleaseRecord; total: number }> {
-  return fetchJson("/api/maintenance/release/records", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function getReleaseManifest(): Promise<import("./types").ReleaseManifest> {
-  return fetchJson("/api/maintenance/release/manifest");
-}
-
-export async function getReleaseNotes(): Promise<ReleaseNotes> {
-  return fetchJson("/api/maintenance/release/notes");
-}
-
-export async function getReleaseAcceptanceChecklist(): Promise<ReleaseAcceptanceChecklist> {
-  return fetchJson("/api/maintenance/release/acceptance");
-}
-
-export async function getSecurityAudit(): Promise<import("./types").SecurityAudit> {
-  return fetchJson("/api/maintenance/security/audit");
-}
-
-export async function getPrivacyScan(): Promise<PrivacyScan> {
-  return fetchJson("/api/maintenance/security/privacy-scan");
-}
-
-export async function getDiagnosticCenter(): Promise<DiagnosticCenter> {
-  return fetchJson("/api/maintenance/diagnostics/center");
-}
-
-export async function runDependencyAudit(dryRun = false): Promise<DependencyAudit> {
-  return fetchJson(`/api/maintenance/security/dependency-audit?dry_run=${dryRun ? "true" : "false"}`);
-}
-
-export async function getPdfVisualRegression(): Promise<PdfVisualRegression> {
-  return fetchJson("/api/maintenance/release/pdf-visual-regression");
-}
-
-export async function migrateStorageToSqlite(): Promise<unknown> {
-  return fetchJson("/api/maintenance/storage/migrate", { method: "POST" });
-}
-
-export async function rollbackStorageToJson(): Promise<unknown> {
-  return fetchJson("/api/maintenance/storage/rollback", { method: "POST" });
-}
-
-export async function backupStorage(): Promise<{ path: string; size: number; createdAt: string }> {
-  return fetchJson("/api/maintenance/storage/backup", { method: "POST" });
-}
-
-export async function getStorageMigrationWizard(): Promise<StorageMigrationWizard> {
-  return fetchJson("/api/maintenance/storage/migration-wizard");
-}
-
-export async function previewStorageRestore(path: string): Promise<{ valid: boolean; path: string; integrity: string; schemaVersion: number; message?: string }> {
-  return fetchJson("/api/maintenance/storage/restore-preview", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  });
-}
-
-export async function setPrimaryStorage(activeStore: "json" | "sqlite"): Promise<unknown> {
-  return fetchJson("/api/maintenance/storage/primary", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ active_store: activeStore }),
-  });
-}
-
-export async function getApiLogs(category = "", limit = 100): Promise<{ logs: Array<{ id: string; time: string; category: string; method: string; url: string; statusCode: number; durationMs: number }> }> {
-  const qs = new URLSearchParams();
-  if (category) qs.set("category", category);
-  qs.set("limit", String(limit));
-  return fetchJson(`/api/maintenance/api-logs?${qs.toString()}`);
 }
 
 export async function getGreetingDrafts(): Promise<{ greetings: Record<string, string> }> {
@@ -717,10 +555,6 @@ export async function getGreetingFollowups(): Promise<GreetingFollowups> {
   return fetchJson("/api/greetings/followups");
 }
 
-export async function getGreetingRecoveryPanel(): Promise<GreetingRecoveryPanel> {
-  return fetchJson("/api/greetings/recovery-panel");
-}
-
 export async function getGreetingAcceptanceRecords(): Promise<{ summary: { total: number }; records: GreetingAcceptanceRecord[] }> {
   return fetchJson("/api/greetings/acceptance-records");
 }
@@ -773,14 +607,6 @@ export async function validateGreetingMessages(items: Array<{ job_id: string; me
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ items }),
-  });
-}
-
-export async function dryRunGreetings(payload: { job_ids: string[]; resume_summary?: string; style?: string }): Promise<GreetingDryRunResponse> {
-  return fetchJson("/api/greetings/dry-run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
   });
 }
 
@@ -893,7 +719,7 @@ export async function evaluateResume(profile: unknown, resumeText = "", chatHist
   });
 }
 
-export async function analyzeJD(payload: { title: string; company: string; jd_text: string }, chatHistory?: Array<{role: string; content: string}>): Promise<import("./types").JDAnalysis> {
+export async function analyzeJD(payload: { job_id?: string; title: string; company: string; jd_text: string }, chatHistory?: Array<{role: string; content: string}>): Promise<import("./types").JDAnalysis> {
   return fetchJson("/api/resumes/analyze-jd", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -921,6 +747,9 @@ export async function aiOptimizeResume(
   });
 }
 
+export async function listResumeOptimizations(): Promise<{ optimizations: Record<string, import("./types").ResumeOptimizationResult>; total: number }> {
+  return fetchJson("/api/resumes/optimizations");
+}
 
 // === 附件管理 ===
 export async function loadResume(fileId: string): Promise<{
@@ -955,7 +784,6 @@ export async function deleteUploadedFile(fileId: string): Promise<{ deleted: str
   return fetchJson(`/api/resumes/files/${fileId}`, { method: "DELETE" });
 }
 
-
 export async function reEnrichResume(): Promise<{ status: string; message: string }> {
   return fetchJson("/api/resumes/re-enrich", { method: "POST" });
 }
@@ -967,7 +795,6 @@ export async function updateProfile(profile: unknown, fileId?: string): Promise<
     body: JSON.stringify({ profile, file_id: fileId || "" }),
   });
 }
-
 
 // === 设置 ===
 export async function getProviderConfig(): Promise<ProviderConfig> {
@@ -1166,18 +993,6 @@ export async function importSettings(payload: unknown): Promise<{ imported: stri
 
 export async function getUserPreferences(): Promise<{ preferences: UserPreferences }> {
   return fetchJson("/api/settings/preferences");
-}
-
-export async function getRuntimeMode(): Promise<RuntimeModeStatus> {
-  return fetchJson("/api/settings/runtime-mode");
-}
-
-export async function saveRuntimeMode(mode: RuntimeModeStatus["mode"]): Promise<RuntimeModeStatus> {
-  return fetchJson("/api/settings/runtime-mode", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode }),
-  });
 }
 
 export async function saveUserPreferences(preferences: UserPreferences): Promise<{ preferences: UserPreferences }> {

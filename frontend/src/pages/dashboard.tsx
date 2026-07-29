@@ -1,9 +1,58 @@
-import { useEffect, useState } from "react";
-import { compareAssistantPromptVersions, editAssistantDeepReport, exportAssistantDeepReportUrl, getAiFeedbackSummary, getApplicationBoard, getApplicationFunnel, getApplicationStrategy, getApplicationTimeline, getAssistantDeepReport, getAssistantPromptVersions, getDashboardSummary, getDashboardTrends, getDataQualityCenter, getDiligenceReports, getFollowups, getGreetingTemplateEffectiveness, getInterviewPrep, getJdQuality, getOnboardingGuide, getRankingResults, getReviewCenter, getResumeRewriteAdvice, getRiskExplanation, getWeeklyReport, getWorkflowCenter, listJobPool, moveApplicationBoardJob, repairDataQuality } from "../lib/api";
+import { useEffect, useRef, useState } from "react";
+import { clearAssistantPromptVersions, compareAssistantPromptVersions, deleteAssistantPromptVersion, editAssistantDeepReport, exportAssistantDeepReportUrl, getAiFeedbackSummary, getApplicationBoard, getApplicationFunnel, getApplicationStrategy, getApplicationTimeline, getAssistantDeepReport, getAssistantPromptVersions, getDashboardSummary, getDashboardTrends, getDataQualityCenter, getDiligenceReports, getFollowups, getGreetingTemplateEffectiveness, getInterviewPrep, getJdQuality, getOnboardingGuide, getRankingResults, getReviewCenter, getResumeRewriteAdvice, getRiskExplanation, getWeeklyReport, getWorkflowCenter, listJobPool, moveApplicationBoardJob, repairDataQuality } from "../lib/api";
 import { useWorkflowState } from "../lib/store";
+import { ensureDashboardPanelVisible } from "../lib/dashboardPanels";
 import type { AiFeedbackSummary, ApplicationBoard, ApplicationFunnel, ApplicationStrategy, ApplicationTimeline, AssistantPromptVersionCompare, AssistantPromptVersions, DashboardSummary, DashboardTrendReport, DataQualityCenter, DeepReportSections, FollowupReminder, GreetingTemplateEffectiveness, InterviewPrep, JdQualityInsight, JobApplicationStatus, JobPosting, OnboardingGuide, ReviewCenter, ResumeRewriteAdvice, RiskExplanation, WeeklyReport, WorkflowCenter } from "../lib/types";
 import { ErrorBanner, Spinner } from "../components/SharedUI";
 import AiFeedbackButtons from "../components/AiFeedbackButtons";
+
+type DashboardPanelKey =
+  | "readiness" | "metrics" | "trends" | "onboarding" | "quality"
+  | "actions" | "funnel" | "templateEffectiveness" | "board" | "weekly"
+  | "workflow" | "timeline" | "assistant" | "followups" | "promptVersions"
+  | "review";
+
+const DASHBOARD_PANEL_LABELS: Record<DashboardPanelKey, string> = {
+  readiness: "流程引导",
+  metrics: "指标概览",
+  trends: "30天趋势",
+  onboarding: "新手引导",
+  quality: "数据质量",
+  actions: "下一步建议",
+  funnel: "转化复盘",
+  templateEffectiveness: "招呼语效果",
+  board: "CRM 看板",
+  weekly: "求职周报",
+  workflow: "任务中心",
+  timeline: "投递时间线",
+  assistant: "智能助理",
+  followups: "跟进提醒",
+  promptVersions: "AI 版本记录",
+  review: "复盘中心",
+};
+
+const DEFAULT_PANEL_ORDER: DashboardPanelKey[] = [
+  "readiness", "metrics", "trends", "onboarding", "quality",
+  "actions", "funnel", "templateEffectiveness", "board", "weekly",
+  "workflow", "timeline", "assistant", "followups", "promptVersions",
+  "review",
+];
+
+const PANEL_STORAGE_KEY = "boss-dashboard-panel-config";
+
+function loadDashboardPanelConfig(): { order: DashboardPanelKey[]; hidden: DashboardPanelKey[] } {
+  try {
+    const raw = localStorage.getItem(PANEL_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const order = (parsed.order || DEFAULT_PANEL_ORDER).filter((k: string) => k in DASHBOARD_PANEL_LABELS);
+      const hidden = (parsed.hidden || []).filter((k: string) => k in DASHBOARD_PANEL_LABELS);
+      for (const key of DEFAULT_PANEL_ORDER) { if (!order.includes(key)) order.push(key); }
+      return { order, hidden };
+    }
+  } catch {}
+  return { order: [...DEFAULT_PANEL_ORDER], hidden: [] };
+}
 
 
 const statusOptions: Array<{ key: JobApplicationStatus; label: string }> = [
@@ -49,6 +98,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
   const [reportStatus, setReportStatus] = useState("");
   const [qualityRepairStatus, setQualityRepairStatus] = useState("");
   const [error, setError] = useState("");
+  const [panelConfig, setPanelConfig] = useState(loadDashboardPanelConfig);
+  const [showPanelCustomizer, setShowPanelCustomizer] = useState(false);
+  const [promptVersionsCollapsed, setPromptVersionsCollapsed] = useState(true);
+  const [promptVersionsRefreshing, setPromptVersionsRefreshing] = useState(false);
+  const reviewPanelRef = useRef<HTMLDivElement | null>(null);
 
   async function loadSummary() {
     setLoading(true);
@@ -96,6 +150,66 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
   useEffect(() => {
     loadSummary();
   }, []);
+
+  async function refreshPromptVersions(silent = false) {
+    if (!silent) setPromptVersionsRefreshing(true);
+    try {
+      setPromptVersions(await getAssistantPromptVersions("deep_report"));
+    } catch (err) {
+      if (!silent) setError(err instanceof Error ? err.message : "AI 版本记录刷新失败");
+    } finally {
+      if (!silent) setPromptVersionsRefreshing(false);
+    }
+  }
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      refreshPromptVersions(true);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+
+  function togglePanelHidden(key: DashboardPanelKey) {
+    setPanelConfig(prev => {
+      const hidden = prev.hidden.includes(key) ? prev.hidden.filter(k => k !== key) : [...prev.hidden, key];
+      const next = { ...prev, hidden };
+      localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function movePanel(key: DashboardPanelKey, direction: number) {
+    setPanelConfig(prev => {
+      const order = [...prev.order];
+      const idx = order.indexOf(key);
+      const newIdx = idx + direction;
+      if (newIdx < 0 || newIdx >= order.length) return prev;
+      [order[idx], order[newIdx]] = [order[newIdx], order[idx]];
+      const next = { ...prev, order };
+      localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function panelVisible(key: DashboardPanelKey): boolean {
+    return !panelConfig.hidden.includes(key);
+  }
+
+  function panelOrder(key: DashboardPanelKey): number {
+    return panelConfig.order.indexOf(key);
+  }
+
+  function showReviewPanel() {
+    setPanelConfig(prev => {
+      const next = ensureDashboardPanelVisible(prev, "review");
+      localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+    window.setTimeout(() => {
+      reviewPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  }
 
   const focusJob = jobs.find(job => workflow.selectedJobIds.includes(job.id)) || jobs[0] || null;
 
@@ -185,6 +299,27 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
     }
   }
 
+  async function onDeletePromptVersion(recordId: string) {
+    try {
+      await deleteAssistantPromptVersion(recordId);
+      if (promptCompare?.versions.some(item => item.id === recordId)) setPromptCompare(null);
+      await refreshPromptVersions(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除版本记录失败");
+    }
+  }
+
+  async function onClearPromptVersions() {
+    if (!confirm("确定清空 AI 版本记录？此操作只清理记录列表，不影响已生成的报告。")) return;
+    try {
+      await clearAssistantPromptVersions("deep_report");
+      setPromptCompare(null);
+      await refreshPromptVersions(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "清空版本记录失败");
+    }
+  }
+
   return (
     <section className="page-shell">
       <div className="page-heading">
@@ -196,12 +331,38 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
         <button type="button" className="button-secondary" onClick={loadSummary}>刷新</button>
       </div>
 
+
+      <div className="toolbar-row" style={{ marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <button type="button" className="button-quiet" onClick={() => setShowPanelCustomizer(v => !v)} style={{ fontSize: 12 }}>
+          {showPanelCustomizer ? "完成自定义" : "⚙ 自定义面板"}
+        </button>
+      </div>
+      {showPanelCustomizer && (
+        <div className="panel panel-strong" style={{ marginBottom: 12 }}>
+          <div className="panel-inner" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span className="page-kicker" style={{ marginRight: 4 }}>面板管理</span>
+            {panelConfig.order.map((key, index) => {
+              const hidden = panelConfig.hidden.includes(key);
+              return (
+                <span key={key} className="tag" style={{ opacity: hidden ? 0.4 : 1, display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px" }}>
+                  <input type="checkbox" checked={!hidden} onChange={() => togglePanelHidden(key)} style={{ margin: 0, cursor: "pointer" }} title={hidden ? "显示" : "隐藏"} />
+                  <span style={{ fontSize: 12 }}>{DASHBOARD_PANEL_LABELS[key]}</span>
+                  <button type="button" className="button-quiet" disabled={index === 0} onClick={() => movePanel(key, -1)} style={{ padding: "0 2px", fontSize: 10, lineHeight: 1, cursor: index === 0 ? "default" : "pointer" }}>↑</button>
+                  <button type="button" className="button-quiet" disabled={index === panelConfig.order.length - 1} onClick={() => movePanel(key, 1)} style={{ padding: "0 2px", fontSize: 10, lineHeight: 1, cursor: index === panelConfig.order.length - 1 ? "default" : "pointer" }}>↓</button>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}
       {loading && <div className="panel panel-strong"><div className="panel-inner"><Spinner text="正在加载仪表盘..." /></div></div>}
 
       {summary && (
-        <>
-          <div className="readiness-panel">
+        <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+          {panelVisible("readiness") && (
+          <div className="readiness-panel" style={{ order: panelOrder("readiness") }}>
             <div className="readiness-panel__main">
               <span className="page-kicker">上线级流程引导</span>
               <h3>{stageLabel(summary.readiness.stage)}</h3>
@@ -236,19 +397,22 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
               )}
             </div>
           </div>
+          )}
 
-          <div className="dashboard-metric-grid">
+          {panelVisible("metrics") && (
+          <div className="dashboard-metric-grid" style={{ order: panelOrder("metrics") }}>
             <MetricCard title="岗位总数" value={summary.jobs.total} action="查看岗位" onClick={() => onNavigate?.("jobs")} />
             <MetricCard title="待补 JD" value={summary.jobs.missingJd} tone={summary.jobs.missingJd > 0 ? "warn" : "ok"} action="补全 JD" onClick={() => onNavigate?.("jobs")} />
             <MetricCard title="待尽调公司" value={summary.diligence.pendingCompanies} tone={summary.diligence.pendingCompanies > 0 ? "warn" : "ok"} action="进入尽调" onClick={() => onNavigate?.("diligence")} />
             <MetricCard title="推荐岗位" value={summary.decisions.recommended || summary.ranking.recommended} tone="ok" action="查看排序" onClick={() => onNavigate?.("ranking")} />
             <MetricCard title="风险岗位" value={summary.decisions.risky + summary.jobs.blacklisted} tone={summary.decisions.risky + summary.jobs.blacklisted > 0 ? "danger" : "ok"} action="复核风险" onClick={() => onNavigate?.("jobs")} />
             <MetricCard title="疑似过期" value={summary.jobs.suspectedExpired} tone={summary.jobs.suspectedExpired > 0 ? "warn" : "ok"} action="清理维护" onClick={() => onNavigate?.("jobs")} />
-            <MetricCard title="AI 反馈" value={feedbackSummary?.summary.total || 0} tone={(feedbackSummary?.summary.notUseful || 0) > 0 ? "warn" : "neutral"} action={`${feedbackSummary?.summary.notUseful || 0} 条需改`} onClick={() => onNavigate?.("dashboard")} />
+            <MetricCard title="AI 反馈" value={feedbackSummary?.summary.total || 0} tone={(feedbackSummary?.summary.notUseful || 0) > 0 ? "warn" : "neutral"} action={`${feedbackSummary?.summary.notUseful || 0} 条需改`} onClick={showReviewPanel} />
           </div>
+          )}
 
-          {trendReport && (
-            <div className="panel panel-strong">
+          {panelVisible("trends") && trendReport && (
+            <div className="panel panel-strong" style={{ order: panelOrder("trends") }}>
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
@@ -286,8 +450,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
             </div>
           )}
 
-          {onboarding && (
-            <div className="panel panel-strong">
+          {panelVisible("onboarding") && onboarding && (
+            <div className="panel panel-strong" style={{ order: panelOrder("onboarding") }}>
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
@@ -318,8 +482,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
             </div>
           )}
 
-          {dataQuality && (
-            <div className="panel panel-strong">
+          {panelVisible("quality") && dataQuality && (
+            <div className="panel panel-strong" style={{ order: panelOrder("quality") }}>
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
@@ -343,7 +507,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
             </div>
           )}
 
-          <div className="panel panel-strong">
+          {panelVisible("actions") && (
+          <div className="panel panel-strong" style={{ order: panelOrder("actions") }}>
             <div className="panel-inner">
               <div className="page-section__top">
                 <div>
@@ -361,9 +526,10 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
               </div>
             </div>
           </div>
+          )}
 
-          {funnel && (
-            <div className="panel panel-strong">
+          {panelVisible("funnel") && funnel && (
+            <div className="panel panel-strong" style={{ order: panelOrder("funnel") }}>
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
@@ -386,8 +552,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
             </div>
           )}
 
-          {templateEffectiveness && (
-            <div className="panel panel-strong">
+          {panelVisible("templateEffectiveness") && templateEffectiveness && (
+            <div className="panel panel-strong" style={{ order: panelOrder("templateEffectiveness") }}>
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
@@ -414,8 +580,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
             </div>
           )}
 
-          {applicationBoard && (
-            <div className="panel panel-strong">
+          {panelVisible("board") && applicationBoard && (
+            <div className="panel panel-strong" style={{ order: panelOrder("board") }}>
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
@@ -475,8 +641,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
             </div>
           )}
 
-          {weeklyReport && (
-            <div className="panel panel-strong">
+          {panelVisible("weekly") && weeklyReport && (
+            <div className="panel panel-strong" style={{ order: panelOrder("weekly") }}>
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
@@ -511,7 +677,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
             </div>
           )}
 
-          <div className="dashboard-ops-grid">
+          <div className="dashboard-ops-grid" style={{ order: Math.min(panelOrder("workflow"), panelOrder("timeline")), display: (!panelVisible("workflow") && !panelVisible("timeline")) ? "none" : undefined }}>
+            {panelVisible("workflow") && (
             <div className="panel panel-strong">
               <div className="panel-inner">
                 <div className="page-section__top">
@@ -564,7 +731,9 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 )}
               </div>
             </div>
+            )}
 
+            {panelVisible("timeline") && (
             <div className="panel panel-strong">
               <div className="panel-inner">
                 <div className="page-section__top">
@@ -589,9 +758,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 )}
               </div>
             </div>
+            )}
           </div>
 
-          <div className="assistant-grid">
+          <div className="assistant-grid" style={{ order: Math.min(panelOrder("assistant"), panelOrder("followups"), panelOrder("promptVersions")), display: (!panelVisible("assistant") && !panelVisible("followups") && !panelVisible("promptVersions")) ? "none" : undefined }}>
+            {panelVisible("assistant") && (
             <div className="panel panel-strong">
               <div className="panel-inner">
                 <div className="page-section__top">
@@ -659,7 +830,9 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 )}
               </div>
             </div>
+            )}
 
+            {panelVisible("followups") && (
             <div className="panel panel-strong">
               <div className="panel-inner">
                 <div className="page-kicker">跟进提醒</div>
@@ -678,7 +851,9 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 )}
               </div>
             </div>
+            )}
 
+            {panelVisible("promptVersions") && (
             <div className="panel panel-strong">
               <div className="panel-inner">
                 <div className="page-section__top">
@@ -686,9 +861,20 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                     <div className="page-kicker">AI 版本记录</div>
                     <p className="capture-panel-copy">记录深度报告使用的提示词版本和反馈快照。</p>
                   </div>
-                  <span className="tag tag--muted">记录 {promptVersions?.summary.total || 0}</span>
+                  <div className="toolbar-strip">
+                    <span className="tag tag--muted">记录 {promptVersions?.summary.total || 0}</span>
+                    <button type="button" className="button-secondary button-secondary--sm" disabled={promptVersionsRefreshing} onClick={() => refreshPromptVersions()}>
+                      {promptVersionsRefreshing ? "刷新中..." : "刷新"}
+                    </button>
+                    <button type="button" className="button-secondary button-secondary--sm" onClick={() => setPromptVersionsCollapsed(prev => !prev)}>
+                      {promptVersionsCollapsed ? "展开" : "折叠"}
+                    </button>
+                    <button type="button" className="button-quiet button-danger" disabled={!promptVersions?.versions.length} onClick={onClearPromptVersions}>
+                      清空
+                    </button>
+                  </div>
                 </div>
-                {promptVersions && promptVersions.versions.length > 0 ? (
+                {!promptVersionsCollapsed && promptVersions && promptVersions.versions.length > 0 ? (
                   <div className="prompt-version-list">
                     {promptVersions.versions.slice(0, 5).map(item => (
                       <div key={item.id} className="prompt-version-item">
@@ -696,14 +882,22 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                         <span>{item.promptVersion} · 偏好信号 {item.payloadSummary.preferenceSignals}</span>
                         <p>{item.feedbackGuidance.recentNotes?.[0] || item.promptPreview}</p>
                         <time>{item.createdAt.replace("T", " ").slice(0, 19)}</time>
-                        <button type="button" className="button-secondary button-secondary--sm" onClick={() => loadPromptCompare(item.jobId)}>对比版本</button>
+                        <div className="prompt-version-item__actions">
+                          <button type="button" className="button-secondary button-secondary--sm" onClick={() => loadPromptCompare(item.jobId)}>对比版本</button>
+                          <button type="button" className="button-quiet button-danger" onClick={() => onDeletePromptVersion(item.id)}>删除</button>
+                        </div>
                       </div>
                     ))}
+                    {promptVersions.versions.length > 5 && (
+                      <p className="assistant-empty">已收起其余 {promptVersions.versions.length - 5} 条，清理后可减少展示噪音。</p>
+                    )}
                   </div>
+                ) : promptVersionsCollapsed ? (
+                  <p className="assistant-empty">版本记录已折叠，点击展开查看最近记录。</p>
                 ) : (
                   <p className="assistant-empty">暂无 AI 提示词版本记录。生成深度报告后会自动沉淀。</p>
                 )}
-                {promptCompare && (
+                {!promptVersionsCollapsed && promptCompare && (
                   <div className="prompt-version-compare">
                     <strong>{promptCompare.summary.comparable ? "可对比" : "版本不足"}</strong>
                     <span>版本 {promptCompare.summary.totalVersions} · 偏好信号差 {promptCompare.differences.preferenceSignalDelta}</span>
@@ -712,10 +906,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 )}
               </div>
             </div>
+            )}
           </div>
 
-          {reviewCenter && (
-            <div className="panel panel-strong">
+          {panelVisible("review") && reviewCenter && (
+            <div ref={reviewPanelRef} className="panel panel-strong" style={{ order: panelOrder("review") }}>
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
@@ -730,7 +925,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
               </div>
             </div>
           )}
-        </>
+        </div>
       )}
     </section>
   );

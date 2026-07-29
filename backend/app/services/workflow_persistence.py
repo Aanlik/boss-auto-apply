@@ -12,7 +12,10 @@ def _default_data_dir() -> Path:
     configured = os.environ.get("BOSS_WORKBENCH_DATA_DIR", "").strip()
     if configured:
         return Path(configured).expanduser()
-    return Path(__file__).resolve().parents[3] / "data"
+    # 始终使用用户主目录，确保 PyInstaller 打包和开发模式下数据都持久化
+    data_dir = Path.home() / ".boss-auto-apply"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
 
 
 DATA_DIR = _default_data_dir()
@@ -150,6 +153,16 @@ def save_greetings(greetings: dict[str, str]) -> dict[str, str]:
 def load_greetings() -> dict[str, str]:
     data = _read_json(DATA_DIR / "greetings" / "drafts.json", {})
     return data if isinstance(data, dict) else {}
+
+
+def save_selection(selected_job_ids: list[str]) -> list[str]:
+    _write_json(DATA_DIR / "workflow" / "selection.json", selected_job_ids)
+    return selected_job_ids
+
+
+def load_selection() -> list[str]:
+    data = _read_json(DATA_DIR / "workflow" / "selection.json", [])
+    return data if isinstance(data, list) else []
 
 
 def save_send_record(job_id: str, status: str, note: str = "", message: str = "", dry_run: bool = False) -> dict:

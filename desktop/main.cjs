@@ -116,7 +116,7 @@ function createWindow(port) {
     height: 900,
     minWidth: 1080,
     minHeight: 720,
-    title: "boss 直聘求职端自动化",
+    title: "boss 求职助手",
     backgroundColor: "#f7f8fb",
     webPreferences: {
       nodeIntegration: false,
@@ -132,7 +132,7 @@ async function boot() {
     const port = await startBackend();
     createWindow(port);
   } catch (error) {
-    dialog.showErrorBox("boss 直聘求职端自动化启动失败", error instanceof Error ? error.message : String(error));
+    dialog.showErrorBox("boss 求职助手启动失败", error instanceof Error ? error.message : String(error));
     app.quit();
   }
 }

@@ -1,27 +1,12 @@
-"""
-岗位接入服务：捕获 → 识别 → 去重 → 输出。
-"""
+"""岗位接入服务：捕获、识别、去重、输出。"""
 from __future__ import annotations
+
 from app.models.job import JobRecord
 from app.services.job_capture import (
     jobs_from_source, jobs_from_manual_payload,
-    capture_sample_jobs, capture_from_boss,
+    capture_from_boss,
 )
 from app.services.job_recognition import recognize_job
-
-
-def ingest_sample_jobs(existing_dedupe_keys: set[str] | None = None) -> list[JobRecord]:
-    """从示例数据接入岗位，跳过已有重复。"""
-    existing = existing_dedupe_keys or set()
-    sources = capture_sample_jobs()
-    jobs: list[JobRecord] = []
-    for source in sources:
-        if source.dedupe_key in existing:
-            continue
-        job = jobs_from_source(source)
-        job = recognize_job(job)
-        jobs.append(job)
-    return jobs
 
 
 def ingest_from_boss(

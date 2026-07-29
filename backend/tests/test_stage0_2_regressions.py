@@ -90,6 +90,79 @@ def test_jobs_from_source_preserves_captured_tags_as_keywords():
     assert {"3-5年", "本科", "100-499人", "B轮"}.issubset(set(job.keywords))
 
 
+def test_analyze_jd_persists_result_on_job_record(monkeypatch):
+    import app.routes.jobs as jobs_route
+    import app.routes.resumes as resumes_route
+    from app.models.job import JobRecord
+    from app.models.resume import JDAnalysis
+
+    jobs_route._job_store.clear()
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        jd_text="负责产品规划和跨部门项目推进",
+    )
+    monkeypatch.setattr(jobs_route, "_save_jobs", lambda: None)
+    monkeypatch.setattr(
+        resumes_route,
+        "analyze_jd",
+        lambda *args, **kwargs: JDAnalysis(
+            must_have_skills=["产品规划"],
+            summary_text="负责产品规划和项目推进",
+        ),
+    )
+
+    client = TestClient(app)
+    response = client.post("/api/resumes/analyze-jd", json={
+        "job_id": "job-1",
+        "title": "产品经理",
+        "company": "示例科技",
+        "jd_text": "负责产品规划和跨部门项目推进",
+    })
+
+    assert response.status_code == 200
+    listed = client.get("/api/jobs/pool").json()["jobs"]
+    saved = next(job for job in listed if job["id"] == "job-1")
+    assert saved["jd_analysis"]["must_have_skills"] == ["产品规划"]
+    assert saved["jd_analysis"]["summary_text"] == "负责产品规划和项目推进"
+
+
+def test_optimize_resume_persists_result_by_job_id(tmp_path, monkeypatch):
+    import app.routes.resumes as resumes_route
+    from app.models.resume import ResumeOptimizationResult
+
+    monkeypatch.setattr(resumes_route, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(resumes_route, "STORE_DIR", tmp_path / "resumes")
+    resumes_route.STORE_DIR.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        resumes_route,
+        "ai_optimize",
+        lambda *args, **kwargs: ResumeOptimizationResult(
+            summary="优化完成",
+            tailored_summary="面向产品经理优化",
+            optimized_bullets=["推动产品增长"],
+            matched_skills=["产品规划"],
+        ),
+    )
+
+    client = TestClient(app)
+    response = client.post("/api/resumes/optimize", json={
+        "profile": {"name": "张三", "skills": ["产品规划"]},
+        "target_job": {
+            "id": "job-1",
+            "title": "产品经理",
+            "company": "示例科技",
+            "jd_text": "负责产品规划",
+        },
+    })
+
+    assert response.status_code == 200
+    saved = client.get("/api/resumes/optimizations").json()["optimizations"]
+    assert saved["job-1"]["tailored_summary"] == "面向产品经理优化"
+    assert saved["job-1"]["optimized_bullets"] == ["推动产品增长"]
+
+
 def test_jobs_city_options_use_reference_city_catalog():
     client = TestClient(app)
 
@@ -170,6 +243,7 @@ def test_boss_scraper_adds_filters_to_api_url(monkeypatch):
     import app.services.boss_scraper as scraper
 
     api_scripts = []
+    closed = []
 
     class FakeCDP:
         def __init__(self, port):
@@ -201,6 +275,7 @@ def test_boss_scraper_adds_filters_to_api_url(monkeypatch):
 
     monkeypatch.setattr(scraper, "_chrome_running", lambda: True)
     monkeypatch.setattr(scraper, "CDPSession", FakeCDP)
+    monkeypatch.setattr(scraper, "_stop_chrome", lambda clear_session=False: closed.append(clear_session))
 
     scraper.scrape_jobs_sync(
         keyword="产品经理",
@@ -223,6 +298,47 @@ def test_boss_scraper_adds_filters_to_api_url(monkeypatch):
     assert "experience=105" in script
     assert "degree=203" in script
     assert "industry=1001" in script
+    assert closed == [False]
+
+
+def test_boss_selector_health_closes_browser_after_check(monkeypatch):
+    import json
+    import app.services.boss_scraper as scraper
+
+    closed = []
+
+    class FakeCDP:
+        def __init__(self, port):
+            pass
+
+        def create_page(self):
+            return "target-1", "session-1"
+
+        def navigate(self, url, sid):
+            pass
+
+        def eval_js(self, js, sid):
+            if "pageSize=10" in js:
+                return json.dumps({
+                    "httpStatus": 200,
+                    "body": json.dumps({"code": 0, "zpData": {"jobList": [{"salaryDesc": "20-30K"}]}}),
+                })
+            return json.dumps({"status": "ok", "checks": []})
+
+        def send(self, method, params=None, sid=None, timeout=30):
+            return {}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(scraper, "_chrome_running", lambda: True)
+    monkeypatch.setattr(scraper, "CDPSession", FakeCDP)
+    monkeypatch.setattr(scraper, "_stop_chrome", lambda clear_session=False: closed.append(clear_session))
+
+    result = scraper.check_boss_greeting_selectors_sync("https://www.zhipin.com/job_detail/demo.html")
+
+    assert result["status"] == "ok"
+    assert closed == [False]
 
 
 def test_company_blacklist_api_adds_and_removes_existing_jobs(tmp_path, monkeypatch):

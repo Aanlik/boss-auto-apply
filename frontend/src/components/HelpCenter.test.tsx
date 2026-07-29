@@ -1,5 +1,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import HelpCenter from "./HelpCenter";
 import { getHelpCenter } from "../lib/api";
@@ -64,5 +66,16 @@ describe("HelpCenter", () => {
     await waitFor(() => {
       expect(screen.queryByText("帮助内容使用内置版本")).not.toBeInTheDocument();
     });
+  });
+
+  test("常见问题列表不使用内部滚动高度，避免和术语解释卡片错位", () => {
+    const css = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+    const faqRule = css.match(/\.help-faq-list\s*{(?<body>[^}]*)}/)?.groups?.body || "";
+    const faqItemRule = css.match(/\.help-faq-item\s*{(?<body>[^}]*)}/)?.groups?.body || "";
+
+    expect(faqRule).not.toMatch(/max-height\s*:/);
+    expect(faqRule).not.toMatch(/overflow\s*:\s*auto/);
+    expect(faqItemRule).not.toMatch(/overflow\s*:\s*hidden/);
+    expect(faqItemRule).toMatch(/white-space\s*:\s*normal/);
   });
 });

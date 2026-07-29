@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ACTIVE_PAGE_KEY, WorkflowProvider, useWorkflowState } from "./lib/store";
-import { getWorkflowHealthCheck, listJobPool, listWorkflowTasks, retryWorkflowTask } from "./lib/api";
+import { clearFailedWorkflowTasks, deleteWorkflowTask, getWorkflowHealthCheck, listJobPool, listWorkflowTasks, retryWorkflowTask } from "./lib/api";
 import { buildRecoveryTasks, buildWorkflowTasks, buildWorkflowTodos } from "./lib/workflowInsights";
 import type { JobPosting, WorkflowHealthCheck, WorkflowRuntimeTask } from "./lib/types";
 import DashboardPage from "./pages/dashboard";
@@ -114,7 +114,10 @@ function AppShell() {
   return (
     <div className="app-shell">
       <nav className="app-nav">
-        <span className="app-logo">boss 直聘求职端自动化</span>
+        <span className="app-logo">
+          <img src="/assets/boss-helper-logo-64.png" alt="" aria-hidden="true" />
+          boss 求职助手
+        </span>
         <div className="nav-links">
           {pages.map(p => (
             <button key={p.key} className={`nav-link ${page === p.key ? "nav-link--active" : ""}`}
@@ -217,6 +220,29 @@ function GlobalWorkflowStatus({
       onRefresh();
     } catch (err) {
       console.warn("[app] 任务重试失败:", err);
+      window.alert(err instanceof Error ? err.message : "任务重试失败");
+    }
+  }
+
+  async function clearRecoveryTasks() {
+    if (!window.confirm("确定清空失败恢复中心里的失败任务吗？运行中和已完成任务会保留。")) return;
+    try {
+      await clearFailedWorkflowTasks();
+      onRefresh();
+    } catch (err) {
+      console.warn("[app] 清空失败任务失败:", err);
+      window.alert(err instanceof Error ? err.message : "清空失败任务失败");
+    }
+  }
+
+  async function removeTask(taskId: string, title: string) {
+    if (!window.confirm(`确定删除任务「${title}」吗？`)) return;
+    try {
+      await deleteWorkflowTask(taskId);
+      onRefresh();
+    } catch (err) {
+      console.warn("[app] 删除任务失败:", err);
+      window.alert(err instanceof Error ? err.message : "删除任务失败");
     }
   }
 
@@ -249,7 +275,12 @@ function GlobalWorkflowStatus({
           <div className="workflow-recovery-panel" aria-label="流程操作中心">
             <div className="workflow-recovery-panel__top">
               <strong>{recoveryTasks.length > 0 ? "失败恢复中心" : activeRuntimeTasks.length > 0 ? "任务执行中" : attentionChecks.length > 0 ? "系统检查" : "今日待办"}</strong>
-              <button type="button" className="button-quiet button-compact" onClick={onRefresh}>刷新状态</button>
+              <div className="workflow-recovery-panel__actions">
+                {recoveryTasks.length > 0 && (
+                  <button type="button" className="button-quiet button-compact button-danger" onClick={clearRecoveryTasks}>清空失败任务</button>
+                )}
+                <button type="button" className="button-quiet button-compact" onClick={onRefresh}>刷新状态</button>
+              </div>
             </div>
             {attentionChecks.map(check => (
               <div key={check.key} className={`workflow-recovery-item workflow-recovery-item--${check.status}`}>
@@ -259,9 +290,14 @@ function GlobalWorkflowStatus({
               </div>
             ))}
             {activeRuntimeTasks.map(task => (
-              <div key={task.id} className="workflow-recovery-item workflow-recovery-item--running">
+              <div key={task.id} className={`workflow-recovery-item workflow-recovery-item--${task.status}`}>
                 <span>{task.title}</span>
                 <small>{task.message || "正在处理..."}</small>
+                {task.status === "queued" && (
+                  <button type="button" className="button-quiet button-secondary--sm button-danger" onClick={() => removeTask(task.id, task.title)}>
+                    删除
+                  </button>
+                )}
               </div>
             ))}
             {recoveryTasks.map(task => {
@@ -278,6 +314,9 @@ function GlobalWorkflowStatus({
                       </button>
                       <button type="button" className="button-quiet button-secondary--sm" onClick={() => onNavigate(targetPage(sourceTask.type))}>
                         处理
+                      </button>
+                      <button type="button" className="button-quiet button-secondary--sm button-danger" onClick={() => removeTask(sourceTask.id, sourceTask.title)}>
+                        删除
                       </button>
                     </>
                   )}

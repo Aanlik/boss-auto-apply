@@ -116,7 +116,8 @@ type Action =
   | { type: "SET_OPTIMIZATIONS"; opts: Record<string, ResumeOptimizationResult> }
   | { type: "SET_GREETING_TEXTS"; texts: Record<string, string> }
   | { type: "SET_CHAT_MESSAGES"; msgs: Record<string, Array<{role:string;content:string}>> }
-  | { type: "MERGE_CHAT_MESSAGE"; key: string; messages: Array<{role:string;content:string}> | null };
+  | { type: "MERGE_CHAT_MESSAGE"; key: string; messages: Array<{role:string;content:string}> | null }
+  | { type: "HYDRATE_FROM_BACKEND"; payload: BackendHydrationPayload };
 
 function reducer(state: WorkflowState, action: Action): WorkflowState {
   switch (action.type) {
@@ -155,18 +156,126 @@ function reducer(state: WorkflowState, action: Action): WorkflowState {
         return { ...state, chatMessages: rest };
       }
       return { ...state, chatMessages: { ...state.chatMessages, [action.key]: action.messages } };
+    case "HYDRATE_FROM_BACKEND":
+      return hydrateWorkflowStateFromBackend(state, action.payload);
     default:
       return state;
   }
+}
+
+type BackendHydrationPayload = {
+  selection?: { selectedJobIds?: unknown };
+  activeResume?: { profile?: unknown };
+  files?: { files?: unknown };
+  jobs?: { jobs?: unknown };
+  diligence?: { reports?: unknown };
+  rankings?: { rankings?: unknown };
+  greetings?: { greetings?: unknown };
+  optimizations?: { optimizations?: unknown };
+  chats?: { chats?: unknown };
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+export function hydrateWorkflowStateFromBackend(state: WorkflowState, payload: BackendHydrationPayload): WorkflowState {
+  const jobs = Array.isArray(payload.jobs?.jobs) ? payload.jobs.jobs : [];
+  const savedJdAnalyses = Object.fromEntries(
+    jobs
+      .filter((job): job is Record<string, unknown> => isRecord(job) && Boolean(job.id) && isRecord(job.jd_analysis))
+      .map(job => [String(job.id), job.jd_analysis]),
+  ) as WorkflowState["jdAnalyses"];
+
+  return {
+    ...state,
+    selectedJobIds: Array.isArray(payload.selection?.selectedJobIds)
+      ? payload.selection.selectedJobIds.map(String)
+      : state.selectedJobIds,
+    resumeProfile: isRecord(payload.activeResume?.profile)
+      ? payload.activeResume.profile as WorkflowState["resumeProfile"]
+      : state.resumeProfile,
+    uploadedFiles: Array.isArray(payload.files?.files)
+      ? payload.files.files as WorkflowState["uploadedFiles"]
+      : state.uploadedFiles,
+    diligenceReports: isRecord(payload.diligence?.reports)
+      ? { ...state.diligenceReports, ...payload.diligence.reports } as WorkflowState["diligenceReports"]
+      : state.diligenceReports,
+    rankingResults: Array.isArray(payload.rankings?.rankings)
+      ? payload.rankings.rankings as WorkflowState["rankingResults"]
+      : state.rankingResults,
+    jdAnalyses: { ...savedJdAnalyses, ...state.jdAnalyses },
+    optimizations: isRecord(payload.optimizations?.optimizations)
+      ? { ...state.optimizations, ...payload.optimizations.optimizations } as WorkflowState["optimizations"]
+      : state.optimizations,
+    greetingTexts: isRecord(payload.greetings?.greetings)
+      ? { ...state.greetingTexts, ...payload.greetings.greetings } as WorkflowState["greetingTexts"]
+      : state.greetingTexts,
+    chatMessages: isRecord(payload.chats?.chats)
+      ? { ...state.chatMessages, ...payload.chats.chats } as WorkflowState["chatMessages"]
+      : state.chatMessages,
+  };
 }
 
 // ── Context ──
 const StateCtx = createContext<WorkflowState>(createEmptyState());
 const DispatchCtx = createContext<Dispatch<Action>>(() => {});
 
+// ── 后端 selection 同步 ──
+let _selectionSyncReady = false;
+let _selectionSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+function syncSelectionToBackend(ids: string[]) {
+  if (!_selectionSyncReady) return;
+  if (_selectionSyncTimer) clearTimeout(_selectionSyncTimer);
+  _selectionSyncTimer = setTimeout(() => {
+    fetch("/api/workflow/selection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selectedJobIds: ids }),
+    }).catch(() => {});
+  }, 500);
+}
+
 export function WorkflowProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, null, loadState);
   useEffect(() => { persist(state); }, [state]);
+
+  // 启动时从后端恢复核心工作流数据，清理浏览器缓存后也不丢。
+  useEffect(() => {
+    Promise.all([
+      fetch("/api/workflow/selection").then(r => r.json()).catch(() => ({})),
+      fetch("/api/resumes/active").then(r => r.json()).catch(() => ({})),
+      fetch("/api/resumes/files").then(r => r.json()).catch(() => ({})),
+      fetch("/api/jobs/pool?include_hidden=true").then(r => r.json()).catch(() => ({})),
+      fetch("/api/diligence/reports").then(r => r.json()).catch(() => ({})),
+      fetch("/api/scoring/rankings").then(r => r.json()).catch(() => ({})),
+      fetch("/api/greetings/drafts").then(r => r.json()).catch(() => ({})),
+      fetch("/api/resumes/optimizations").then(r => r.json()).catch(() => ({})),
+      fetch("/api/resumes/chat/load").then(r => r.json()).catch(() => ({})),
+    ])
+      .then(([selection, activeResume, files, jobs, diligence, rankings, greetings, optimizations, chats]) => {
+        dispatch(actions.hydrateFromBackend({
+          selection,
+          activeResume,
+          files,
+          jobs,
+          diligence,
+          rankings,
+          greetings,
+          optimizations,
+          chats,
+        }));
+      })
+      .catch(() => {})
+      .finally(() => { _selectionSyncReady = true; });
+  }, []);
+
+  // selectedJobIds 变化时同步到后端
+  useEffect(() => {
+    syncSelectionToBackend(state.selectedJobIds);
+  }, [state.selectedJobIds]);
+
   return (
     <StateCtx.Provider value={state}>
       <DispatchCtx.Provider value={dispatch}>
@@ -195,4 +304,5 @@ export const actions = {
   setGreetingTexts: (texts: Record<string, string>): Action => ({ type: "SET_GREETING_TEXTS", texts }),
   setChatMessages: (msgs: Record<string, Array<{role:string;content:string}>>): Action => ({ type: "SET_CHAT_MESSAGES", msgs }),
   mergeChatMessage: (key: string, messages: Array<{role:string;content:string}> | null): Action => ({ type: "MERGE_CHAT_MESSAGE", key, messages }),
+  hydrateFromBackend: (payload: BackendHydrationPayload): Action => ({ type: "HYDRATE_FROM_BACKEND", payload }),
 };

@@ -19,7 +19,7 @@ from app.routes.settings import router as settings_router
 from app.routes.workflow import router as workflow_router
 from app.services.access_control import is_allowed_host
 
-app = FastAPI(title="BOSS Workbench")
+app = FastAPI(title="boss 求职助手")
 
 
 class LocalAccessGuardMiddleware(BaseHTTPMiddleware):
