@@ -53,13 +53,7 @@ jobs:
         working-directory: backend
         env:
           BOSS_WORKBENCH_TEST_MODE: "1"
-        run: >
-          pytest -q
-          --ignore=tests/test_pdf_visual_regression.py
-          --deselect=tests/test_final_polish.py::test_boss_detail_retry_task_replays_failed_job_ids
-          --deselect=tests/test_release_hardening.py::test_release_pdf_visual_regression_endpoint_renders_samples
-          --deselect=tests/test_resume_pdf_exporter.py::test_export_resume_pdf_renders_professional_sidebar_sections
-          --deselect=tests/test_resume_pdf_exporter.py::test_resume_pdf_sidebar_only_appears_on_first_page
+        run: pytest -q
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -176,7 +170,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
-          name: boss 直聘求职端自动化 ${{ steps.release.outputs.tag }}
+          name: boss 求职助手 ${{ steps.release.outputs.tag }}
           prerelease: ${{ steps.release.outputs.prerelease }}
           generate_release_notes: true
           files: packaged-artifacts/**/*
