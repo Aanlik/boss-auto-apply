@@ -44,6 +44,7 @@ const QUALITY_FILTER_LABELS: Record<Exclude<QualityFilterKey, "">, string> = {
   blacklisted: "黑名单命中",
   duplicates: "重复岗位",
 };
+const HIDDEN_CAPTURE_BATCHES_KEY = "boss-hidden-capture-batches";
 
 export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (page: string) => void; visible?: boolean }) {
   const { selectedJobIds } = useWorkflowState();
@@ -92,6 +93,17 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   const [blacklistExpanded, setBlacklistExpanded] = useState(false);
   const [quality, setQuality] = useState<JobPoolQuality | null>(null);
   const [duplicatesExpanded, setDuplicatesExpanded] = useState(false);
+  const [batchesExpanded, setBatchesExpanded] = useState(true);
+  const [showAllCaptureBatches, setShowAllCaptureBatches] = useState(false);
+  const [hiddenCaptureBatches, setHiddenCaptureBatches] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(HIDDEN_CAPTURE_BATCHES_KEY) || "[]");
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      return [];
+    }
+  });
   const [comparison, setComparison] = useState<JobComparison | null>(null);
   const blacklistImportRef = useRef<HTMLInputElement | null>(null);
   const [hiddenCommonTags, setHiddenCommonTags] = useState<string[]>(() => {
@@ -199,6 +211,23 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     void reloadJobsForQualityFilter(nextFilter);
   }
 
+  function hideCaptureBatch(batchId: string) {
+    setHiddenCaptureBatches(prev => {
+      const next = prev.includes(batchId) ? prev : [...prev, batchId];
+      window.localStorage.setItem(HIDDEN_CAPTURE_BATCHES_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function clearHiddenCaptureBatches() {
+    window.localStorage.removeItem(HIDDEN_CAPTURE_BATCHES_KEY);
+    setHiddenCaptureBatches([]);
+  }
+
+  function refreshCurrentPage() {
+    window.location.reload();
+  }
+
   async function loadQuality() {
     try {
       setQuality(await getJobPoolQuality());
@@ -288,7 +317,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     if (force && !confirm("确定重新抓取 JD？已有 JD 内容会被最新详情覆盖。")) return;
     setLoading(force ? "enrich-force" : "enrich"); setError("");
     try {
-      await enrichJdDetails({ job_ids: selectedJobIds.length > 0 ? selectedJobIds : undefined, max_jobs: force ? undefined : 30, force });
+      await enrichJdDetails({ job_ids: selectedJobIds.length > 0 ? selectedJobIds : undefined, force });
       await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) { setError(formatApiError(err) || "JD抓取失败"); }
@@ -601,6 +630,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
           <p className="page-copy">登录后抓取岗位，多维度筛选，获取JD详情后进入尽调。</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button type="button" className="button-secondary" onClick={refreshCurrentPage} title="刷新整个应用页面">刷新当前页面</button>
           <span className={selectedJobIds.length > 0 ? "tag tag--active" : "tag"}>{selectedJobIds.length} 个已选</span>
           {selectedJobIds.length > 0 && (
             <button type="button" className="button-primary" onClick={() => onNavigate("diligence")}>开始尽调 →</button>
@@ -828,19 +858,47 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
                 <span>抓取批次</span><strong>{quality.summary.batch_count || 0}</strong>
               </div>
             </div>
-            {quality.batches && quality.batches.length > 0 && (
-              <div className="batch-summary-list">
-                {quality.batches.slice(0, 4).map(batch => (
-                  <div key={batch.id} className="batch-summary-item">
+            {quality.batches && quality.batches.length > 0 && (() => {
+              const availableBatches = quality.batches.filter(batch => !hiddenCaptureBatches.includes(batch.id));
+              const visibleBatches = showAllCaptureBatches ? availableBatches : availableBatches.slice(0, 4);
+              return (
+                <section className="batch-summary" aria-label="抓取批次详情">
+                  <div className="batch-summary-header">
                     <div>
-                      <strong>{batch.keyword || "手动录入"} · {batch.city || "全国"}</strong>
-                      <p>{batch.capturedAt || "无时间"} · {batch.total} 个岗位 · 缺少 JD {batch.missing_jd}</p>
+                      <strong>抓取批次详情</strong>
+                      <span>{visibleBatches.length}/{availableBatches.length} 个显示中{hiddenCaptureBatches.length ? ` · 已隐藏 ${hiddenCaptureBatches.length}` : ""}</span>
                     </div>
-                    <code>{batch.id}</code>
+                    <div className="batch-summary-actions">
+                      {hiddenCaptureBatches.length > 0 && (
+                        <button type="button" className="button-quiet button-quiet--sm" onClick={clearHiddenCaptureBatches}>恢复已删除批次</button>
+                      )}
+                      {availableBatches.length > 4 && (
+                        <button type="button" className="button-quiet button-quiet--sm" onClick={() => setShowAllCaptureBatches(prev => !prev)}>
+                          {showAllCaptureBatches ? "仅显示最新 4 个" : `显示全部批次 (${availableBatches.length})`}
+                        </button>
+                      )}
+                      <button type="button" className="button-quiet button-quiet--sm" aria-expanded={batchesExpanded} onClick={() => setBatchesExpanded(prev => !prev)}>
+                        {batchesExpanded ? "收起详情" : "展开详情"}
+                      </button>
+                    </div>
                   </div>
-                ))}
-              </div>
-            )}
+                  {batchesExpanded && (
+                    <div className="batch-summary-list">
+                      {visibleBatches.length > 0 ? visibleBatches.map(batch => (
+                        <div key={batch.id} className="batch-summary-item">
+                          <div className="batch-summary-content">
+                            <strong title={`${batch.keyword || "手动录入"} · ${batch.city || "全国"}`}>{batch.keyword || "手动录入"} · {batch.city || "全国"}</strong>
+                            <p>{batch.capturedAt || "无时间"} · {batch.total} 个岗位 · 缺少 JD {batch.missing_jd}</p>
+                            <code title={batch.id}>{batch.id}</code>
+                          </div>
+                          <button type="button" className="button-quiet button-quiet--sm batch-summary-delete" onClick={() => hideCaptureBatch(batch.id)}>删除</button>
+                        </div>
+                      )) : <p className="batch-summary-empty">暂无显示中的批次</p>}
+                    </div>
+                  )}
+                </section>
+              );
+            })()}
             <div className="application-board">
               {(Object.keys(APPLICATION_STATUS_LABELS) as JobApplicationStatus[]).map(status => (
                 <button

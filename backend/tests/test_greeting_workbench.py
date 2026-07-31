@@ -563,7 +563,8 @@ def test_workflow_retry_executes_failed_greeting_task(tmp_path, monkeypatch):
     retried = client.post(f"/api/workflow/tasks/{first['taskId']}/retry").json()
 
     assert retried["task"]["status"] == "completed"
-    assert retried["task"]["sourceTaskId"] == first["taskId"]
+    assert retried["task"]["id"] == first["taskId"]
+    assert "sourceTaskId" not in retried["task"]
     assert retried["result"]["summary"]["sent"] == 1
     assert jobs_route._job_store["job-1"].application_status == "greeted"
 

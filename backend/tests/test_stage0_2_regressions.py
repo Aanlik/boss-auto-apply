@@ -434,3 +434,39 @@ def test_boss_capture_keeps_existing_job_when_jd_normalized_company_name(monkeyp
     assert response.json()["captured"] == 0
     assert response.json()["removed_duplicates"] == 1
     assert jobs_route._job_store[existing.id].company == "品牌科技有限公司"
+
+
+def test_boss_capture_filters_by_company_and_title_even_when_city_changes(monkeypatch):
+    import app.routes.jobs as jobs_route
+    from app.models.job import JobRecord
+
+    existing = JobRecord(id="existing", title="产品经理", company="示例科技", capture_company_name="示例科技", city="郑州")
+    monkeypatch.setattr(jobs_route, "_job_store", {existing.id: existing})
+    monkeypatch.setattr(jobs_route, "ingest_from_boss", lambda **kwargs: [
+        JobRecord(id="incoming", title="产品经理", company="示例科技", capture_company_name="示例科技", city="上海"),
+    ])
+
+    client = TestClient(app)
+    response = client.post("/api/jobs/capture/boss", json={"keyword": "产品经理", "city": "上海"})
+
+    assert response.status_code == 200
+    assert response.json()["captured"] == 0
+    assert list(jobs_route._job_store) == ["existing"]
+
+
+def test_boss_capture_keeps_different_titles_from_the_same_company(monkeypatch):
+    import app.routes.jobs as jobs_route
+    from app.models.job import JobRecord
+
+    existing = JobRecord(id="existing", title="产品经理", company="示例科技", capture_company_name="示例科技", city="郑州", source_url="https://www.zhipin.com/job_detail/shared.html")
+    monkeypatch.setattr(jobs_route, "_job_store", {existing.id: existing})
+    monkeypatch.setattr(jobs_route, "ingest_from_boss", lambda **kwargs: [
+        JobRecord(id="incoming", title="运营经理", company="示例科技", capture_company_name="示例科技", city="郑州", source_url="https://www.zhipin.com/job_detail/shared.html"),
+    ])
+
+    client = TestClient(app)
+    response = client.post("/api/jobs/capture/boss", json={"keyword": "运营经理", "city": "郑州"})
+
+    assert response.status_code == 200
+    assert response.json()["captured"] == 1
+    assert set(jobs_route._job_store) == {"existing", "incoming"}

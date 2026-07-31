@@ -150,31 +150,22 @@ def get_task(task_id: str) -> dict | None:
     return None
 
 
-def queue_retry_task(task_id: str) -> tuple[dict, dict]:
-    source = get_task(task_id)
-    if not source:
+def restart_task(task_id: str) -> dict:
+    """Reuse a failed task record for a new execution attempt."""
+    task = get_task(task_id)
+    if not task:
         raise ValueError("task not found")
-    if not source.get("retryable"):
+    if not task.get("retryable"):
         raise PermissionError("task is not retryable")
-    tasks = load_tasks(limit=100)
-    retry = {
-        "id": uuid4().hex,
-        "type": source.get("type", "unknown"),
-        "title": f"{source.get('title') or '任务'} · 重试",
-        "status": "queued",
-        "done": 0,
-        "total": max(0, int(source.get("total") or 0)),
-        "message": "已加入重试队列",
-        "errorCode": "",
-        "action": "",
-        "retryable": False,
-        "payload": source.get("payload") or {},
-        "sourceTaskId": source.get("id"),
-        "createdAt": _now(),
-        "updatedAt": _now(),
-    }
-    _save_tasks(tasks + [retry])
-    return retry, source
+    return update_task(
+        task_id,
+        status="running",
+        done=0,
+        message="正在重试",
+        errorCode="",
+        action="",
+        retryable=False,
+    )
 
 
 def clear_recovery_tasks() -> dict:

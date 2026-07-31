@@ -28,7 +28,7 @@ from app.services.job_filters import filter_jobs_by_model
 from app.services.job_ingest import (
     ingest_manual_job, ingest_from_boss, normalize_job,
 )
-from app.services.workflow_tasks import complete_task, fail_task, partial_fail_task, start_task, update_task
+from app.services.workflow_tasks import complete_task, fail_task, get_task, partial_fail_task, start_task, update_task
 from app.services.maintenance_service import active_store, log_api_call, log_event
 
 logger = logging.getLogger("jobs_route")
@@ -172,16 +172,12 @@ def _dedupe_keys() -> set[str]:
 def _refresh_capture_dedupe_key(job: JobRecord) -> str:
     capture_company = job.capture_company_name or job.company
     job.capture_company_name = capture_company
-    job.capture_dedupe_key = _make_dedupe_key(capture_company, job.title, job.city)
+    job.capture_dedupe_key = _make_dedupe_key(capture_company, job.title, "")
     return job.capture_dedupe_key
 
 
 def _capture_dedupe_keys() -> set[str]:
     return {_refresh_capture_dedupe_key(job) for job in _job_store.values() if job.title or job.company}
-
-
-def _source_urls() -> set[str]:
-    return {job.source_url.strip() for job in _job_store.values() if job.source_url.strip()}
 
 
 def _apply_blacklist_to_store() -> int:
@@ -213,25 +209,17 @@ def _refresh_job_dedupe_key(job: JobRecord) -> str:
     return job.dedupe_key
 
 
-def _dedupe_new_jobs(
-    jobs: list[JobRecord],
-    existing_keys: set[str],
-    existing_source_urls: set[str] | None = None,
-) -> tuple[list[JobRecord], int]:
+def _dedupe_new_jobs(jobs: list[JobRecord], existing_keys: set[str]) -> tuple[list[JobRecord], int]:
     kept = []
     seen = set(existing_keys)
-    seen_urls = set(existing_source_urls or set())
     removed = 0
     for job in jobs:
         key = _refresh_capture_dedupe_key(job)
-        source_url = job.source_url.strip()
-        if (key and key in seen) or (source_url and source_url in seen_urls):
+        if key and key in seen:
             removed += 1
             continue
         if key:
             seen.add(key)
-        if source_url:
-            seen_urls.add(source_url)
         kept.append(job)
     return kept, removed
 
@@ -254,6 +242,9 @@ def _dedupe_store() -> int:
 
 def _job_quality_report() -> dict:
     jobs = _all_jobs()
+    def is_blacklisted(job: JobRecord) -> bool:
+        return job.lifecycle_status == "blacklisted" or is_company_blacklisted(job.company)
+
     duplicate_index: dict[str, list[JobRecord]] = {}
     for job in jobs:
         key = job.dedupe_key or _make_dedupe_key(job.company, job.title, job.city)
@@ -276,9 +267,10 @@ def _job_quality_report() -> dict:
     ]
     duplicate_groups.sort(key=lambda item: (-item["count"], item["company"], item["title"]))
 
-    with_jd = sum(1 for job in jobs if _has_detail_jd(job))
+    quality_jobs = [job for job in jobs if not is_blacklisted(job)]
+    with_jd = sum(1 for job in quality_jobs if _has_detail_jd(job))
     suspected_expired = sum(1 for job in jobs if job.lifecycle_status == "suspected_expired")
-    blacklisted = sum(1 for job in jobs if job.lifecycle_status == "blacklisted" or is_company_blacklisted(job.company))
+    blacklisted = sum(1 for job in jobs if is_blacklisted(job))
     duplicate_jobs = sum(group["count"] for group in duplicate_groups)
     application_statuses = {status: 0 for status in APPLICATION_STATUSES}
     batch_index: dict[str, dict] = {}
@@ -302,11 +294,12 @@ def _job_quality_report() -> dict:
             },
         )
         batch["total"] += 1
-        if _has_detail_jd(job):
-            batch["with_jd"] += 1
-        else:
-            batch["missing_jd"] += 1
-        if job.lifecycle_status == "blacklisted" or is_company_blacklisted(job.company):
+        if not is_blacklisted(job):
+            if _has_detail_jd(job):
+                batch["with_jd"] += 1
+            else:
+                batch["missing_jd"] += 1
+        if is_blacklisted(job):
             batch["blacklisted"] += 1
         if job.lifecycle_status == "suspected_expired":
             batch["suspected_expired"] += 1
@@ -326,7 +319,7 @@ def _job_quality_report() -> dict:
         "summary": {
             "total": len(jobs),
             "with_jd": with_jd,
-            "missing_jd": len(jobs) - with_jd,
+            "missing_jd": len(quality_jobs) - with_jd,
             "suspected_expired": suspected_expired,
             "blacklisted": blacklisted,
             "duplicate_groups": len(duplicate_groups),
@@ -461,21 +454,33 @@ def enrich_jd_details(payload: dict) -> dict:
     from app.services.boss_scraper import enrich_jobs_with_details
     job_ids = payload.get("job_ids", [])
     force = bool(payload.get("force", False))
+    retry_task_id = str(payload.get("_workflow_retry_task_id") or "")
     
     requested_jobs = [_job_store[jid] for jid in job_ids if jid in _job_store]
     if not requested_jobs:
         requested_jobs = list(_job_store.values())
-    default_max_jobs = len(requested_jobs) if force else 30
-    max_jobs = min(int(payload.get("max_jobs") or default_max_jobs), 200 if force else 50)
+    # Explicit selections are user-scoped work and should not be silently capped at 30.
+    # Keep the smaller default only for an unfiltered "process the pool" request.
+    explicit_selection = bool(job_ids)
+    default_max_jobs = len(requested_jobs) if (force or explicit_selection) else 30
+    max_allowed = 200 if (force or explicit_selection) else 50
+    max_jobs = min(int(payload.get("max_jobs") or default_max_jobs), max_allowed)
     skipped_existing_jd = 0 if force else sum(1 for job in requested_jobs if _has_detail_jd(job))
     jobs_to_enrich = requested_jobs if force else [job for job in requested_jobs if not _has_detail_jd(job)]
-    task = start_task(
-        "jd_enrich",
-        "获取 JD 详情",
-        total=min(len(jobs_to_enrich), max_jobs),
-        payload={"job_ids": job_ids, "max_jobs": max_jobs, "force": force},
-        idempotency_key=f"jd_enrich:{'force' if force else 'missing'}:{','.join(sorted(job.id for job in jobs_to_enrich))}:{max_jobs}",
-    )
+    task_payload = {"job_ids": job_ids, "max_jobs": max_jobs, "force": force}
+    if retry_task_id:
+        task = get_task(retry_task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="重试任务不存在")
+        task = update_task(task["id"], total=min(len(jobs_to_enrich), max_jobs), payload=task_payload)
+    else:
+        task = start_task(
+            "jd_enrich",
+            "获取 JD 详情",
+            total=min(len(jobs_to_enrich), max_jobs),
+            payload=task_payload,
+            idempotency_key=f"jd_enrich:{'force' if force else 'missing'}:{','.join(sorted(job.id for job in jobs_to_enrich))}:{max_jobs}",
+        )
 
     if not jobs_to_enrich:
         message = "没有缺少 JD 的岗位需要抓取" if not force else "没有可重新抓取 JD 的岗位"
@@ -491,11 +496,11 @@ def enrich_jd_details(payload: dict) -> dict:
     
     try:
         start_time = datetime.now()
-        failed_job_ids: list[str] = []
+        failed_jobs: list[dict[str, str]] = []
 
         def on_jd_progress(job: JobRecord, done: int, total: int, success: bool, reason: str = "") -> None:
             if not success:
-                failed_job_ids.append(job.id)
+                failed_jobs.append({"id": job.id, "reason": reason or "未提取到有效 JD"})
             _refresh_job_dedupe_key(job)
             _refresh_capture_dedupe_key(job)
             _save_jobs()
@@ -510,11 +515,17 @@ def enrich_jd_details(payload: dict) -> dict:
                     "job_ids": job_ids,
                     "max_jobs": max_jobs,
                     "force": force,
-                    "failed_job_ids": failed_job_ids,
+                    "failed_job_ids": [item["id"] for item in failed_jobs],
+                    "failed_jobs": failed_jobs,
                 },
             )
 
-        enriched = enrich_jobs_with_details(jobs_to_enrich, max_jobs=max_jobs, on_progress=on_jd_progress)
+        enriched = enrich_jobs_with_details(
+            jobs_to_enrich,
+            max_jobs=max_jobs,
+            on_progress=on_jd_progress,
+            preserve_browser_on_all_failures=True,
+        )
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
         removed_duplicates = _dedupe_store()
         removed = _apply_blacklist_to_store()
@@ -542,8 +553,13 @@ def enrich_jd_details(payload: dict) -> dict:
             "message": message,
         }
         total = min(len(jobs_to_enrich), max_jobs)
-        if total and int(enriched or 0) < total:
-            fail_message = f"JD 详情部分完成，成功 {int(enriched or 0)}/{total}"
+        if total and int(enriched or 0) == 0:
+            first_reason = failed_jobs[0]["reason"] if failed_jobs else "未提取到有效 JD"
+            fail_message = f"JD 详情抓取失败，0/{total} 成功；{first_reason}"
+            fail_task(task["id"], fail_message, "JD_ALL_FAILED", "检查保留的 BOSS 页面，完成登录或风控处理后重试")
+        elif total and int(enriched or 0) < total:
+            first_reason = failed_jobs[0]["reason"] if failed_jobs else "未提取到有效 JD"
+            fail_message = f"JD 详情部分失败，成功 {int(enriched or 0)}/{total}，失败 {total - int(enriched or 0)}；{first_reason}"
             partial_fail_task(task["id"], total, total, fail_message, "JD_PARTIAL", "检查 BOSS 登录状态后重试未完成岗位")
         else:
             complete_task(task["id"], done=int(enriched or 0), message=message)
@@ -558,9 +574,7 @@ def _has_detail_jd(job: JobRecord) -> bool:
 
 
 @router.post("/enrich-jd/retry-failed/{task_id}")
-def retry_failed_jd_details(task_id: str) -> dict:
-    from app.services.workflow_tasks import get_task
-
+def retry_failed_jd_details(task_id: str, reuse_task_id: str | None = None) -> dict:
     task = get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -568,7 +582,11 @@ def retry_failed_jd_details(task_id: str) -> dict:
     job_ids = payload.get("failed_job_ids") or payload.get("job_ids") or []
     if not isinstance(job_ids, list) or not job_ids:
         raise HTTPException(status_code=400, detail="任务中没有可重试的岗位 ID")
-    result = enrich_jd_details({"job_ids": job_ids, "max_jobs": int(payload.get("max_jobs") or len(job_ids))})
+    result = enrich_jd_details({
+        "job_ids": job_ids,
+        "max_jobs": int(payload.get("max_jobs") or len(job_ids)),
+        "_workflow_retry_task_id": reuse_task_id or "",
+    })
     return {**result, "job_ids": [str(item) for item in job_ids]}
 
 
@@ -603,7 +621,6 @@ def capture_from_boss_endpoint(payload: dict) -> dict:
     )
 
     existing = _capture_dedupe_keys()
-    existing_source_urls = _source_urls()
     try:
         start_time = datetime.now()
         new_jobs = ingest_from_boss(
@@ -613,7 +630,6 @@ def capture_from_boss_endpoint(payload: dict) -> dict:
             headless=headless,
             filters=filters,
             existing_dedupe_keys=existing,
-            existing_source_urls=existing_source_urls,
         )
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
     except RuntimeError as e:
@@ -637,7 +653,7 @@ def capture_from_boss_endpoint(payload: dict) -> dict:
         fail_task(task["id"], str(e), "BOSS_CAPTURE_FAILED", "检查网络和 BOSS 页面状态后重试")
         raise HTTPException(status_code=500, detail=f"Boss 抓取失败: {e}")
 
-    new_jobs, removed_duplicates = _dedupe_new_jobs(new_jobs, existing, existing_source_urls)
+    new_jobs, removed_duplicates = _dedupe_new_jobs(new_jobs, existing)
     new_jobs, removed_jobs = filter_blacklisted_jobs(new_jobs)
     per_page = max(1, round(len(new_jobs) / max_pages)) if max_pages else len(new_jobs)
     for page in range(1, max_pages + 1):

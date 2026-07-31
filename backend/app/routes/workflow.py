@@ -113,7 +113,7 @@ def retry_workflow_task(task_id: str, response: Response) -> dict:
             raise PermissionError("task is not retryable")
         if source.get("type") not in RETRY_EXECUTORS:
             raise NotImplementedError("task retry executor not found")
-        task, source = workflow_tasks.queue_retry_task(task_id)
+        task = workflow_tasks.restart_task(task_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="任务不存在")
     except PermissionError:
@@ -125,19 +125,23 @@ def retry_workflow_task(task_id: str, response: Response) -> dict:
         if source.get("type") == "greeting_send":
             from app.routes.greetings import retry_failed_greetings
 
-            result = retry_failed_greetings(source["id"])
+            result = retry_failed_greetings(task_id, reuse_task_id=task_id)
         elif source.get("type") == "jd_enrich":
             from app.routes.jobs import retry_failed_jd_details
 
-            result = retry_failed_jd_details(source["id"])
-    except HTTPException:
+            result = retry_failed_jd_details(task_id, reuse_task_id=task_id)
+    except HTTPException as exc:
+        workflow_tasks.fail_task(
+            task_id,
+            str(exc.detail),
+            error_code="RETRY_FAILED",
+            action="检查失败原因后再次重试",
+        )
         raise
     except Exception as exc:
-        workflow_tasks.fail_task(task["id"], str(exc), error_code="RETRY_FAILED", action="检查失败原因后再次重试")
+        workflow_tasks.fail_task(task_id, str(exc), error_code="RETRY_FAILED", action="检查失败原因后再次重试")
         raise HTTPException(status_code=500, detail=f"重试执行失败: {exc}")
-    if result is not None:
-        workflow_tasks.complete_task(task["id"], done=task.get("total"), message="重试已执行")
-        task = workflow_tasks.get_task(task["id"]) or task
+    task = workflow_tasks.get_task(task_id) or task
     response.status_code = 202
     return {"task": task, "sourceTask": source, "result": result}
 

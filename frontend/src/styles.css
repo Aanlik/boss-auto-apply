@@ -1601,43 +1601,115 @@ select { cursor:pointer; appearance:none; background-image:url("data:image/svg+x
   line-height:1;
   color:var(--text-strong);
 }
+.batch-summary {
+  margin-top:12px;
+  padding:10px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--surface-muted);
+  font-family:"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size:12px;
+  line-height:1.45;
+}
+.batch-summary-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  min-width:0;
+}
+.batch-summary-header > div:first-child {
+  display:flex;
+  align-items:baseline;
+  gap:8px;
+  min-width:0;
+}
+.batch-summary-header strong {
+  color:var(--text-strong);
+  font-size:12px;
+  font-weight:700;
+  line-height:1.4;
+}
+.batch-summary-header span {
+  color:var(--text-muted);
+  font-size:11px;
+  line-height:1.4;
+}
+.batch-summary-actions {
+  display:flex;
+  flex:0 0 auto;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  gap:6px;
+}
+.button-quiet--sm {
+  min-height:28px;
+  padding:4px 8px;
+  font-size:11px;
+}
 .batch-summary-list {
   display:grid;
-  grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns:repeat(2, minmax(0, 1fr));
   gap:8px;
-  margin-top:12px;
+  margin-top:10px;
 }
 .batch-summary-item {
   display:flex;
   justify-content:space-between;
+  align-items:flex-start;
   gap:10px;
   min-width:0;
   padding:9px 10px;
   border:1px solid var(--border);
   border-radius:8px;
   background:var(--surface-muted);
+  font-family:"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+.batch-summary-content {
+  min-width:0;
+  flex:1 1 auto;
 }
 .batch-summary-item strong,
 .batch-summary-item p,
 .batch-summary-item code {
+  display:block;
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
 }
 .batch-summary-item strong {
-  display:block;
   color:var(--text-strong);
   font-size:12px;
+  font-weight:600;
+  line-height:1.4;
 }
 .batch-summary-item p {
   margin:2px 0 0;
   color:var(--text-muted);
   font-size:11px;
+  line-height:1.4;
 }
 .batch-summary-item code {
-  max-width:88px;
+  max-width:100%;
+  margin-top:3px;
   color:var(--text-subtle);
+  font-family:"SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size:10px;
+  line-height:1.35;
+}
+.batch-summary-delete {
+  flex:0 0 auto;
+  color:var(--danger);
+}
+.batch-summary-empty {
+  margin:10px 0 2px;
+  color:var(--text-muted);
+  font-size:12px;
+}
+@media (max-width: 900px) {
+  .batch-summary-list {
+    grid-template-columns:minmax(0, 1fr);
+  }
 }
 .template-chip-row {
   display:flex;

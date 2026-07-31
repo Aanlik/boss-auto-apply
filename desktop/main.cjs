@@ -7,6 +7,12 @@ const path = require("path");
 
 let backendProcess = null;
 let mainWindow = null;
+let desktopLogStream = null;
+
+function desktopLog(message) {
+  const line = `${new Date().toISOString()} ${message}\n`;
+  if (desktopLogStream) desktopLogStream.write(line);
+}
 
 function repoRoot() {
   return path.resolve(__dirname, "..");
@@ -91,6 +97,10 @@ async function startBackend() {
   const dataDir = path.join(app.getPath("userData"), "data");
   const browserPath = bundledBrowserExecutablePath();
   fs.mkdirSync(dataDir, { recursive: true });
+  const logDir = path.join(dataDir, "logs");
+  fs.mkdirSync(logDir, { recursive: true });
+  desktopLogStream = fs.createWriteStream(path.join(logDir, "desktop.log"), { flags: "a" });
+  desktopLog(`启动桌面端 version=${app.getVersion()} backend=${backendPath}`);
   backendProcess = spawn(backendPath, [], {
     env: {
       ...process.env,
@@ -99,9 +109,13 @@ async function startBackend() {
       BOSS_WORKBENCH_DESKTOP: "1",
       ...(browserPath ? { BOSS_WORKBENCH_BROWSER_EXECUTABLE: browserPath } : {}),
     },
-    stdio: app.isPackaged ? "ignore" : "inherit",
+    stdio: app.isPackaged
+      ? ["ignore", fs.openSync(path.join(logDir, "backend-stdout.log"), "a"), fs.openSync(path.join(logDir, "backend-stderr.log"), "a")]
+      : "inherit",
   });
+  backendProcess.on("error", (error) => desktopLog(`后端进程错误: ${error.message}`));
   backendProcess.on("exit", (code) => {
+    desktopLog(`后端进程退出 code=${code} signal=${backendProcess.signalCode || ""}`);
     if (code !== 0 && mainWindow) {
       mainWindow.webContents.send("backend-exit", code);
     }
@@ -132,6 +146,7 @@ async function boot() {
     const port = await startBackend();
     createWindow(port);
   } catch (error) {
+    desktopLog(`桌面端启动失败: ${error instanceof Error ? error.stack || error.message : String(error)}`);
     dialog.showErrorBox("boss 求职助手启动失败", error instanceof Error ? error.message : String(error));
     app.quit();
   }
@@ -144,7 +159,9 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  desktopLog("桌面端开始退出");
   if (backendProcess && !backendProcess.killed) {
     backendProcess.kill();
   }
+  if (desktopLogStream) desktopLogStream.end();
 });

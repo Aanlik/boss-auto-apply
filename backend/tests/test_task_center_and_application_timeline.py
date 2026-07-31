@@ -112,25 +112,50 @@ def test_retry_unsupported_workflow_task_does_not_create_stuck_queue(tmp_path, m
     assert tasks[0]["status"] == "failed"
 
 
-def test_delete_stuck_queued_workflow_task(tmp_path, monkeypatch):
+def test_workflow_retry_reuses_the_failed_task_record(tmp_path, monkeypatch):
+    from app.services import workflow_persistence, workflow_tasks
+    from app.routes import jobs as jobs_route
+
+    monkeypatch.setattr(workflow_persistence, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(workflow_tasks, "TASKS_FILE", tmp_path / "workflow" / "tasks.json")
+    failed = workflow_tasks.start_task("jd_enrich", "获取 JD 详情", total=1, payload={"failed_job_ids": ["job-1"]})
+    workflow_tasks.fail_task(failed["id"], "JD 抓取失败", retryable=True)
+
+    def fake_retry(task_id: str, reuse_task_id: str | None = None) -> dict:
+        assert task_id == failed["id"]
+        assert reuse_task_id == failed["id"]
+        workflow_tasks.complete_task(reuse_task_id, done=1, message="重试完成")
+        return {"enriched": 1}
+
+    monkeypatch.setattr(jobs_route, "retry_failed_jd_details", fake_retry)
+
+    response = client.post(f"/api/workflow/tasks/{failed['id']}/retry")
+
+    assert response.status_code == 202
+    tasks = workflow_tasks.load_tasks(limit=100)
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == failed["id"]
+    assert tasks[0]["status"] == "completed"
+    assert response.json()["task"]["id"] == failed["id"]
+
+
+def test_delete_completed_workflow_task(tmp_path, monkeypatch):
     from app.services import workflow_persistence, workflow_tasks
 
     monkeypatch.setattr(workflow_persistence, "DATA_DIR", tmp_path)
     monkeypatch.setattr(workflow_tasks, "TASKS_FILE", tmp_path / "workflow" / "tasks.json")
-    source = workflow_tasks.start_task("unknown_module", "源任务", total=1)
-    workflow_tasks.fail_task(source["id"], "失败", retryable=True)
-    queued, _ = workflow_tasks.queue_retry_task(source["id"])
+    completed = workflow_tasks.start_task("unknown_module", "已完成任务", total=1)
+    workflow_tasks.complete_task(completed["id"], done=1, message="完成")
     running = workflow_tasks.start_task("boss_capture", "抓取中", total=3)
 
-    response = client.delete(f"/api/workflow/tasks/{queued['id']}")
+    response = client.delete(f"/api/workflow/tasks/{completed['id']}")
     running_response = client.delete(f"/api/workflow/tasks/{running['id']}")
 
     assert response.status_code == 200
     assert response.json()["deleted"] is True
     assert running_response.status_code == 409
     task_ids = {task["id"] for task in workflow_tasks.load_tasks(limit=100)}
-    assert queued["id"] not in task_ids
-    assert source["id"] in task_ids
+    assert completed["id"] not in task_ids
     assert running["id"] in task_ids
 
 

@@ -31,7 +31,8 @@ def capture_from_boss(
         tags = job.get("keywords", []) if isinstance(job, dict) else getattr(job, "tags", [])
 
         source_id = hashlib.md5((src_url or f"no-url-{i}-{company}").encode()).hexdigest()[:12]
-        dedupe_key = _make_dedupe_key(company, title, city_val)
+        # BOSS 重抓过滤按公司 + 岗位名判断；城市变化不应产生重复岗位。
+        dedupe_key = _make_dedupe_key(company, title, "")
 
         sources.append(JobSource(
             source_type="captured",
@@ -74,7 +75,7 @@ def jobs_from_source(source: JobSource) -> JobRecord:
         capture_company_name=raw.get("company", ""),
         capture_dedupe_key=source.dedupe_key,
         fetched_at=source.fetched_at,
-        dedupe_key=source.dedupe_key,
+        dedupe_key=_make_dedupe_key(raw.get("company", ""), raw.get("title", ""), raw.get("city", "")),
     )
 
 
@@ -85,6 +86,7 @@ def jobs_from_manual_payload(payload: dict) -> JobRecord:
     title = payload.get("title", "")
     city = payload.get("city", "")
     dedupe_key = _make_dedupe_key(company, title, city)
+    capture_dedupe_key = _make_dedupe_key(company, title, "")
     return JobRecord(
         id=payload.get("id") or f"manual-{hashlib.md5((company+title+city).encode()).hexdigest()[:8]}",
         title=title,
@@ -94,7 +96,7 @@ def jobs_from_manual_payload(payload: dict) -> JobRecord:
         jd_text=payload.get("jd_text", ""),
         source_url=payload.get("source_url", ""),
         capture_company_name=company,
-        capture_dedupe_key=dedupe_key,
+        capture_dedupe_key=capture_dedupe_key,
         application_status="active",
         source="manual",
         fetched_at=now,

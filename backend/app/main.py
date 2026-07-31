@@ -18,6 +18,10 @@ from app.routes.scoring import router as scoring_router
 from app.routes.settings import router as settings_router
 from app.routes.workflow import router as workflow_router
 from app.services.access_control import is_allowed_host
+from app.services.runtime_logging import configure_runtime_logging
+
+
+configure_runtime_logging()
 
 app = FastAPI(title="boss 求职助手")
 

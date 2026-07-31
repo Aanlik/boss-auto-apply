@@ -723,9 +723,13 @@ def send_greetings_endpoint(payload: GreetingSendRequest, background_tasks: Back
     return send_greetings(payload, background_tasks=background_tasks)
 
 
-def send_greetings(payload: GreetingSendRequest, background_tasks: BackgroundTasks | None = None) -> dict:
+def send_greetings(
+    payload: GreetingSendRequest,
+    background_tasks: BackgroundTasks | None = None,
+    workflow_task_id: str | None = None,
+) -> dict:
     browser_auto = payload.mode == "browser_auto"
-    result = _send_greetings_impl(payload)
+    result = _send_greetings_impl(payload, workflow_task_id=workflow_task_id)
     if browser_auto:
         if background_tasks is not None:
             background_tasks.add_task(close_browser_after_greeting_task)
@@ -734,7 +738,7 @@ def send_greetings(payload: GreetingSendRequest, background_tasks: BackgroundTas
     return result
 
 
-def _send_greetings_impl(payload: GreetingSendRequest) -> dict:
+def _send_greetings_impl(payload: GreetingSendRequest, workflow_task_id: str | None = None) -> dict:
     if not payload.confirm:
         raise HTTPException(status_code=400, detail="发送前必须人工确认")
     if payload.mode not in {"manual_confirm", "browser_auto"}:
@@ -748,13 +752,20 @@ def _send_greetings_impl(payload: GreetingSendRequest) -> dict:
     gray = _gray_mode_status(settings)
     if payload.mode == "browser_auto" and len(requested_ids) > 1 and not gray["batchAllowed"]:
         raise HTTPException(status_code=403, detail="灰度模式要求今天先成功真实发送 1 个岗位，再开放批量发送")
-    task = start_task(
-        "greeting_send",
-        "确认打招呼",
-        total=len(requested_ids),
-        payload={"job_ids": requested_ids, "mode": payload.mode, "messages": payload.messages},
-        idempotency_key=f"greeting_send:{','.join(sorted(requested_ids))}:{payload.mode}",
-    )
+    task_payload = {"job_ids": requested_ids, "mode": payload.mode, "messages": payload.messages}
+    if workflow_task_id:
+        task = get_task(workflow_task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="重试任务不存在")
+        task = update_task(task["id"], total=len(requested_ids), payload=task_payload)
+    else:
+        task = start_task(
+            "greeting_send",
+            "确认打招呼",
+            total=len(requested_ids),
+            payload=task_payload,
+            idempotency_key=f"greeting_send:{','.join(sorted(requested_ids))}:{payload.mode}",
+        )
 
     drafts = load_greetings()
     candidates = build_greeting_candidates(list(job_index.values()), requested_ids)
@@ -862,7 +873,7 @@ def _send_greetings_impl(payload: GreetingSendRequest) -> dict:
 
 
 @router.post("/retry-failed/{task_id}")
-def retry_failed_greetings(task_id: str) -> dict:
+def retry_failed_greetings(task_id: str, reuse_task_id: str | None = None) -> dict:
     task = get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -880,7 +891,7 @@ def retry_failed_greetings(task_id: str) -> dict:
         daily_limit=15,
         send_interval_seconds=5,
         stop_on_blocked=True,
-    ))
+    ), workflow_task_id=reuse_task_id)
 
 
 @router.get("/drafts")

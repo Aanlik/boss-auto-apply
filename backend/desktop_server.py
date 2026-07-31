@@ -29,6 +29,9 @@ def configure_desktop_environment() -> None:
     os.environ.setdefault("BOSS_WORKBENCH_DATA_DIR", str(_default_desktop_data_dir()))
     os.environ.setdefault("BOSS_WORKBENCH_DESKTOP", "1")
     Path(os.environ["BOSS_WORKBENCH_DATA_DIR"]).mkdir(parents=True, exist_ok=True)
+    from app.services.runtime_logging import configure_runtime_logging
+
+    configure_runtime_logging(Path(os.environ["BOSS_WORKBENCH_DATA_DIR"]))
 
 
 def main() -> None:

@@ -386,28 +386,43 @@ def _launch_chrome(url="about:blank"):
     _stop_chrome()
     _time.sleep(1)
     chrome = _find_chrome()
-    subprocess.Popen(
-        [
-            chrome,
-            f"--remote-debugging-port={CDP_PORT}",
-            f"--user-data-dir={CDP_PROFILE}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-networking",
-            "--disable-sync",
-            "--window-size=1440,900",
-            "--window-position=100,100",
-            "--disable-blink-features=AutomationControlled",
-            "--remote-allow-origins=*",
-            url,
-        ],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    chrome_log_path = workflow_persistence.DATA_DIR / "logs" / "chrome.log"
+    chrome_log_path.parent.mkdir(parents=True, exist_ok=True)
+    chrome_log = chrome_log_path.open("a", encoding="utf-8", buffering=1)
+    chrome_log.write(f"\n=== Chrome launch port={CDP_PORT} executable={chrome} ===\n")
+    try:
+        subprocess.Popen(
+            [
+                chrome,
+                f"--remote-debugging-port={CDP_PORT}",
+                f"--user-data-dir={CDP_PROFILE}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--window-size=1440,900",
+                "--window-position=100,100",
+                "--disable-blink-features=AutomationControlled",
+                "--remote-allow-origins=*",
+                "--enable-logging=stderr",
+                "--log-file=" + str(chrome_log_path),
+                url,
+            ],
+            stdout=chrome_log,
+            stderr=subprocess.STDOUT,
+        )
+    except Exception:
+        chrome_log.close()
+        logger.exception("Chrome 启动失败")
+        raise
+    finally:
+        chrome_log.close()
     for _ in range(20):
         if _chrome_running():
             logger.info("Chrome CDP 已启动: port=%d", CDP_PORT)
             return True
         _time.sleep(0.5)
+    logger.error("Chrome 启动后未监听 CDP 端口: %d", CDP_PORT)
     return False
 
 
@@ -424,6 +439,7 @@ def _stop_chrome(clear_session: bool = False):
             pid = pid_str.strip()
             if pid:
                 try:
+                    logger.info("关闭 Chrome CDP 进程: pid=%s port=%d", pid, CDP_PORT)
                     os.kill(int(pid), _signal.SIGTERM)
                 except (OSError, ValueError):
                     pass
@@ -817,16 +833,18 @@ def _emit_detail_progress(on_progress, job, done, total, success, reason="") -> 
         logger.warning("JD 进度保存失败，不中断后续抓取: %s", error)
 
 
-def enrich_jobs_with_details(jobs, max_jobs=30, on_progress=None):
+def enrich_jobs_with_details(jobs, max_jobs=30, on_progress=None, preserve_browser_on_all_failures=False):
     """为岗位列表补充详情页 JD（同步版本）。"""
     global _detail_enrich_running
 
+    logger.info("JD 任务开始: requested=%d max_jobs=%d", len(jobs or []), max_jobs)
     if not _chrome_running():
         if not _launch_chrome():
             raise RuntimeError("Chrome 启动失败")
 
     cdp = None
     tid = None
+    preserve_browser = False
     try:
         _detail_enrich_running = True
         cdp = CDPSession(CDP_PORT)
@@ -911,21 +929,33 @@ def enrich_jobs_with_details(jobs, max_jobs=30, on_progress=None):
 
                 enriched += 1
                 logger.info("  JD: %d 字符", len(detail["jd"]))
+                logger.info("JD 进度: %d/%d success", i + 1, len(to_process))
                 _emit_detail_progress(on_progress, job, i + 1, len(to_process), True)
             else:
                 reason = failure_reason or "未提取到有效 JD"
                 logger.info("  %s", reason)
+                logger.warning("JD 进度: %d/%d failed reason=%s", i + 1, len(to_process), reason[:200])
                 _emit_detail_progress(on_progress, job, i + 1, len(to_process), False, reason)
 
             if i < len(to_process) - 1:
                 _time.sleep(random.uniform(2, 4))
 
         logger.info("详情补充完成: %d/%d", enriched, len(to_process))
+        preserve_browser = preserve_browser_on_all_failures and bool(to_process) and enriched == 0
         return enriched
 
     finally:
-        _close_detail_session(cdp, tid)
-        _stop_chrome()
+        if preserve_browser:
+            if cdp:
+                try:
+                    cdp.close()
+                except Exception:
+                    pass
+            logger.warning("JD 全部抓取失败，保留 BOSS 浏览器供人工检查")
+        else:
+            _close_detail_session(cdp, tid)
+            _stop_chrome()
+            logger.info("JD 任务结束，已关闭 Chrome: success=%d total=%d", enriched, len(to_process))
         _detail_enrich_running = False
 
 
