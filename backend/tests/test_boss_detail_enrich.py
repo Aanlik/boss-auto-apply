@@ -396,6 +396,31 @@ def test_enrich_jd_filters_existing_detail_jd_by_default(monkeypatch):
     assert response.json()["skipped_existing_jd"] == 1
 
 
+def test_enrich_jd_does_not_fallback_to_all_jobs_for_stale_selection(monkeypatch):
+    import app.routes.jobs as jobs_route
+    import app.services.boss_scraper as scraper
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("失效的岗位选择不应回退为全量抓取")
+
+    monkeypatch.setattr(scraper, "enrich_jobs_with_details", fail_if_called)
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "job-1": JobRecord(
+            id="job-1",
+            title="产品经理",
+            company="正常公司",
+            city="郑州",
+            source_url="https://www.zhipin.com/job_detail/job-1.html",
+        ),
+    })
+
+    client = TestClient(app)
+    response = client.post("/api/jobs/enrich-jd", json={"job_ids": ["deleted-job"]})
+
+    assert response.status_code == 400
+    assert "选中的岗位已不存在" in response.json()["detail"]
+
+
 def test_job_quality_excludes_blacklisted_jobs_from_jd_counts(monkeypatch):
     import app.routes.jobs as jobs_route
 

@@ -452,12 +452,20 @@ def boss_login() -> dict:
 def enrich_jd_details(payload: dict) -> dict:
     """为已有岗位补充详情页 JD。"""
     from app.services.boss_scraper import enrich_jobs_with_details
-    job_ids = payload.get("job_ids", [])
+    has_explicit_job_ids = "job_ids" in payload
+    raw_job_ids = payload.get("job_ids", [])
+    if raw_job_ids is None:
+        raw_job_ids = []
+    if not isinstance(raw_job_ids, list):
+        raise HTTPException(status_code=400, detail="岗位 ID 参数格式无效")
+    job_ids = [str(job_id) for job_id in raw_job_ids if str(job_id).strip()]
     force = bool(payload.get("force", False))
     retry_task_id = str(payload.get("_workflow_retry_task_id") or "")
     
     requested_jobs = [_job_store[jid] for jid in job_ids if jid in _job_store]
-    if not requested_jobs:
+    if has_explicit_job_ids and not requested_jobs:
+        raise HTTPException(status_code=400, detail="选中的岗位已不存在，请刷新岗位列表后重新选择")
+    if not has_explicit_job_ids:
         requested_jobs = list(_job_store.values())
     # Explicit selections are user-scoped work and should not be silently capped at 30.
     # Keep the smaller default only for an unfiltered "process the pool" request.

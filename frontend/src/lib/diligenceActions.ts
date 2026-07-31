@@ -9,6 +9,12 @@ export type DiligencePrimaryAction = {
   disabled: boolean;
 };
 
+export type JdAnalysisAction = {
+  label: string;
+  targetIds: string[];
+  disabled: boolean;
+};
+
 type ResolveDiligencePrimaryActionInput = {
   jobs: JobPosting[];
   selectedJobIds: string[];
@@ -26,6 +32,25 @@ function hasDiligence(job: JobPosting, reports: Record<string, DiligenceReport>)
       (job.company_key && report.companyKey === job.company_key)
     )
   );
+}
+
+export function resolveJdAnalysisAction(input: {
+  jobs: JobPosting[];
+  selectedJobIds: string[];
+  jdAnalyses: Record<string, JDAnalysis>;
+}): JdAnalysisAction {
+  const selectedJobs = input.jobs.filter(job => input.selectedJobIds.includes(job.id));
+  if (selectedJobs.length === 0) {
+    return { label: "一键 JD 分析", targetIds: [], disabled: true };
+  }
+
+  const targetIds = selectedJobs.map(job => job.id);
+  const missingCount = selectedJobs.filter(job => !input.jdAnalyses[job.id]).length;
+  return {
+    label: missingCount > 0 ? `一键 JD 分析 (${missingCount})` : `一键重新分析 JD (${selectedJobs.length})`,
+    targetIds,
+    disabled: false,
+  };
 }
 
 export function resolveDiligencePrimaryAction(input: ResolveDiligencePrimaryActionInput): DiligencePrimaryAction {

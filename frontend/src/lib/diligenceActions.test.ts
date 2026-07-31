@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { DiligenceReport, JobPosting, JDAnalysis } from "./types";
-import { resolveDiligencePrimaryAction } from "./diligenceActions";
+import { resolveDiligencePrimaryAction, resolveJdAnalysisAction } from "./diligenceActions";
 
 function job(overrides: Partial<JobPosting>): JobPosting {
   return {
@@ -50,6 +50,29 @@ function report(companyName: string): DiligenceReport {
 }
 
 describe("resolveDiligencePrimaryAction", () => {
+  test("shows one-click JD analysis before selected jobs are analyzed", () => {
+    const action = resolveJdAnalysisAction({
+      jobs: [job({ id: "job-1" })],
+      selectedJobIds: ["job-1"],
+      jdAnalyses: {},
+    });
+
+    expect(action.label).toBe("一键 JD 分析 (1)");
+    expect(action.targetIds).toEqual(["job-1"]);
+    expect(action.disabled).toBe(false);
+  });
+
+  test("switches to one-click JD reanalysis after selected jobs are analyzed", () => {
+    const action = resolveJdAnalysisAction({
+      jobs: [job({ id: "job-1" })],
+      selectedJobIds: ["job-1"],
+      jdAnalyses: { "job-1": analysis() },
+    });
+
+    expect(action.label).toBe("一键重新分析 JD (1)");
+    expect(action.targetIds).toEqual(["job-1"]);
+  });
+
   test("prioritizes JD analysis when selected jobs have no analysis", () => {
     const action = resolveDiligencePrimaryAction({
       jobs: [job({ id: "job-1" })],

@@ -315,9 +315,19 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
 
   async function onEnrichJD(force = false) {
     if (force && !confirm("确定重新抓取 JD？已有 JD 内容会被最新详情覆盖。")) return;
+    const hasSelection = selectedJobIds.length > 0;
+    const currentJobIds = new Set(jobs.map(job => job.id));
+    const selectedIds = selectedJobIds.filter(id => currentJobIds.has(id));
+    if (hasSelection && selectedIds.length === 0) {
+      setError("已选岗位已不存在，请刷新岗位列表后重新选择");
+      return;
+    }
+    if (selectedIds.length !== selectedJobIds.length) {
+      dispatch(actions.setSelection(selectedIds));
+    }
     setLoading(force ? "enrich-force" : "enrich"); setError("");
     try {
-      await enrichJdDetails({ job_ids: selectedJobIds.length > 0 ? selectedJobIds : undefined, force });
+      await enrichJdDetails({ job_ids: hasSelection ? selectedIds : undefined, force });
       await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) { setError(formatApiError(err) || "JD抓取失败"); }

@@ -6,7 +6,7 @@ import ChatPanel from "../components/ChatPanel";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
 import { buildDiligenceEvidence } from "../lib/workflowInsights";
 import AiFeedbackButtons from "../components/AiFeedbackButtons";
-import { resolveDiligencePrimaryAction } from "../lib/diligenceActions";
+import { resolveDiligencePrimaryAction, resolveJdAnalysisAction } from "../lib/diligenceActions";
 
 type CardState = { jdExpanded: boolean; ddExpanded: boolean; chatExpanded: boolean };
 type BatchProgress = { kind: "jd" | "dd"; done: number; total: number; current: string } | null;
@@ -220,7 +220,13 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
     jdAnalyses,
     diligenceReports,
   }), [jobs, localSelection, jdAnalyses, diligenceReports]);
+  const jdAction = useMemo(() => resolveJdAnalysisAction({
+    jobs,
+    selectedJobIds: localSelection,
+    jdAnalyses,
+  }), [jobs, localSelection, jdAnalyses]);
   const primaryActionBusy = batchProgress !== null || primaryAction.targetIds.some(id => loading[id] || loading[id + "-dd"]);
+  const jdActionBusy = batchProgress?.kind === "jd" || jdAction.targetIds.some(id => loading[id]);
 
   async function runPrimaryAction() {
     if (primaryAction.disabled || primaryActionBusy) return;
@@ -264,10 +270,16 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
           <p className="page-copy">千帆智能搜索 + AI 总结 → AI 整合分析，综合评估公司风险与前景。</p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+	          <button type="button" className="button-primary" onClick={() => analyzeSelectedJD(jdAction.targetIds)}
+	            disabled={jdAction.disabled || jdActionBusy}>
+	            {batchProgress?.kind === "jd" ? `JD分析 ${batchProgress.done}/${batchProgress.total}` : jdAction.label}
+	          </button>
+	          {primaryAction.kind !== "analyze_jd" && (
 	          <button type="button" className="button-primary" onClick={runPrimaryAction}
 	            disabled={primaryAction.disabled || primaryActionBusy}>
-	            {batchProgress?.kind === "jd" ? `JD分析 ${batchProgress.done}/${batchProgress.total}` : batchProgress?.kind === "dd" ? `尽调 ${batchProgress.done}/${batchProgress.total}` : primaryAction.label}
+	            {batchProgress?.kind === "dd" ? `尽调 ${batchProgress.done}/${batchProgress.total}` : primaryAction.label}
 	          </button>
+	          )}
           {localSelection.length > 0 && (
             <button type="button" className="button-primary" onClick={goToRanking}
               style={{ background: "var(--accent-strong)" }}>
