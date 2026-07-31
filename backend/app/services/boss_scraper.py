@@ -791,7 +791,33 @@ def scrape_job_detail(cdp, sid, job_url):
         return {"jd": "", "jd_tags": []}
 
 
-def enrich_jobs_with_details(jobs, max_jobs=30):
+def _is_recoverable_cdp_error(error: Exception) -> bool:
+    return isinstance(error, (ConnectionError, TimeoutError, OSError, websocket.WebSocketException))
+
+
+def _close_detail_session(cdp, tid) -> None:
+    if tid and cdp:
+        try:
+            cdp.send("Target.closeTarget", {"targetId": tid})
+        except Exception:
+            pass
+    if cdp:
+        try:
+            cdp.close()
+        except Exception:
+            pass
+
+
+def _emit_detail_progress(on_progress, job, done, total, success, reason="") -> None:
+    if not on_progress:
+        return
+    try:
+        on_progress(job, done, total, success, reason)
+    except Exception as error:
+        logger.warning("JD 进度保存失败，不中断后续抓取: %s", error)
+
+
+def enrich_jobs_with_details(jobs, max_jobs=30, on_progress=None):
     """为岗位列表补充详情页 JD（同步版本）。"""
     global _detail_enrich_running
 
@@ -816,6 +842,7 @@ def enrich_jobs_with_details(jobs, max_jobs=30):
 
         logger.info("开始补充 %d 个岗位的详情 JD...", len(to_process))
         enriched = 0
+        recovery_used = False
 
         for i, job in enumerate(to_process):
             title = job.title if hasattr(job, 'title') else job.get("title", "")
@@ -823,38 +850,72 @@ def enrich_jobs_with_details(jobs, max_jobs=30):
             keywords = job.keywords if hasattr(job, 'keywords') else job.get("keywords", [])
 
             logger.info("[%d/%d] %s", i + 1, len(to_process), title[:30])
+            detail = None
+            failure_reason = ""
             try:
                 detail = scrape_job_detail(cdp, sid, source_url)
-                if detail.get("jd") and len(detail["jd"]) > 50:
-                    if hasattr(job, 'jd_text'):
-                        job.jd_text = detail["jd"]
-                    else:
-                        job["jd_text"] = detail["jd"]
-
-                    # 同步获取企业工商注册名称
-                    company_name = detail.get("company_name", "")
-                    if company_name and len(company_name) >= 3:
-                        if hasattr(job, 'tags'):
-                            job.company = company_name
-                            job.tags = [t for t in (job.tags or []) if not t.startswith("@")]
-                        elif isinstance(job, dict):
-                            job["company"] = company_name
-                            job["tags"] = [t for t in job.get("tags", []) if not t.startswith("@")]
-
-                    if detail.get("jd_tags"):
-                        existing = set(keywords or [])
-                        new_tags = [t for t in detail["jd_tags"] if t not in existing and len(t) < 20]
-                        if hasattr(job, 'keywords'):
-                            job.keywords = list(keywords or []) + new_tags
-                        else:
-                            job["keywords"] = list(keywords or []) + new_tags
-
-                    enriched += 1
-                    logger.info("  JD: %d 字符", len(detail["jd"]))
-                else:
-                    logger.info("  未提取到 JD")
             except Exception as e:
-                logger.warning("  详情抓取异常: %s", e)
+                failure_reason = str(e)
+                should_recover = not recovery_used and (_is_recoverable_cdp_error(e) or not _chrome_running())
+                if should_recover:
+                    recovery_used = True
+                    logger.warning("  CDP 会话中断，重建浏览器后重试当前 JD: %s", e)
+                    _close_detail_session(cdp, tid)
+                    cdp = None
+                    tid = None
+                    _stop_chrome()
+                    try:
+                        if not _launch_chrome():
+                            raise RuntimeError("Chrome 重建失败")
+                        cdp = CDPSession(CDP_PORT)
+                        tid, sid = cdp.create_page()
+                        detail = scrape_job_detail(cdp, sid, source_url)
+                        failure_reason = ""
+                    except Exception as retry_error:
+                        failure_reason = str(retry_error)
+                        logger.warning("  CDP 会话重建后仍无法抓取: %s", retry_error)
+                else:
+                    logger.warning("  详情抓取异常: %s", e)
+
+            if detail and detail.get("jd") and len(detail["jd"]) > 50:
+                if hasattr(job, 'jd_text'):
+                    job.jd_text = detail["jd"]
+                    job.jd_detail_fetched_at = datetime.now(timezone.utc).isoformat()
+                    job.jd_detail_url = source_url
+                else:
+                    job["jd_text"] = detail["jd"]
+                    job["jd_detail_fetched_at"] = datetime.now(timezone.utc).isoformat()
+                    job["jd_detail_url"] = source_url
+
+                # 同步获取企业工商注册名称
+                company_name = detail.get("company_name", "")
+                if company_name and len(company_name) >= 3:
+                    if hasattr(job, 'tags'):
+                        if not job.capture_company_name:
+                            job.capture_company_name = job.company
+                        job.company = company_name
+                        job.tags = [t for t in (job.tags or []) if not t.startswith("@")]
+                    elif isinstance(job, dict):
+                        if not job.get("capture_company_name"):
+                            job["capture_company_name"] = job.get("company", "")
+                        job["company"] = company_name
+                        job["tags"] = [t for t in job.get("tags", []) if not t.startswith("@")]
+
+                if detail.get("jd_tags"):
+                    existing = set(keywords or [])
+                    new_tags = [t for t in detail["jd_tags"] if t not in existing and len(t) < 20]
+                    if hasattr(job, 'keywords'):
+                        job.keywords = list(keywords or []) + new_tags
+                    else:
+                        job["keywords"] = list(keywords or []) + new_tags
+
+                enriched += 1
+                logger.info("  JD: %d 字符", len(detail["jd"]))
+                _emit_detail_progress(on_progress, job, i + 1, len(to_process), True)
+            else:
+                reason = failure_reason or "未提取到有效 JD"
+                logger.info("  %s", reason)
+                _emit_detail_progress(on_progress, job, i + 1, len(to_process), False, reason)
 
             if i < len(to_process) - 1:
                 _time.sleep(random.uniform(2, 4))
@@ -862,6 +923,69 @@ def enrich_jobs_with_details(jobs, max_jobs=30):
         logger.info("详情补充完成: %d/%d", enriched, len(to_process))
         return enriched
 
+    finally:
+        _close_detail_session(cdp, tid)
+        _stop_chrome()
+        _detail_enrich_running = False
+
+
+def check_login_status(*, probe: bool = True) -> dict:
+    """检查 BOSS 直聘是否已登录。
+    
+    probe=True（默认）时，会通过应用自己的 CDP Chrome 实际导航验证 Cookie 有效性；
+    probe=False 时仅检查本地登录标记文件，不触发浏览器页面。
+    显式探测无法完成时不会信任过期的本地登录标记。
+    """
+    session_file = Path(CDP_PROFILE) / ".boss_logged_in"
+    if _detail_enrich_running:
+        return _session_file_status(session_file) if session_file.exists() else _not_logged_in_status()
+
+    if not probe:
+        return _session_file_status(session_file) if session_file.exists() else _not_logged_in_status()
+
+    started_here = False
+    if not _chrome_running():
+        try:
+            started_here = bool(_launch_chrome())
+        except Exception as e:
+            logger.warning("启动 Chrome 进行登录探测失败: %s", e)
+        if not started_here:
+            if session_file.exists():
+                session_file.unlink(missing_ok=True)
+            return {
+                **_not_logged_in_status(),
+                "reason": "probe_unavailable",
+                "message": "无法启动浏览器完成登录检测",
+                "action": "请重新启动桌面端后再检测",
+            }
+
+    cdp = None
+    tid = None
+    try:
+        cdp = CDPSession(CDP_PORT)
+        tid, sid = cdp.create_page()
+        cdp.navigate("https://www.zhipin.com", sid)
+        result = _probe_login(cdp, sid)
+        if result["status"] == "ok":
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            if not session_file.exists():
+                session_file.write_text(datetime.now(timezone.utc).isoformat())
+            return {"logged_in": True, "reason": "ok", "message": "已登录", "action": ""}
+
+        session_file.unlink(missing_ok=True)
+        logger.info("登录态探测未通过，清除本地登录标记")
+        reason = "restricted" if result.get("status") == "restricted" else "cookie_expired"
+        action = "疑似页面风控，请稍后重试" if reason == "restricted" else "请重新扫码登录 BOSS 直聘"
+        return {"logged_in": False, "reason": reason, "message": result.get("message") or "未登录", "action": action}
+    except Exception as e:
+        logger.warning("登录态探测失败: %s", e)
+        session_file.unlink(missing_ok=True)
+        return {
+            **_not_logged_in_status(),
+            "reason": "probe_failed",
+            "message": "登录状态检测失败，未能确认当前账号",
+            "action": "请确认网络正常后再次检测",
+        }
     finally:
         if tid and cdp:
             try:
@@ -873,57 +997,17 @@ def enrich_jobs_with_details(jobs, max_jobs=30):
                 cdp.close()
             except Exception:
                 pass
-        _stop_chrome()
-        _detail_enrich_running = False
+        if started_here:
+            _stop_chrome()
 
 
-def check_login_status(*, probe: bool = True) -> dict:
-    """检查 BOSS 直聘是否已登录。
-    
-    probe=True（默认）时，Chrome 运行中会通过 CDP 实际导航验证 Cookie 有效性；
-    probe=False 时仅检查本地登录标记文件，不触发浏览器页面。
-    Chrome 未运行时始终退化为文件检查。
-    """
-    session_file = Path(CDP_PROFILE) / ".boss_logged_in"
-    if not session_file.exists():
-        return {
-            "logged_in": False,
-            "reason": "not_logged_in",
-            "message": "未登录",
-            "action": "请点击「登录 Boss 直聘」并扫码登录",
-        }
-
-    if _detail_enrich_running:
-        return _session_file_status(session_file)
-
-    # Chrome 运行中 → 实际探测登录态，防止 Cookie 过期误报
-    if probe and _chrome_running():
-        try:
-            cdp = CDPSession(CDP_PORT)
-            tid, sid = cdp.create_page()
-            cdp.navigate("https://www.zhipin.com", sid)
-            result = _probe_login(cdp, sid)
-            cdp.send("Target.closeTarget", {"targetId": tid})
-            cdp.close()
-            if result["status"] == "ok":
-                try:
-                    login_time = session_file.read_text().strip()
-                    return {"logged_in": True, "reason": "ok", "message": f"已登录 (登录时间: {login_time[:10]})", "action": ""}
-                except Exception:
-                    return {"logged_in": True, "reason": "ok", "message": "已登录", "action": ""}
-            # Cookie 已过期，清除标记
-            session_file.unlink()
-            logger.info("登录态已过期，清除标记文件")
-            reason = "restricted" if result.get("status") == "restricted" else "cookie_expired"
-            action = "疑似页面风控，请稍后重试" if reason == "restricted" else "Cookie 失效，请重新扫码登录"
-            return {"logged_in": False, "reason": reason, "message": result.get("message") or "登录已过期，请重新登录", "action": action}
-        except Exception as e:
-            logger.warning("登录态探测失败: %s，退化为文件检查", e)
-            status = _session_file_status(session_file)
-            return {**status, "reason": "network_failed", "action": "网络或 Chrome 调试端口异常，已按本地登录标记兜底"}
-
-    # Chrome 未运行或探测失败 → 退化为文件检查
-    return _session_file_status(session_file)
+def _not_logged_in_status() -> dict:
+    return {
+        "logged_in": False,
+        "reason": "not_logged_in",
+        "message": "未登录",
+        "action": "请点击「登录 Boss 直聘」并扫码登录",
+    }
 
 
 def _session_file_status(session_file: Path) -> dict:

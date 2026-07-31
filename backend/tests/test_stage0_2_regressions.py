@@ -394,3 +394,43 @@ def test_boss_capture_dedupes_within_new_batch(monkeypatch):
     assert response.json()["captured"] == 1
     assert response.json()["removed_duplicates"] == 1
     assert list(jobs_route._job_store) == ["job-1"]
+
+
+def test_boss_capture_keeps_existing_job_when_jd_normalized_company_name(monkeypatch):
+    import app.routes.jobs as jobs_route
+    from app.models.job import JobRecord
+    from app.services.job_capture import _make_dedupe_key
+
+    source_url = "https://www.zhipin.com/job_detail/same-job.html"
+    source_key = _make_dedupe_key("品牌科技", "产品经理", "郑州")
+    existing = JobRecord(
+        id="boss-existing",
+        title="产品经理",
+        company="品牌科技有限公司",
+        capture_company_name="品牌科技",
+        capture_dedupe_key=source_key,
+        city="郑州",
+        source_url=source_url,
+    )
+    monkeypatch.setattr(jobs_route, "_job_store", {existing.id: existing})
+
+    def fake_ingest_from_boss(**kwargs):
+        return [JobRecord(
+            id="boss-existing",
+            title="产品经理",
+            company="品牌科技",
+            capture_company_name="品牌科技",
+            capture_dedupe_key=source_key,
+            city="郑州",
+            source_url=source_url,
+        )]
+
+    monkeypatch.setattr(jobs_route, "ingest_from_boss", fake_ingest_from_boss)
+
+    client = TestClient(app)
+    response = client.post("/api/jobs/capture/boss", json={"keyword": "产品经理", "city": "郑州"})
+
+    assert response.status_code == 200
+    assert response.json()["captured"] == 0
+    assert response.json()["removed_duplicates"] == 1
+    assert jobs_route._job_store[existing.id].company == "品牌科技有限公司"

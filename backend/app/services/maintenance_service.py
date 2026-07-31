@@ -419,8 +419,13 @@ def data_quality_center() -> dict[str, Any]:
             duplicate_ids.add(job.id)
         else:
             seen.add(key)
-    missing_jd = [job for job in jobs if not (job.jd_text or "").strip()]
-    low_quality_jd = [job for job in jobs if (job.jd_text or "").strip() and len((job.jd_text or "").strip()) < 80]
+    missing_jd = [job for job in jobs if not ((job.jd_text or "").strip() and (getattr(job, "jd_detail_fetched_at", "") or "").strip())]
+    low_quality_jd = [
+        job for job in jobs
+        if (job.jd_text or "").strip()
+        and (getattr(job, "jd_detail_fetched_at", "") or "").strip()
+        and len((job.jd_text or "").strip()) < 80
+    ]
     suspected_expired = [job for job in jobs if job.lifecycle_status == "suspected_expired"]
     blacklisted = [job for job in jobs if job.lifecycle_status == "blacklisted"]
     missing_business_name = [

@@ -71,6 +71,8 @@ def jobs_from_source(source: JobSource) -> JobRecord:
         keywords=list(captured_keywords or []),
         source=source.source_type,
         source_url=raw.get("source_url", ""),
+        capture_company_name=raw.get("company", ""),
+        capture_dedupe_key=source.dedupe_key,
         fetched_at=source.fetched_at,
         dedupe_key=source.dedupe_key,
     )
@@ -91,6 +93,8 @@ def jobs_from_manual_payload(payload: dict) -> JobRecord:
         salary=payload.get("salary", ""),
         jd_text=payload.get("jd_text", ""),
         source_url=payload.get("source_url", ""),
+        capture_company_name=company,
+        capture_dedupe_key=dedupe_key,
         application_status="active",
         source="manual",
         fetched_at=now,

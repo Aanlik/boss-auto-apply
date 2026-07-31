@@ -10,11 +10,15 @@ class JobRecord(BaseModel):
     salary_min: int = 0          # 薪资下限，自动解析
     salary_max: int = 0          # 薪资上限，自动解析
     jd_text: str = ""
+    jd_detail_fetched_at: str = ""  # 详情页 JD 成功抓取时间；搜索列表短摘要不算详情 JD
+    jd_detail_url: str = ""
     jd_analysis: dict = Field(default_factory=dict)
     keywords: list[str] = Field(default_factory=list)
     structured_summary: str = ""  # AI 或规则生成的 JD 摘要
     source: str = "manual"       # manual / captured / imported
     source_url: str = ""
+    capture_company_name: str = ""  # BOSS 列表首次抓取的品牌名，仅用于后端再次抓取过滤
+    capture_dedupe_key: str = ""    # 基于首次抓取品牌名生成的稳定去重键
     fetched_at: str = ""         # ISO 时间戳
     dedupe_key: str = ""         # 去重键：company+title+city 的小写哈希
     capture_batch_id: str = ""   # 抓取批次，便于回溯本次抓取质量

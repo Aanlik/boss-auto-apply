@@ -117,6 +117,25 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     }
   }, [visible]);
 
+  useEffect(() => {
+    const jdEnrichRunning = visible && (loading === "enrich" || loading === "enrich-force");
+    if (!jdEnrichRunning) return;
+
+    let refreshing = false;
+    // JD 抓取期间增量刷新岗位数据，避免整页刷新丢失当前筛选和选择状态。
+    const refreshLiveJdResults = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        await Promise.all([reloadJobsForQualityFilter(), loadQuality()]);
+      } finally {
+        refreshing = false;
+      }
+    };
+    const timer = window.setInterval(refreshLiveJdResults, 800);
+    return () => window.clearInterval(timer);
+  }, [visible, loading, qualityFilter]);
+
   async function loadCityOptions() {
     try {
       const r = await listBossCities();
@@ -269,7 +288,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     if (force && !confirm("确定重新抓取 JD？已有 JD 内容会被最新详情覆盖。")) return;
     setLoading(force ? "enrich-force" : "enrich"); setError("");
     try {
-      await enrichJdDetails({ job_ids: selectedJobIds.length > 0 ? selectedJobIds : undefined, max_jobs: 30, force });
+      await enrichJdDetails({ job_ids: selectedJobIds.length > 0 ? selectedJobIds : undefined, max_jobs: force ? undefined : 30, force });
       await reloadJobsForQualityFilter();
       await loadQuality();
     } catch (err) { setError(formatApiError(err) || "JD抓取失败"); }
@@ -523,8 +542,9 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     const duplicateJobIds = new Set((quality?.duplicateGroups || []).flatMap(group => group.jobIds));
     return jobs.filter(j => {
       if (qualityFilter !== "blacklisted" && j.lifecycle_status === "blacklisted") return false;
-      if (qualityFilter === "with_jd" && !(j.jd_text || "").trim()) return false;
-      if (qualityFilter === "missing_jd" && (j.jd_text || "").trim()) return false;
+      const hasDetailJd = Boolean((j.jd_text || "").trim() && (j.jd_detail_fetched_at || "").trim());
+      if (qualityFilter === "with_jd" && !hasDetailJd) return false;
+      if (qualityFilter === "missing_jd" && hasDetailJd) return false;
       if (qualityFilter === "suspected_expired" && j.lifecycle_status !== "suspected_expired") return false;
       if (qualityFilter === "blacklisted" && j.lifecycle_status !== "blacklisted") return false;
       if (qualityFilter === "duplicates" && !duplicateJobIds.has(j.id)) return false;

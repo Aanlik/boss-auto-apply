@@ -16,13 +16,16 @@ def ingest_from_boss(
     headless: bool = True,
     filters: dict[str, str] | None = None,
     existing_dedupe_keys: set[str] | None = None,
+    existing_source_urls: set[str] | None = None,
 ) -> list[JobRecord]:
     """从 Boss 直聘真实抓取并接入。"""
     existing = existing_dedupe_keys or set()
+    existing_urls = existing_source_urls or set()
     sources = capture_from_boss(keyword=keyword, city=city, max_pages=max_pages, headless=headless, filters=filters)
     jobs: list[JobRecord] = []
     for source in sources:
-        if source.dedupe_key in existing:
+        source_url = str(source.raw_payload.get("source_url") or "").strip()
+        if source.dedupe_key in existing or (source_url and source_url in existing_urls):
             continue
         job = jobs_from_source(source)
         job = recognize_job(job)

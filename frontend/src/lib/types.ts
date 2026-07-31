@@ -62,6 +62,8 @@ export type JobPosting = {
   salary_min: number;
   salary_max: number;
   jd_text: string;
+  jd_detail_fetched_at?: string;
+  jd_detail_url?: string;
   jd_analysis?: JDAnalysis;
   keywords: string[];
   structured_summary: string;

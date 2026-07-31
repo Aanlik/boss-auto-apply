@@ -68,6 +68,68 @@ def test_boss_login_closes_browser_and_preserves_session_marker(monkeypatch, tmp
     assert (tmp_path / ".boss_logged_in").exists()
 
 
+def test_boss_login_status_route_uses_real_probe(monkeypatch):
+    import app.services.boss_scraper as scraper
+
+    called = {}
+
+    def fake_check_login_status(*, probe=True):
+      called["probe"] = probe
+      return {"logged_in": False, "reason": "ok", "message": "未登录", "action": "请重新登录"}
+
+    monkeypatch.setattr(scraper, "check_login_status", fake_check_login_status)
+
+    client = TestClient(app)
+    response = client.get("/api/jobs/capture/boss/status")
+
+    assert response.status_code == 200
+    assert called["probe"] is True
+    assert response.json()["logged_in"] is False
+
+
+def test_login_status_does_not_trust_stale_marker_when_chrome_is_closed(monkeypatch, tmp_path):
+    import app.services.boss_scraper as scraper
+
+    session_file = tmp_path / ".boss_logged_in"
+    session_file.write_text("2026-07-29T00:00:00+00:00")
+    stopped = []
+
+    class FakeCDP:
+        def __init__(self, port):
+            pass
+
+        def create_page(self):
+            return "target-1", "session-1"
+
+        def navigate(self, url, sid):
+            pass
+
+        def eval_js(self, js, sid):
+            return json.dumps({
+                "httpStatus": 200,
+                "body": json.dumps({"code": 0, "zpData": {"jobList": []}}),
+            })
+
+        def send(self, method, params=None, sid=None, timeout=30):
+            return {}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(scraper, "CDP_PROFILE", str(tmp_path))
+    monkeypatch.setattr(scraper, "_chrome_running", lambda: False)
+    monkeypatch.setattr(scraper, "_launch_chrome", lambda: True)
+    monkeypatch.setattr(scraper, "_stop_chrome", lambda: stopped.append(True))
+    monkeypatch.setattr(scraper, "CDPSession", FakeCDP)
+
+    result = scraper.check_login_status()
+
+    assert result["logged_in"] is False
+    assert result["reason"] == "cookie_expired"
+    assert not session_file.exists()
+    assert stopped == [True]
+
+
 def test_enrich_detail_replaces_company_name_instead_of_tagging(monkeypatch):
     import app.services.boss_scraper as scraper
 
@@ -117,6 +179,7 @@ def test_enrich_detail_replaces_company_name_instead_of_tagging(monkeypatch):
 
     assert scraper.enrich_jobs_with_details([job], max_jobs=1) == 1
     assert job.company == "示例科技有限公司"
+    assert job.capture_company_name == "示例科技"
     assert job.tags == []
 
 
@@ -169,6 +232,62 @@ def test_enrich_detail_closes_browser_after_task(monkeypatch):
     assert closed == [True]
 
 
+def test_enrich_detail_recovers_once_after_cdp_connection_loss(monkeypatch):
+    import app.services.boss_scraper as scraper
+
+    launches = []
+    progress = []
+    attempts = []
+
+    class FakeCDP:
+        def __init__(self, port):
+            pass
+
+        def create_page(self):
+            return "target-1", "session-1"
+
+        def send(self, method, params=None, sid=None, timeout=30):
+            return {}
+
+        def close(self):
+            pass
+
+    def fake_detail(cdp, sid, source_url):
+        attempts.append(source_url)
+        if len(attempts) == 1:
+            raise ConnectionError("CDP connection closed")
+        return {
+            "jd": "岗位职责：负责产品规划、需求分析和跨团队协作。" * 3,
+            "jd_tags": [],
+            "company_name": "",
+        }
+
+    monkeypatch.setattr(scraper, "_chrome_running", lambda: True)
+    monkeypatch.setattr(scraper, "_launch_chrome", lambda: launches.append(True) or True)
+    monkeypatch.setattr(scraper, "_stop_chrome", lambda clear_session=False: None)
+    monkeypatch.setattr(scraper, "CDPSession", FakeCDP)
+    monkeypatch.setattr(scraper, "scrape_job_detail", fake_detail)
+    monkeypatch.setattr(scraper._time, "sleep", lambda seconds: None)
+
+    job = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        source_url="https://www.zhipin.com/job_detail/demo.html",
+    )
+
+    result = scraper.enrich_jobs_with_details(
+        [job],
+        max_jobs=1,
+        on_progress=lambda item, done, total, success, reason="": progress.append((item.id, done, total, success, reason)),
+    )
+
+    assert result == 1
+    assert launches == [True]
+    assert len(attempts) == 2
+    assert progress == [("job-1", 1, 1, True, "")]
+
+
 def test_login_status_does_not_open_boss_page_during_detail_enrich(monkeypatch, tmp_path):
     import app.services.boss_scraper as scraper
 
@@ -189,13 +308,13 @@ def test_login_status_does_not_open_boss_page_during_detail_enrich(monkeypatch, 
     assert result["logged_in"] is True
 
 
-def test_enrich_jd_filters_existing_jd_by_default(monkeypatch):
+def test_enrich_jd_filters_existing_detail_jd_by_default(monkeypatch):
     import app.routes.jobs as jobs_route
     import app.services.boss_scraper as scraper
 
     seen_ids = []
 
-    def fake_enrich(jobs, max_jobs=20):
+    def fake_enrich(jobs, max_jobs=20, on_progress=None):
         seen_ids.extend(job.id for job in jobs)
         for job in jobs:
             job.jd_text = "新抓取的岗位职责内容" * 4
@@ -213,6 +332,7 @@ def test_enrich_jd_filters_existing_jd_by_default(monkeypatch):
             city="郑州",
             source_url="https://www.zhipin.com/job_detail/with.html",
             jd_text="已经存在的 JD",
+            jd_detail_fetched_at="2026-07-29T00:00:00+00:00",
         ),
         "job-missing-jd": JobRecord(
             id="job-missing-jd",
@@ -235,13 +355,96 @@ def test_enrich_jd_filters_existing_jd_by_default(monkeypatch):
     assert response.json()["skipped_existing_jd"] == 1
 
 
+def test_enrich_jd_does_not_treat_capture_summary_as_detail_jd(monkeypatch):
+    import app.routes.jobs as jobs_route
+    import app.services.boss_scraper as scraper
+
+    seen_ids = []
+
+    def fake_enrich(jobs, max_jobs=20, on_progress=None):
+        seen_ids.extend(job.id for job in jobs)
+        for job in jobs:
+            job.jd_text = "详情页重新抓取后的岗位职责内容" * 4
+            job.jd_detail_fetched_at = "2026-07-29T00:00:00+00:00"
+        return len(jobs)
+
+    monkeypatch.setattr(scraper, "enrich_jobs_with_details", fake_enrich)
+    monkeypatch.setattr(jobs_route, "_save_jobs", lambda: None)
+    monkeypatch.setattr(jobs_route, "_dedupe_store", lambda: 0)
+    monkeypatch.setattr(jobs_route, "_apply_blacklist_to_store", lambda: 0)
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "job-summary-only": JobRecord(
+            id="job-summary-only",
+            title="产品经理",
+            company="短摘要 JD",
+            city="郑州",
+            source_url="https://www.zhipin.com/job_detail/summary.html",
+            jd_text="标签 | 技能 | 福利",
+        ),
+    })
+
+    client = TestClient(app)
+    response = client.post("/api/jobs/enrich-jd", json={
+        "job_ids": ["job-summary-only"],
+        "max_jobs": 10,
+    })
+
+    assert response.status_code == 200
+    assert seen_ids == ["job-summary-only"]
+    assert response.json()["skipped_existing_jd"] == 0
+
+
+def test_enrich_jd_persists_and_updates_task_after_each_success(monkeypatch):
+    import app.routes.jobs as jobs_route
+    import app.services.boss_scraper as scraper
+
+    saves = []
+    updates = []
+
+    def fake_enrich(jobs, max_jobs=20, on_progress=None):
+        job = jobs[0]
+        job.jd_text = "详情页岗位职责内容" * 8
+        job.jd_detail_fetched_at = "2026-07-31T00:00:00+00:00"
+        if on_progress:
+            on_progress(job, 1, 1, True)
+        return 1
+
+    monkeypatch.setattr(scraper, "enrich_jobs_with_details", fake_enrich)
+    monkeypatch.setattr(jobs_route, "_save_jobs", lambda: saves.append(True))
+    monkeypatch.setattr(jobs_route, "_dedupe_store", lambda: 0)
+    monkeypatch.setattr(jobs_route, "_apply_blacklist_to_store", lambda: 0)
+    monkeypatch.setattr(jobs_route, "start_task", lambda *args, **kwargs: {"id": "task-1"})
+    monkeypatch.setattr(jobs_route, "update_task", lambda task_id, **updates_: updates.append((task_id, updates_)))
+    monkeypatch.setattr(jobs_route, "complete_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "job-1": JobRecord(
+            id="job-1",
+            title="产品经理",
+            company="示例科技",
+            city="郑州",
+            source_url="https://www.zhipin.com/job_detail/demo.html",
+        ),
+    })
+
+    client = TestClient(app)
+    response = client.post("/api/jobs/enrich-jd", json={"job_ids": ["job-1"], "max_jobs": 1})
+
+    assert response.status_code == 200
+    assert saves
+    assert updates == [("task-1", {
+        "done": 1,
+        "message": "正在获取 JD：示例科技 · 产品经理（1/1）",
+        "payload": {"job_ids": ["job-1"], "max_jobs": 1, "force": False, "failed_job_ids": []},
+    })]
+
+
 def test_enrich_jd_force_refresh_includes_existing_jd(monkeypatch):
     import app.routes.jobs as jobs_route
     import app.services.boss_scraper as scraper
 
     seen_ids = []
 
-    def fake_enrich(jobs, max_jobs=20):
+    def fake_enrich(jobs, max_jobs=20, on_progress=None):
         seen_ids.extend(job.id for job in jobs)
         for job in jobs:
             job.jd_text = "重新抓取后的岗位职责内容" * 4
@@ -259,6 +462,7 @@ def test_enrich_jd_force_refresh_includes_existing_jd(monkeypatch):
             city="郑州",
             source_url="https://www.zhipin.com/job_detail/with.html",
             jd_text="已经存在的 JD",
+            jd_detail_fetched_at="2026-07-29T00:00:00+00:00",
         ),
         "job-missing-jd": JobRecord(
             id="job-missing-jd",
