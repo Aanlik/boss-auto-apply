@@ -159,7 +159,7 @@ async def match_resume_to_job(resume: dict, job: dict, jd_analysis: dict) -> dic
     if not client:
         return _fallback_match("")
 
-    profile = json.dumps(resume, ensure_ascii=False, indent=2)
+    profile = json.dumps(_compact_resume_for_matching(resume), ensure_ascii=False, indent=2)
     jd_info = json.dumps(jd_analysis, ensure_ascii=False, indent=2)
     title = job.get("title", "")
     company = job.get("company", "")
@@ -192,9 +192,18 @@ async def match_resume_to_job(resume: dict, job: dict, jd_analysis: dict) -> dic
     last_failure_reason = "invalid_response"
     last_error = ""
     for attempt in range(1, MATCH_MAX_ATTEMPTS + 1):
+        use_json_mode = attempt < MATCH_MAX_ATTEMPTS
         retry_hint = "" if attempt == 1 else "\n上一轮结果无法通过 JSON 校验。请严格只返回完整 JSON，所有字段均不可缺失，描述保持简短。"
+        if not use_json_mode:
+            retry_hint += "\n这是最后一次兜底请求：不要输出思考过程、解释或 Markdown，仅输出一个完整 JSON 对象。"
         try:
-            response = await client.chat(f"{prompt}{retry_hint}", temperature=0.2, max_tokens=500)
+            response = await client.chat(
+                f"{prompt}{retry_hint}",
+                temperature=0.2,
+                max_tokens=800,
+                json_mode=use_json_mode,
+                disable_thinking=True,
+            )
             result = _parse_json(response)
             failure_reason = _match_result_failure_reason(result)
             if failure_reason is None:
@@ -204,7 +213,13 @@ async def match_resume_to_job(resume: dict, job: dict, jd_analysis: dict) -> dic
                 result["attemptCount"] = attempt
                 return result
             last_failure_reason = failure_reason
-            logger.warning("简历匹配结果校验失败（第 %s/%s 次）：%s", attempt, MATCH_MAX_ATTEMPTS, failure_reason)
+            logger.warning(
+                "简历匹配结果校验失败（第 %s/%s 次）：%s；响应=%s",
+                attempt,
+                MATCH_MAX_ATTEMPTS,
+                failure_reason,
+                _response_diagnostic(response),
+            )
         except Exception as exc:
             last_failure_reason = "request_error"
             last_error = str(exc)[:100]
@@ -405,17 +420,45 @@ def _find_diligence_for_job(job: dict, diligence_reports: dict, diligence_index:
 
 
 def _parse_json(response: str) -> dict:
+    if not isinstance(response, str):
+        return {}
+    import re
+
+    def parse(candidate: str) -> dict:
+        cleaned = candidate.strip()
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.replace("\ufeff", "").replace("“", '"').replace("”", '"')
+        cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+        try:
+            value = json.loads(cleaned)
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    parsed = parse(response)
+    if parsed:
+        return parsed
     try:
-        return json.loads(response)
-    except json.JSONDecodeError:
-        import re
         match = re.search(r'\{[\s\S]*\}', response)
         if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+            return parse(match.group())
+    except (TypeError, ValueError):
+        pass
     return {}
+
+
+def _response_diagnostic(response: object) -> str:
+    """记录可定位格式问题的元数据，不写入岗位或简历内容。"""
+    text = response if isinstance(response, str) else ""
+    return f"length={len(text)}, empty={not bool(text.strip())}, fenced={text.lstrip().startswith('```')}, has_json_object={'{' in text and '}' in text}"
+
+
+def _compact_resume_for_matching(resume: dict) -> dict:
+    """仅保留岗位匹配需要的简历字段，避免长文本挤占结构化输出空间。"""
+    if not isinstance(resume, dict):
+        return {}
+    keys = ("title", "summary", "skills", "work_experience", "education", "projects", "certifications")
+    return {key: resume[key] for key in keys if resume.get(key) not in (None, "", [], {})}
 
 
 def _match_result_failure_reason(result: dict) -> str | None:

@@ -304,23 +304,47 @@ async def ocr_image_async(image_bytes: bytes, filename: str = "") -> str:
     return await loop.run_in_executor(None, ocr_image, image_bytes, filename)
 
 
-async def chat(prompt: str, temperature: float = 0.3, max_tokens: int = 2000) -> str:
+async def chat(
+    prompt: str,
+    temperature: float = 0.3,
+    max_tokens: int = 2000,
+    json_mode: bool = False,
+    disable_thinking: bool = False,
+) -> str:
     """简单对话接口 — 发送单条 prompt，返回文本"""
-    return await asyncio.to_thread(_chat_sync, prompt, temperature, max_tokens)
+    return await asyncio.to_thread(_chat_sync, prompt, temperature, max_tokens, json_mode, disable_thinking)
 
 
-def _chat_sync(prompt: str, temperature: float, max_tokens: int) -> str:
+def _chat_sync(
+    prompt: str,
+    temperature: float,
+    max_tokens: int,
+    json_mode: bool = False,
+    disable_thinking: bool = False,
+) -> str:
     """在线程中执行同步 SDK 请求，避免阻塞 FastAPI 事件循环。"""
     client = get_client()
     model = get_model()
     started = time.time()
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        request_kwargs = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if disable_thinking and str(get_config().get("provider") or "").lower() == "deepseek":
+            request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        if json_mode:
+            try:
+                resp = client.chat.completions.create(
+                    **{**request_kwargs, "response_format": {"type": "json_object"}},
+                )
+            except Exception as exc:
+                logger.info("AI 服务不支持 JSON 模式，回退到提示词约束: %s", str(exc)[:160])
+                resp = client.chat.completions.create(**request_kwargs)
+        else:
+            resp = client.chat.completions.create(**request_kwargs)
         try:
             from app.services.maintenance_service import log_api_call
             log_api_call(
@@ -334,7 +358,18 @@ def _chat_sync(prompt: str, temperature: float, max_tokens: int) -> str:
         except Exception:
             pass
         _record_ai_version("文本 AI 调用", model, kind="ai_chat")
-        return resp.choices[0].message.content or ""
+        choice = resp.choices[0]
+        message = choice.message
+        content = message.content or ""
+        logger.info(
+            "AI 响应元数据: json_mode=%s, thinking_disabled=%s, finish_reason=%s, content_length=%s, has_reasoning=%s",
+            json_mode,
+            disable_thinking,
+            getattr(choice, "finish_reason", ""),
+            len(content),
+            bool(getattr(message, "reasoning_content", None)),
+        )
+        return content
     except Exception as exc:
         try:
             from app.services.maintenance_service import log_api_call
@@ -358,5 +393,12 @@ def get_ai_client():
 
 class _AIClient:
     """AI 客户端包装器，提供 chat 方法"""
-    async def chat(self, prompt: str, temperature: float = 0.3, max_tokens: int = 2000) -> str:
-        return await chat(prompt, temperature, max_tokens)
+    async def chat(
+        self,
+        prompt: str,
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+        json_mode: bool = False,
+        disable_thinking: bool = False,
+    ) -> str:
+        return await chat(prompt, temperature, max_tokens, json_mode, disable_thinking)

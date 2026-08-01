@@ -1,6 +1,6 @@
 import asyncio
 import json
-from app.services.scoring import analyze_jd_for_matching, match_resume_to_job, rank_jobs_ai
+from app.services.scoring import _parse_json, analyze_jd_for_matching, match_resume_to_job, rank_jobs_ai
 
 
 def test_analyze_jd_fallback():
@@ -58,6 +58,88 @@ def test_match_resume_retries_an_invalid_ai_response_before_falling_back(monkeyp
     assert client.calls == 2
     assert result["match_score"] == 86
     assert result.get("failureReason") is None
+
+
+def test_match_resume_requests_json_mode_with_sufficient_output_budget(monkeypatch):
+    """排序匹配必须请求结构化 JSON，避免仅依赖提示词约束模型输出。"""
+    import app.services.scoring as scoring
+
+    class FakeClient:
+        def __init__(self):
+            self.kwargs = {}
+
+        async def chat(self, _prompt, **kwargs):
+            self.kwargs = kwargs
+            return json.dumps({
+                "match_score": 86,
+                "skill_match_rate": 0.8,
+                "experience_match": "经验匹配",
+                "education_match": "学历匹配",
+                "highlights": ["HRBP"],
+                "gaps": [],
+                "recommendation": "recommend",
+                "reason": "具备岗位核心经验",
+            })
+
+    client = FakeClient()
+    monkeypatch.setattr(scoring, "get_ai_client", lambda: client)
+
+    result = asyncio.run(scoring.match_resume_to_job(
+        {"skills": ["招聘", "绩效"]},
+        {"title": "HRBP", "company": "示例公司"},
+        {"core_requirements": ["HRBP 经验"]},
+    ))
+
+    assert result["match_score"] == 86
+    assert client.kwargs["json_mode"] is True
+    assert client.kwargs["max_tokens"] >= 800
+
+
+def test_match_resume_uses_plain_non_thinking_request_for_the_final_retry(monkeypatch):
+    """结构化响应连续为空时，最后一次应以非思考普通请求兜底。"""
+    import app.services.scoring as scoring
+
+    valid_response = json.dumps({
+        "match_score": 86,
+        "skill_match_rate": 0.8,
+        "experience_match": "经验匹配",
+        "education_match": "学历匹配",
+        "highlights": ["HRBP"],
+        "gaps": [],
+        "recommendation": "recommend",
+        "reason": "具备岗位核心经验",
+    })
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.responses = iter(["", "", valid_response])
+
+        async def chat(self, _prompt, **kwargs):
+            self.calls.append(kwargs)
+            return next(self.responses)
+
+    client = FakeClient()
+    monkeypatch.setattr(scoring, "get_ai_client", lambda: client)
+
+    result = asyncio.run(scoring.match_resume_to_job(
+        {"skills": ["招聘", "绩效"]},
+        {"title": "HRBP", "company": "示例公司"},
+        {"core_requirements": ["HRBP 经验"]},
+    ))
+
+    assert result["match_score"] == 86
+    assert [call["json_mode"] for call in client.calls] == [True, True, False]
+    assert all(call["disable_thinking"] is True for call in client.calls)
+
+
+def test_parse_json_recovers_markdown_json_with_a_trailing_comma():
+    """模型常见的代码块与尾逗号不应让有效匹配结果整体失败。"""
+    raw = '''```json
+    {"match_score": 86, "highlights": ["HRBP"], "gaps": [], "recommendation": "recommend",}
+    ```'''
+
+    assert _parse_json(raw)["match_score"] == 86
 
 
 def test_rank_jobs_uses_company_key_before_company_name(monkeypatch):

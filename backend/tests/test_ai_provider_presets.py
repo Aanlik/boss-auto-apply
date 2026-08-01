@@ -42,3 +42,27 @@ def test_successful_ai_json_call_persists_a_version_record(tmp_path, monkeypatch
     assert rows[0]["kind"] == "ai_generation"
     assert rows[0]["promptVersion"] == "test-model"
     assert rows[0]["promptPreview"] == "生成招呼语"
+
+
+def test_deepseek_structured_request_explicitly_disables_thinking(monkeypatch):
+    """DeepSeek V4 的 JSON 排序请求不能使用默认思考模式。"""
+    calls = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return type("Response", (), {
+                "choices": [type("Choice", (), {
+                    "finish_reason": "stop",
+                    "message": type("Message", (), {"content": '{"ok": true}', "reasoning_content": None})(),
+                })()],
+            })()
+
+    fake_client = type("Client", (), {"chat": type("Chat", (), {"completions": FakeCompletions()})()})()
+    monkeypatch.setattr(ai_client, "get_client", lambda: fake_client)
+    monkeypatch.setattr(ai_client, "get_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(ai_client, "get_config", lambda: {"provider": "deepseek", "base_url": "https://api.deepseek.com"})
+
+    assert ai_client._chat_sync("返回 json", 0.2, 800, json_mode=True, disable_thinking=True) == '{"ok": true}'
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
