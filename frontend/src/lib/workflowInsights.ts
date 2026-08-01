@@ -22,6 +22,7 @@ export type WorkflowTodo = {
 type BuildWorkflowTaskInput = {
   jobs: JobPosting[];
   selectedJobIds: string[];
+  greetingJobIds: string[];
   diligenceReports: Record<string, DiligenceReport>;
   rankingResults: RankingResult[];
   greetingTexts?: Record<string, string>;
@@ -46,20 +47,25 @@ function hasDiligence(job: JobPosting, reports: Record<string, DiligenceReport>)
   );
 }
 
+function hasFetchedJdDetail(job: JobPosting): boolean {
+  return Boolean((job.jd_text || "").trim() && (job.jd_detail_fetched_at || "").trim());
+}
+
 export function buildWorkflowTasks(input: BuildWorkflowTaskInput): WorkflowTask[] {
   const selectedJobs = input.jobs.filter(job => input.selectedJobIds.includes(job.id));
   const selectedTotal = selectedJobs.length;
-  const jdDone = input.jobs.filter(job => Boolean((job.jd_text || "").trim())).length;
+  const jdDone = selectedJobs.filter(hasFetchedJdDetail).length;
   const diligenceDone = selectedJobs.filter(job => hasDiligence(job, input.diligenceReports)).length;
   const rankingDone = input.rankingResults.filter(item => input.selectedJobIds.includes(item.jobId)).length;
-  const greetingDone = Object.keys(input.greetingTexts || {}).filter(id => input.selectedJobIds.includes(id)).length;
+  const greetingTotal = input.greetingJobIds.length;
+  const greetingDone = Object.keys(input.greetingTexts || {}).filter(id => input.greetingJobIds.includes(id)).length;
 
   return [
-    { key: "jobs", label: "岗位池", done: input.jobs.length, total: input.jobs.length, status: taskStatus(input.jobs.length, input.jobs.length) },
-    { key: "jd", label: "JD 详情", done: jdDone, total: input.jobs.length, status: taskStatus(jdDone, input.jobs.length) },
+    { key: "jobs", label: "全库", done: input.jobs.length, total: input.jobs.length, status: taskStatus(input.jobs.length, input.jobs.length) },
+    { key: "jd", label: "JD 详情", done: jdDone, total: selectedTotal, status: taskStatus(jdDone, selectedTotal) },
     { key: "diligence", label: "公司尽调", done: diligenceDone, total: selectedTotal, status: taskStatus(diligenceDone, selectedTotal) },
     { key: "ranking", label: "综合排序", done: rankingDone, total: selectedTotal, status: taskStatus(rankingDone, selectedTotal) },
-    { key: "greeting", label: "打招呼", done: greetingDone, total: selectedTotal, status: taskStatus(greetingDone, selectedTotal) },
+    { key: "greeting", label: "打招呼", done: greetingDone, total: greetingTotal, status: taskStatus(greetingDone, greetingTotal) },
   ];
 }
 
@@ -67,7 +73,8 @@ export function buildWorkflowTodos(input: BuildWorkflowTaskInput): WorkflowTodo[
   const selectedJobs = input.jobs.filter(job => input.selectedJobIds.includes(job.id));
   const selectedTotal = selectedJobs.length;
   const rankingDone = input.rankingResults.filter(item => input.selectedJobIds.includes(item.jobId)).length;
-  const greetingDone = Object.keys(input.greetingTexts || {}).filter(id => input.selectedJobIds.includes(id)).length;
+  const greetingTotal = input.greetingJobIds.length;
+  const greetingDone = Object.keys(input.greetingTexts || {}).filter(id => input.greetingJobIds.includes(id)).length;
   const todos: WorkflowTodo[] = [];
 
   const missingJd = selectedJobs.filter(job => !(job.jd_text || "").trim()).length;
@@ -106,7 +113,7 @@ export function buildWorkflowTodos(input: BuildWorkflowTaskInput): WorkflowTodo[
     });
   }
 
-  const missingGreeting = Math.max(0, selectedTotal - greetingDone);
+  const missingGreeting = Math.max(0, greetingTotal - greetingDone);
   if (missingGreeting > 0) {
     todos.push({
       key: "missing_greeting",

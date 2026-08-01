@@ -149,7 +149,6 @@ export type GreetingSendResponse = {
     failed: number;
     skipped: number;
     dailyLimit: number;
-    batchLimit: number;
     remainingBeforeSend: number;
   };
   records: GreetingRecord[];
@@ -161,7 +160,6 @@ export type GreetingSendResponse = {
 export type GreetingFrequencyProfile = {
   key: "conservative" | "standard" | "fast" | string;
   label: string;
-  batchLimit: number;
   intervalSeconds: number;
   dailyLimit: number;
 };
@@ -171,6 +169,8 @@ export type GreetingAutoSendSettings = {
   profile: string;
   gray_mode_enabled?: boolean;
   gray_first_success_required?: boolean;
+  daily_limit: number;
+  send_interval_seconds: number;
   updatedAt?: string;
 };
 
@@ -179,6 +179,8 @@ export type GreetingSafetySummary = {
   settings: GreetingAutoSendSettings;
   summary: {
     sentToday: number;
+    dailyLimit: number;
+    remaining: number;
     failedStreak: number;
     totalRecords: number;
     grayMode?: {
@@ -204,7 +206,6 @@ export type GreetingFinalConfirmation = {
     sentToday: number;
     dailyLimit: number;
     remaining: number;
-    batchLimit: number;
   };
   items: Array<{ jobId: string; company: string; title: string; messageLength: number; url: string; valid: boolean; reasons: string[] }>;
   links: string[];
@@ -352,10 +353,16 @@ export type JobPoolQuality = {
     blacklisted: number;
     duplicate_groups: number;
     duplicate_jobs: number;
+    risk_jobs: number;
+    ai_feedback_needs_revision: number;
     batch_count?: number;
     application_statuses?: Record<JobApplicationStatus, number>;
   };
   duplicateGroups: JobDuplicateGroup[];
+  diligence?: {
+    riskJobIds: string[];
+    aiFeedbackNeedsRevisionJobIds: string[];
+  };
   batches?: Array<{
     id: string;
     keyword: string;
@@ -507,7 +514,7 @@ export type DashboardSummary = {
     abandoned: number;
   };
   readiness: {
-    stage: "setup" | "complete_jd" | "diligence" | "ranking" | "decision" | "ready";
+    stage: "setup" | "select_jobs" | "complete_jd" | "diligence" | "ranking" | "decision" | "ready";
     qualityScore: number;
     nextAction: {
       label: string;
@@ -525,6 +532,7 @@ export type DashboardSummary = {
 };
 
 export type OnboardingGuide = {
+  scope?: { selectedJobs: number };
   steps: Array<{ key: string; label: string; page: string; status: "done" | "todo"; reason: string; action?: string }>;
   nextStep: { key: string; label: string; page: string; status: "done" | "todo"; reason: string; action?: string };
   progress?: { done: number; total: number; percent: number };
@@ -938,6 +946,9 @@ export type RankingResult = {
   reason: string;
   matchHighlights: string[];
   matchGaps: string[];
+  matchStatus?: "completed" | "failed";
+  failureReason?: "invalid_response" | "invalid_schema" | "request_error" | "ai_unavailable" | string;
+  attemptCount?: number;
   weights?: RankingWeights;
   explanation?: {
     matchReasons: string[];
@@ -979,6 +990,8 @@ export type RankingWeightTemplate = {
 export type WorkflowState = {
   /** 多选岗位 ID 集合（用于批次流转） */
   selectedJobIds: string[];
+  /** 从排序页明确选中、带入打招呼的岗位 ID */
+  greetingJobIds: string[];
   /** 简历解析结果 */
   resumeProfile: ResumeProfile | null;
   /** 已上传的简历文件列表 */

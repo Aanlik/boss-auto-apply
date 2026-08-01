@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from uuid import uuid4
 
 from app.services.workflow_persistence import DATA_DIR, _read_json, write_json_atomic
 
 
 TASKS_FILE = DATA_DIR / "workflow" / "tasks.json"
+TASKS_LOCK = RLock()
+MAX_RETAINED_HISTORY = 100
 FAILURE_CATEGORIES = {
     "auth": {
         "label": "登录或凭据",
@@ -99,13 +102,22 @@ def recovery_groups(tasks: list[dict]) -> list[dict]:
 
 
 def load_tasks(limit: int = 20) -> list[dict]:
-    data = _read_json(TASKS_FILE, [])
-    tasks = data if isinstance(data, list) else []
-    return sorted(tasks, key=lambda item: item.get("updatedAt", ""), reverse=True)[:limit]
+    with TASKS_LOCK:
+        data = _read_json(TASKS_FILE, [])
+        tasks = data if isinstance(data, list) else []
+        return sorted(tasks, key=lambda item: item.get("updatedAt", ""), reverse=True)[:limit]
 
 
 def _save_tasks(tasks: list[dict]) -> None:
-    write_json_atomic(TASKS_FILE, tasks[-100:])
+    with TASKS_LOCK:
+        # 运行中的任务不能因历史记录达到上限而被裁掉；否则异步工作完成
+        # 回写状态时会找不到自己的 task_id。仅限制已结束的历史记录数量。
+        active = [task for task in tasks if task.get("status") in {"queued", "running"}]
+        finished = [task for task in tasks if task.get("status") not in {"queued", "running"}]
+        finished.sort(key=lambda item: item.get("updatedAt", ""), reverse=True)
+        retained = [*active, *finished[:MAX_RETAINED_HISTORY]]
+        retained.sort(key=lambda item: item.get("updatedAt", ""))
+        write_json_atomic(TASKS_FILE, retained)
 
 
 def start_task(
@@ -115,32 +127,33 @@ def start_task(
     payload: dict | None = None,
     idempotency_key: str = "",
 ) -> dict:
-    tasks = load_tasks(limit=100)
-    if idempotency_key:
-        for existing in tasks:
-            if (
-                existing.get("idempotencyKey") == idempotency_key
-                and existing.get("status") in {"queued", "running"}
-            ):
-                return existing
-    task = {
-        "id": uuid4().hex,
-        "type": task_type,
-        "title": title,
-        "status": "running",
-        "done": 0,
-        "total": max(0, int(total or 0)),
-        "message": "",
-        "errorCode": "",
-        "action": "",
-        "retryable": False,
-        "payload": payload or {},
-        "idempotencyKey": idempotency_key,
-        "createdAt": _now(),
-        "updatedAt": _now(),
-    }
-    _save_tasks(tasks + [task])
-    return task
+    with TASKS_LOCK:
+        tasks = load_tasks(limit=MAX_RETAINED_HISTORY + 1000)
+        if idempotency_key:
+            for existing in tasks:
+                if (
+                    existing.get("idempotencyKey") == idempotency_key
+                    and existing.get("status") in {"queued", "running"}
+                ):
+                    return existing
+        task = {
+            "id": uuid4().hex,
+            "type": task_type,
+            "title": title,
+            "status": "running",
+            "done": 0,
+            "total": max(0, int(total or 0)),
+            "message": "",
+            "errorCode": "",
+            "action": "",
+            "retryable": False,
+            "payload": payload or {},
+            "idempotencyKey": idempotency_key,
+            "createdAt": _now(),
+            "updatedAt": _now(),
+        }
+        _save_tasks(tasks + [task])
+        return task
 
 
 def get_task(task_id: str) -> dict | None:
@@ -183,34 +196,37 @@ def restart_task(task_id: str) -> dict:
 
 
 def clear_recovery_tasks() -> dict:
-    tasks = load_tasks(limit=100)
-    remaining = [task for task in tasks if task.get("status") not in {"failed", "partial_failed"}]
-    removed = len(tasks) - len(remaining)
-    _save_tasks(remaining)
-    return {"removed": removed, "remaining": len(remaining)}
+    with TASKS_LOCK:
+        tasks = load_tasks(limit=MAX_RETAINED_HISTORY + 1000)
+        remaining = [task for task in tasks if task.get("status") not in {"failed", "partial_failed"}]
+        removed = len(tasks) - len(remaining)
+        _save_tasks(remaining)
+        return {"removed": removed, "remaining": len(remaining)}
 
 
 def delete_task(task_id: str) -> dict:
-    tasks = load_tasks(limit=100)
-    target = next((task for task in tasks if task.get("id") == task_id), None)
-    if not target:
-        raise ValueError("task not found")
-    if target.get("status") == "running":
-        raise PermissionError("running task cannot be deleted")
-    remaining = [task for task in tasks if task.get("id") != task_id]
-    _save_tasks(remaining)
-    return {"deleted": True, "task": target, "remaining": len(remaining)}
+    with TASKS_LOCK:
+        tasks = load_tasks(limit=MAX_RETAINED_HISTORY + 1000)
+        target = next((task for task in tasks if task.get("id") == task_id), None)
+        if not target:
+            raise ValueError("task not found")
+        if target.get("status") == "running":
+            raise PermissionError("running task cannot be deleted")
+        remaining = [task for task in tasks if task.get("id") != task_id]
+        _save_tasks(remaining)
+        return {"deleted": True, "task": target, "remaining": len(remaining)}
 
 
 def update_task(task_id: str, **updates) -> dict:
-    tasks = load_tasks(limit=100)
-    for task in tasks:
-        if task.get("id") == task_id:
-            task.update(updates)
-            task["updatedAt"] = _now()
-            _save_tasks(tasks)
-            return task
-    raise ValueError("task not found")
+    with TASKS_LOCK:
+        tasks = load_tasks(limit=MAX_RETAINED_HISTORY + 1000)
+        for task in tasks:
+            if task.get("id") == task_id:
+                task.update(updates)
+                task["updatedAt"] = _now()
+                _save_tasks(tasks)
+                return task
+        raise ValueError("task not found")
 
 
 def complete_task(task_id: str, done: int | None = None, message: str = "") -> dict:

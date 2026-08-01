@@ -1,5 +1,7 @@
 import importlib
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from app.models.job import JobSource
@@ -8,6 +10,16 @@ from app.main import app
 from app.services.job_capture import jobs_from_source
 from app.services.job_recognition import recognize_job
 from app.services.resume_parser import _extract_text_from_bytes
+
+
+@pytest.fixture(autouse=True)
+def _allow_boss_login_for_capture_route_tests(monkeypatch):
+    """Capture route tests exercise payload behavior, not live BOSS authentication."""
+    import app.services.boss_scraper as scraper
+
+    monkeypatch.setattr(scraper, "check_login_status", lambda *, probe=True: {
+        "logged_in": True, "message": "已登录", "action": "",
+    })
 
 
 def test_resume_profile_route_is_registered_once():
@@ -236,6 +248,23 @@ def test_boss_capture_endpoint_passes_multi_dimension_filters(monkeypatch):
         "degree": "203",
         "industry": "1001",
     }
+
+
+def test_boss_capture_requires_a_verified_boss_login(monkeypatch):
+    import app.routes.jobs as jobs_route
+    import app.services.boss_scraper as scraper
+
+    monkeypatch.setattr(scraper, "check_login_status", lambda *, probe=True: {
+        "logged_in": False,
+        "message": "登录已过期",
+        "action": "请重新扫码登录 BOSS 直聘",
+    })
+    monkeypatch.setattr(jobs_route, "ingest_from_boss", lambda **kwargs: (_ for _ in ()).throw(AssertionError("抓取不应启动")))
+
+    response = TestClient(app).post("/api/jobs/capture/boss", json={"keyword": "产品经理"})
+
+    assert response.status_code == 401
+    assert "登录已过期" in response.json()["detail"]
 
 
 def test_boss_scraper_adds_filters_to_api_url(monkeypatch):

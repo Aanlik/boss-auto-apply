@@ -141,7 +141,7 @@ def generate_greeting_with_ai(
     resume: dict | None = None,
     jd_analysis: dict | None = None,
     style: str = "稳妥自然",
-) -> str:
+) -> tuple[str, str]:
     """根据岗位 JD、JD 分析和简历生成可直接发送的个性化话术。"""
     resume = resume if isinstance(resume, dict) else {}
     jd_analysis = jd_analysis if isinstance(jd_analysis, dict) else {}
@@ -164,11 +164,19 @@ def generate_greeting_with_ai(
         "output_schema": {"message": "string"},
     }, ensure_ascii=False)
     result = chat_json(system, user, temperature=0.7)
-    message = str(result.get("message") or result.get("greeting") or "").strip() if isinstance(result, dict) else ""
+    message = ""
+    if isinstance(result, dict):
+        message = str(result.get("message") or result.get("greeting") or result.get("content") or result.get("text") or result.get("raw") or "").strip()
     validation = validate_greeting(message)
-    if not validation.ok:
-        raise ValueError(f"AI 生成的话术未通过校验: {', '.join(validation.reasons)}")
-    return message
+    if validation.ok:
+        return message, "ai"
+
+    resume_summary = str(resume.get("summary") or resume.get("headline") or resume.get("title") or "")
+    fallback = generate_greeting(job, resume_summary, style)
+    fallback_validation = validate_greeting(fallback)
+    if not fallback_validation.ok:
+        raise ValueError(f"本地生成的话术未通过校验: {', '.join(fallback_validation.reasons)}")
+    return fallback, "fallback"
 
 
 def build_greeting_record(job: JobRecord, message: str, status: str = "draft", dry_run: bool = True) -> dict:

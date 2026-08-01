@@ -405,10 +405,17 @@ def _quality_action(key: str, label: str, page: str, reason: str, count: int, se
 
 
 
-def data_quality_center() -> dict[str, Any]:
+def data_quality_center(selected_job_ids: list[str] | None = None) -> dict[str, Any]:
     from app.routes import jobs as jobs_route
+    from app.services.company_blacklist import is_company_blacklisted
 
-    jobs = jobs_route._all_jobs()
+    selected_ids = {str(job_id) for job_id in selected_job_ids} if selected_job_ids is not None else None
+    jobs = [
+        job for job in jobs_route._all_jobs()
+        if (selected_ids is None or job.id in selected_ids)
+        and job.lifecycle_status != "blacklisted"
+        and not is_company_blacklisted(job.company)
+    ]
     rankings = workflow_persistence.load_rankings()
     ranked_ids = {str(item.get("jobId") or item.get("job_id") or "") for item in rankings if isinstance(item, dict)}
     seen: set[tuple[str, str, str]] = set()
@@ -452,6 +459,7 @@ def data_quality_center() -> dict[str, Any]:
             "score": max(0, 100 - sum(item["count"] * (12 if item["severity"] == "error" else 6) for item in checks)),
         },
         "checks": checks,
+        "scope": {"selectedJobs": len(jobs)},
         "generatedAt": _now(),
     }
 
@@ -485,25 +493,37 @@ def repair_data_quality(actions: list[str] | None = None) -> dict[str, Any]:
 
 
 
-def dashboard_summary() -> dict[str, Any]:
+def dashboard_summary(selected_job_ids: list[str] | None = None) -> dict[str, Any]:
     from app.routes import jobs as jobs_route
+    from app.services.company_blacklist import is_company_blacklisted
     from app.services import workflow_persistence as persistence
 
-    jobs = jobs_route._all_jobs()
+    selected_ids = {str(job_id) for job_id in selected_job_ids} if selected_job_ids is not None else None
+    scoped_jobs = [job for job in jobs_route._all_jobs() if selected_ids is None or job.id in selected_ids]
+    jobs = [
+        job for job in scoped_jobs
+        if job.lifecycle_status != "blacklisted" and not is_company_blacklisted(job.company)
+    ]
+    active_job_ids = {job.id for job in jobs}
     companies = {job.company for job in jobs if job.company}
-    reports = persistence.load_diligence_reports()
-    report_keys = set(reports.keys())
-    rankings = persistence.load_rankings()
+    completed_companies = {
+        company for company in companies
+        if persistence.find_diligence_report(company) is not None
+    }
+    rankings = [
+        ranking for ranking in persistence.load_rankings()
+        if str(ranking.get("jobId") or ranking.get("job_id") or "") in active_job_ids
+    ]
     jobs_summary = {
         "total": len(jobs),
-        "missingJd": sum(1 for job in jobs if not (job.jd_text or "").strip()),
-        "withJd": sum(1 for job in jobs if (job.jd_text or "").strip()),
+        "missingJd": sum(1 for job in jobs if not ((job.jd_text or "").strip() and (job.jd_detail_fetched_at or "").strip())),
+        "withJd": sum(1 for job in jobs if (job.jd_text or "").strip() and (job.jd_detail_fetched_at or "").strip()),
         "suspectedExpired": sum(1 for job in jobs if job.lifecycle_status == "suspected_expired"),
-        "blacklisted": sum(1 for job in jobs if job.lifecycle_status == "blacklisted"),
+        "blacklisted": 0,
     }
     diligence_summary = {
-        "completedCompanies": len(report_keys),
-        "pendingCompanies": len([company for company in companies if company not in report_keys]),
+        "completedCompanies": len(completed_companies),
+        "pendingCompanies": len(companies - completed_companies),
     }
     ranking_summary = {
         "total": len(rankings),
@@ -528,20 +548,36 @@ def dashboard_summary() -> dict[str, Any]:
         "decisions": {
             **decisions_summary,
         },
-        "readiness": _dashboard_readiness(jobs_summary, diligence_summary, ranking_summary, decisions_summary),
+        "readiness": _dashboard_readiness(
+            jobs_summary,
+            diligence_summary,
+            ranking_summary,
+            decisions_summary,
+            selection_active=selected_job_ids is not None,
+        ),
         "generatedAt": _now(),
     }
 
 
 
-def onboarding_guide() -> dict[str, Any]:
-    summary = dashboard_summary()
+def _configuration_ready() -> bool:
+    health = run_health_check()
+    checks = {str(item.get("key")): item for item in health.get("checks", [])}
+    required = ("ai_provider", "baidu_search", "business_api")
+    return all(checks.get(key, {}).get("status") == "ok" for key in required)
+
+
+def onboarding_guide(selected_job_ids: list[str] | None = None) -> dict[str, Any]:
+    if selected_job_ids is None:
+        selected_job_ids = workflow_persistence.load_selection()
+    summary = dashboard_summary(selected_job_ids)
+    configuration_ready = _configuration_ready()
     steps = [
         {
             "key": "configure",
             "label": "完成基础配置",
             "page": "settings",
-            "status": "done" if summary["jobs"]["total"] > 0 or summary["diligence"]["completedCompanies"] > 0 else "todo",
+            "status": "done" if configuration_ready else "todo",
             "reason": "配置 AI、搜索和工商 API 后，后续建议更完整。",
             "action": "打开设置",
         },
@@ -589,6 +625,7 @@ def onboarding_guide() -> dict[str, Any]:
     next_step = next((step for step in steps if step["status"] != "done"), steps[-1])
     done = sum(1 for step in steps if step["status"] == "done")
     return {
+        "scope": {"selectedJobs": summary["jobs"]["total"]},
         "steps": steps,
         "nextStep": next_step,
         "progress": {"done": done, "total": len(steps), "percent": round(done / len(steps) * 100) if steps else 0},
@@ -663,9 +700,18 @@ def _dashboard_readiness(
     diligence: dict[str, int],
     ranking: dict[str, int],
     decisions: dict[str, int],
+    selection_active: bool = False,
 ) -> dict[str, Any]:
     blockers: list[dict[str, Any]] = []
     if jobs["total"] <= 0:
+        if selection_active:
+            blockers.append({"key": "empty_selection", "label": "尚未选择岗位", "count": 0, "severity": "high"})
+            return {
+                "stage": "select_jobs",
+                "qualityScore": 0,
+                "nextAction": _readiness_action("去选择岗位", "jobs", "请先勾选感兴趣的岗位，流程质量只统计这些岗位。"),
+                "blockers": blockers,
+            }
         blockers.append({"key": "empty_jobs", "label": "岗位池为空", "count": 1, "severity": "high"})
         return {
             "stage": "setup",

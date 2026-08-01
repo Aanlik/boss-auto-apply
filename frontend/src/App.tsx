@@ -190,10 +190,11 @@ function GlobalWorkflowStatus({
   const tasks = useMemo(() => buildWorkflowTasks({
     jobs,
     selectedJobIds: state.selectedJobIds,
+    greetingJobIds: state.greetingJobIds,
     diligenceReports: state.diligenceReports,
     rankingResults: state.rankingResults,
     greetingTexts: state.greetingTexts,
-  }), [jobs, state.selectedJobIds, state.diligenceReports, state.rankingResults, state.greetingTexts]);
+  }), [jobs, state.selectedJobIds, state.greetingJobIds, state.diligenceReports, state.rankingResults, state.greetingTexts]);
 
   const activeRuntimeTasks = runtimeTasks.filter(task => task.status === "running" || task.status === "queued").slice(0, 2);
   const recoveryTasks = useMemo(() => buildRecoveryTasks(runtimeTasks).slice(0, 3), [runtimeTasks]);
@@ -201,11 +202,18 @@ function GlobalWorkflowStatus({
   const todos = useMemo(() => buildWorkflowTodos({
     jobs,
     selectedJobIds: state.selectedJobIds,
+    greetingJobIds: state.greetingJobIds,
     diligenceReports: state.diligenceReports,
     rankingResults: state.rankingResults,
     greetingTexts: state.greetingTexts,
-  }).slice(0, 3), [jobs, state.selectedJobIds, state.diligenceReports, state.rankingResults, state.greetingTexts]);
+  }).slice(0, 3), [jobs, state.selectedJobIds, state.greetingJobIds, state.diligenceReports, state.rankingResults, state.greetingTexts]);
   const hasRuntimePanel = activeRuntimeTasks.length > 0 || recoveryTasks.length > 0 || todos.length > 0 || attentionChecks.length > 0;
+  const hasBusinessTodos = todos.length > 0;
+  const workflowStatusCopy = healthCheck?.status === "error"
+    ? "服务异常"
+    : healthCheck?.status === "ok"
+      ? (hasBusinessTodos ? "服务正常 · 业务待推进" : "服务正常 · 流程已完成")
+      : "服务需关注";
 
   function targetPage(taskType: string): PageKey {
     if (taskType.includes("diligence")) return "diligence";
@@ -251,11 +259,11 @@ function GlobalWorkflowStatus({
       <div className={`global-workflow-status__inner${hasRuntimePanel ? " global-workflow-status__inner--with-recovery" : ""}`}>
         <div className="global-workflow-status__title">
           <span>全流程状态</span>
-          <small>岗位池到打招呼 · 系统{healthCheck?.status === "ok" ? "正常" : healthCheck?.status === "error" ? "异常" : "需关注"}</small>
+          <small>岗位池到打招呼 · {workflowStatusCopy}</small>
         </div>
         {healthCheck && (
           <div className={`health-pill health-pill--${healthCheck.status}`}>
-            {healthCheck.status === "ok" ? "健康" : healthCheck.status === "error" ? "异常" : "待配置"}
+            {healthCheck.status === "ok" ? "健康" : healthCheck.status === "error" ? "异常" : "需关注"}
           </div>
         )}
         <div className="workflow-status-grid workflow-status-grid--compact">

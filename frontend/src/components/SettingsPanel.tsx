@@ -59,6 +59,7 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
   const [importStatus, setImportStatus] = useState("");
   const settingsImportRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(true);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!show) return;
     mountedRef.current = true;
@@ -113,6 +114,18 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [show, onClose]);
+
+  useEffect(() => {
+    if (!show) return;
+    const activeElement = document.activeElement;
+    restoreFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
+    return () => {
+      const previousActiveElement = restoreFocusRef.current;
+      window.requestAnimationFrame(() => {
+        if (previousActiveElement?.isConnected) previousActiveElement.focus();
+      });
+    };
+  }, [show]);
 
   if (!show) return null;
 
@@ -465,10 +478,10 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
           {preferenceStatus && <p className="settings-status">{preferenceStatus}</p>}
         </div>
 
-        <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
-          <div className="page-kicker">本机数据</div>
+        <div className="settings-danger-zone" style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--danger)" }}>
+          <div className="page-kicker">危险操作 · 本机数据</div>
           <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "4px 0 8px" }}>
-            页面状态只影响当前界面缓存；本地数据包会删除后端保存的岗位、简历、附件、尽调、打招呼记录、登录态、日志和 API 配置。
+            这一区域的操作不可用于日常维护。页面状态只影响当前界面缓存；本地数据包会删除后端保存的岗位、简历、附件、尽调、打招呼记录、登录态、日志和 API 配置。
           </p>
           <div className="settings-row" style={{ alignItems: "center" }}>
             <label className="settings-label">页面状态</label>

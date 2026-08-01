@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -7,6 +9,16 @@ from app.models.job import JobRecord
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _allow_boss_login_for_greeting_route_tests(monkeypatch):
+    """Greeting route tests exercise send logic, not live BOSS authentication."""
+    from app.routes import greetings as greeting_route
+
+    monkeypatch.setattr(greeting_route, "check_boss_login_status", lambda **_: {
+        "logged_in": True, "message": "已登录", "action": "",
+    })
 
 
 def _prepare_greeting_test_state(tmp_path, monkeypatch):
@@ -46,6 +58,165 @@ def test_greeting_candidates_filter_blacklist_duplicates_and_missing_jd(tmp_path
     assert skipped["black"] == "blacklisted_company"
     assert skipped["already"] == "already_contacted"
     assert skipped["missing"] == "missing_jd"
+
+
+def test_greeting_safety_summary_blocks_automatic_sending_when_boss_is_not_logged_in(tmp_path, monkeypatch):
+    _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+
+    monkeypatch.setattr(greeting_route, "check_boss_login_status", lambda **_: {
+        "logged_in": False,
+        "message": "未登录",
+        "action": "验证 BOSS 登录",
+    })
+
+    summary = greeting_route.greeting_safety_summary()
+
+    assert summary["status"] == "blocked"
+    assert next(item for item in summary["checks"] if item["key"] == "boss_login") == {
+        "key": "boss_login",
+        "status": "error",
+        "message": "未登录",
+        "action": "验证 BOSS 登录",
+    }
+
+
+def test_greeting_safety_summary_reads_login_status_without_active_browser_probe(tmp_path, monkeypatch):
+    """Opening any module must not launch BOSS merely to render safety status."""
+    _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+
+    probes: list[bool] = []
+
+    def passive_login_status(*, probe: bool) -> dict:
+        probes.append(probe)
+        return {"logged_in": True, "message": "已登录", "action": ""}
+
+    monkeypatch.setattr(greeting_route, "check_boss_login_status", passive_login_status)
+
+    summary = greeting_route.greeting_safety_summary()
+
+    assert probes == [False]
+    assert next(item for item in summary["checks"] if item["key"] == "boss_login")["status"] == "ok"
+
+
+def test_greeting_safety_summary_uses_the_saved_frequency_profile_limit(tmp_path, monkeypatch):
+    _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+    from app.services.workflow_persistence import save_send_record
+
+    greeting_route._save_settings({"auto_send_enabled": True, "profile": "conservative"})
+    for index in range(10):
+        save_send_record(f"job-{index}", "sent", "已发送", dry_run=False)
+
+    summary = greeting_route.greeting_safety_summary()
+
+    assert summary["status"] == "blocked"
+    assert summary["summary"]["dailyLimit"] == 10
+    assert summary["summary"]["remaining"] == 0
+    assert next(item for item in summary["checks"] if item["key"] == "daily_limit")["status"] == "error"
+
+
+def test_final_confirmation_reports_the_actual_login_block_reason(tmp_path, monkeypatch):
+    _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+
+    monkeypatch.setattr(greeting_route, "check_boss_login_status", lambda **_: {
+        "logged_in": False,
+        "message": "登录已过期",
+        "action": "重新登录 BOSS 直聘",
+    })
+
+    response = client.post("/api/greetings/final-confirmation", json={
+        "job_ids": [],
+        "messages": {},
+        "mode": "browser_auto",
+        "daily_limit": 15,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["riskItems"] == ["BOSS 登录校验未通过：登录已过期。重新登录 BOSS 直聘"]
+
+
+def test_final_confirmation_keeps_the_daily_quota_block_reason(tmp_path, monkeypatch):
+    _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+    from app.services.workflow_persistence import save_send_record
+
+    greeting_route._save_settings({"auto_send_enabled": True, "profile": "conservative"})
+    for index in range(10):
+        save_send_record(f"job-{index}", "sent", "已发送", dry_run=False)
+
+    response = client.post("/api/greetings/final-confirmation", json={
+        "job_ids": [],
+        "messages": {},
+        "mode": "browser_auto",
+        "daily_limit": 10,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["riskItems"] == ["今日发送额度已用完（10/10），请明日再发送或调整发送上限"]
+
+
+def test_partial_auto_send_setting_update_preserves_existing_safety_settings(tmp_path, monkeypatch):
+    _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+
+    greeting_route._save_settings({
+        "auto_send_enabled": True,
+        "profile": "conservative",
+        "gray_mode_enabled": True,
+    })
+
+    response = client.post("/api/greetings/auto-send-settings", json={"daily_limit": 12})
+
+    assert response.status_code == 200
+    assert response.json()["settings"] == {
+        "auto_send_enabled": True,
+        "profile": "conservative",
+        "gray_mode_enabled": True,
+        "gray_first_success_required": True,
+        "daily_limit": 12,
+        "send_interval_seconds": 20,
+        "updatedAt": response.json()["settings"]["updatedAt"],
+    }
+
+
+def test_browser_auto_send_cannot_override_the_saved_daily_limit(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+    from app.services.workflow_persistence import save_send_record
+
+    greeting_route._save_settings({
+        "auto_send_enabled": True,
+        "profile": "conservative",
+        "gray_mode_enabled": False,
+    })
+    for index in range(10):
+        save_send_record(f"sent-{index}", "sent", "已发送", dry_run=False)
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        city="上海",
+        jd_text="负责产品规划",
+        source_url="https://example.com/job/1",
+    )
+    monkeypatch.setattr(greeting_route, "execute_browser_greeting", lambda job, message: {"ok": True, "status": "sent", "message": "不应发送"})
+
+    response = client.post("/api/greetings/send", json={
+        "job_ids": ["job-1"],
+        "messages": {"job-1": "您好，我对贵司的产品经理岗位很感兴趣，过往有需求分析经验，希望有机会进一步沟通。"},
+        "confirm": True,
+        "mode": "browser_auto",
+        "daily_limit": 100,
+        "send_interval_seconds": 3,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["dailyLimit"] == 10
+    assert response.json()["summary"]["sent"] == 0
+    assert response.json()["skipped"][0]["reason"] == "rate_limited"
 
 
 def test_greeting_validation_blocks_ai_error_and_template_variables():
@@ -97,6 +268,30 @@ def test_greeting_generation_uses_job_jd_and_resume_context(tmp_path, monkeypatc
     assert "负责用户研究、需求分析和产品规划" in captured["user"]
     assert "需求分析" in captured["user"]
     assert "甲公司" in captured["user"]
+
+
+def test_greeting_generation_falls_back_when_ai_response_has_no_message(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.services import greeting_workbench
+
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        city="上海",
+        jd_text="负责用户研究、需求分析和产品规划",
+        source_url="https://example.com/job/1",
+    )
+    monkeypatch.setattr(greeting_workbench, "chat_json", lambda *args, **kwargs: {"error": "AI 返回格式异常"})
+
+    response = client.post("/api/greetings/generate", json={
+        "job_id": "job-1",
+        "resume": {"summary": "用户研究和产品规划"},
+    })
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "fallback"
+    assert len(response.json()["message"]) >= 20
 
 
 def test_greeting_send_requires_confirmation_and_blocks_invalid_message(tmp_path, monkeypatch):
@@ -228,7 +423,7 @@ def test_greeting_template_effectiveness_groups_replies(tmp_path, monkeypatch):
     assert any(item["positiveReplies"] == 1 for item in body["byJobType"])
 
 
-def test_greeting_send_respects_batch_and_daily_limits(tmp_path, monkeypatch):
+def test_greeting_send_respects_daily_limit(tmp_path, monkeypatch):
     jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
     for index in range(3):
         job_id = f"job-{index}"
@@ -249,7 +444,6 @@ def test_greeting_send_respects_batch_and_daily_limits(tmp_path, monkeypatch):
             "job-2": "您好，我对贵司的产品经理岗位很感兴趣，过往有用户研究经验，希望有机会进一步沟通。",
         },
         "confirm": True,
-        "batch_limit": 2,
         "daily_limit": 2,
     }).json()
 
@@ -257,6 +451,36 @@ def test_greeting_send_respects_batch_and_daily_limits(tmp_path, monkeypatch):
     assert body["summary"]["skipped"] == 1
     skipped = {item["jobId"]: item["reason"] for item in body["skipped"]}
     assert skipped["job-2"] == "rate_limited"
+
+
+def test_greeting_send_with_only_skips_completes_workflow_task(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.services import workflow_tasks
+    from app.services.workflow_persistence import save_send_record
+
+    jobs_route._job_store["already"] = JobRecord(
+        id="already",
+        title="产品经理",
+        company="已沟通科技",
+        city="上海",
+        jd_text="负责产品规划",
+        source_url="https://example.com/job/already",
+    )
+    save_send_record("already", "sent", "之前已沟通")
+
+    body = client.post("/api/greetings/send", json={
+        "job_ids": ["already"],
+        "messages": {"already": "您好，我对贵司的产品经理岗位很感兴趣，过往有需求分析经验，希望有机会进一步沟通。"},
+        "confirm": True,
+    }).json()
+
+    assert body["summary"]["total"] == 1
+    assert body["summary"]["sent"] == 0
+    assert body["summary"]["failed"] == 0
+    assert body["summary"]["skipped"] == 1
+    task = workflow_tasks.load_tasks(limit=1)[0]
+    assert task["status"] == "completed"
+    assert task["payload"]["skipped"][0]["reason"] == "already_contacted"
 
 
 def test_greeting_browser_auto_mode_invokes_sender_and_marks_sent(tmp_path, monkeypatch):
@@ -454,7 +678,11 @@ def test_greeting_browser_auto_mode_blocks_when_sender_reports_risk(tmp_path, mo
 def test_greeting_browser_auto_waits_between_successful_sends(tmp_path, monkeypatch):
     jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
     from app.routes import greetings as greeting_route
-    _enable_auto_send()
+    client.post("/api/greetings/auto-send-settings", json={
+        "auto_send_enabled": True,
+        "gray_mode_enabled": False,
+        "send_interval_seconds": 7,
+    })
 
     calls = []
     waits = []
@@ -666,7 +894,7 @@ def test_greeting_preflight_reports_switch_login_candidates_and_validation(tmp_p
     jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
     from app.routes import greetings as greeting_route
 
-    monkeypatch.setattr(greeting_route, "check_boss_login_status", lambda: {"logged_in": True, "reason": "ok", "message": "已登录", "action": ""})
+    monkeypatch.setattr(greeting_route, "check_boss_login_status", lambda **_: {"logged_in": True, "reason": "ok", "message": "已登录", "action": ""})
     _enable_auto_send()
     jobs_route._job_store["job-1"] = JobRecord(
         id="job-1",
@@ -686,6 +914,31 @@ def test_greeting_preflight_reports_switch_login_candidates_and_validation(tmp_p
     assert body["status"] == "ok"
     assert body["summary"]["ok"] >= 4
     assert any(check["key"] == "boss_login" and check["status"] == "ok" for check in body["checks"])
+
+
+def test_auto_greeting_requires_a_verified_boss_login(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+
+    _enable_auto_send()
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1", title="产品经理", company="示例科技", city="上海",
+        jd_text="负责产品规划", source_url="https://example.com/job/1",
+    )
+    monkeypatch.setattr(greeting_route, "check_boss_login_status", lambda **_: {
+        "logged_in": False, "message": "登录已过期", "action": "请重新扫码登录 BOSS 直聘",
+    })
+    monkeypatch.setattr(greeting_route, "execute_browser_greeting", lambda *args: (_ for _ in ()).throw(AssertionError("发送不应启动")))
+
+    response = client.post("/api/greetings/send", json={
+        "job_ids": ["job-1"],
+        "messages": {"job-1": "您好，我对贵司的产品经理岗位很感兴趣，过往有需求分析经验，希望有机会进一步沟通。"},
+        "confirm": True,
+        "mode": "browser_auto",
+    })
+
+    assert response.status_code == 401
+    assert "登录已过期" in response.json()["detail"]
 
 
 def test_greeting_control_can_pause_and_resume(tmp_path, monkeypatch):

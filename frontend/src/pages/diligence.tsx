@@ -59,7 +59,7 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
       const removedFromSelection = selectedJobIds.filter(id => !selected.some(j => j.id === id));
       if (removedFromSelection.length > 0) {
         dispatch(actions.setSelection(selected.map(j => j.id)));
-        setError(prev => prev || `已自动同步选择：${removedFromSelection.length} 个岗位因黑名单或下架被移除`);
+        setError(prev => prev || `已自动同步选择：已移除 ${removedFromSelection.length} 个黑名单或下架岗位，当前仍保留 ${selected.length} 个岗位。`);
       }
     }).catch((err) => {
       console.warn("[diligence] 加载岗位失败:", err);
@@ -491,8 +491,8 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
                           <details className="evidence-panel" style={{ marginBottom: 12 }}>
                             <summary>证据来源与判断依据</summary>
                             <div className="evidence-trust-row" aria-label="证据可信度说明">
-                              {evidence.sourceTrust.map(source => (
-                                <div key={source.label} className={`evidence-trust evidence-trust--${source.level}`}>
+                              {evidence.sourceTrust.map((source, index) => (
+                                <div key={`${source.label}-${index}`} className={`evidence-trust evidence-trust--${source.level}`}>
                                   <strong>{source.label}</strong>
                                   <span>{source.description}</span>
                                 </div>

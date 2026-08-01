@@ -70,7 +70,6 @@ class GreetingSendRequest(BaseModel):
     messages: dict[str, str] = Field(default_factory=dict)
     confirm: bool = False
     mode: str = "manual_confirm"
-    batch_limit: int = 5
     daily_limit: int = 15
     send_interval_seconds: int = 5
     stop_on_blocked: bool = True
@@ -87,7 +86,6 @@ class GreetingFinalConfirmationRequest(BaseModel):
     messages: dict[str, str] = Field(default_factory=dict)
     mode: str = "browser_auto"
     daily_limit: int = 15
-    batch_limit: int = 5
 
 
 class GreetingControlRequest(BaseModel):
@@ -95,10 +93,12 @@ class GreetingControlRequest(BaseModel):
 
 
 class GreetingSettingsRequest(BaseModel):
-    auto_send_enabled: bool = False
-    profile: str = "standard"
-    gray_mode_enabled: bool = True
-    gray_first_success_required: bool = True
+    auto_send_enabled: bool | None = None
+    profile: str | None = None
+    gray_mode_enabled: bool | None = None
+    gray_first_success_required: bool | None = None
+    daily_limit: int | None = Field(default=None, ge=1, le=100)
+    send_interval_seconds: int | None = Field(default=None, ge=3, le=30)
 
 
 class GreetingSelectorHealthRequest(BaseModel):
@@ -171,10 +171,14 @@ def _append_application_history(job, status: str, previous: str, note: str) -> d
 
 
 FREQUENCY_PROFILES = [
-    {"key": "conservative", "label": "保守", "batchLimit": 2, "intervalSeconds": 20, "dailyLimit": 10},
-    {"key": "standard", "label": "标准", "batchLimit": 3, "intervalSeconds": 8, "dailyLimit": 15},
-    {"key": "fast", "label": "快速", "batchLimit": 5, "intervalSeconds": 5, "dailyLimit": 25},
+    {"key": "conservative", "label": "保守", "intervalSeconds": 20, "dailyLimit": 10},
+    {"key": "standard", "label": "标准", "intervalSeconds": 8, "dailyLimit": 15},
+    {"key": "fast", "label": "快速", "intervalSeconds": 5, "dailyLimit": 25},
 ]
+
+
+def _profile_defaults(profile: str) -> dict:
+    return next((item for item in FREQUENCY_PROFILES if item["key"] == profile), FREQUENCY_PROFILES[1])
 
 
 def _settings_file():
@@ -197,20 +201,30 @@ def _load_settings() -> dict:
     data = workflow_persistence._read_json(_settings_file(), {})
     if not isinstance(data, dict):
         data = {}
+    profile = str(data.get("profile") or "standard")
+    defaults = _profile_defaults(profile)
     return {
         "auto_send_enabled": bool(data.get("auto_send_enabled", False)),
-        "profile": str(data.get("profile") or "standard"),
+        "profile": defaults["key"],
         "gray_mode_enabled": bool(data.get("gray_mode_enabled", True)),
         "gray_first_success_required": bool(data.get("gray_first_success_required", True)),
+        "daily_limit": max(1, min(int(data.get("daily_limit") or defaults["dailyLimit"]), 100)),
+        "send_interval_seconds": max(3, min(int(data.get("send_interval_seconds") or defaults["intervalSeconds"]), 30)),
     }
 
 
 def _save_settings(settings: dict) -> dict:
+    previous = _load_settings()
+    requested_profile = str(settings.get("profile") or previous["profile"])
+    defaults = _profile_defaults(requested_profile)
+    profile_changed = "profile" in settings and requested_profile != previous["profile"]
     payload = {
-        "auto_send_enabled": bool(settings.get("auto_send_enabled", False)),
-        "profile": str(settings.get("profile") or "standard"),
-        "gray_mode_enabled": bool(settings.get("gray_mode_enabled", True)),
-        "gray_first_success_required": bool(settings.get("gray_first_success_required", True)),
+        "auto_send_enabled": bool(settings.get("auto_send_enabled", previous["auto_send_enabled"])),
+        "profile": defaults["key"],
+        "gray_mode_enabled": bool(settings.get("gray_mode_enabled", previous["gray_mode_enabled"])),
+        "gray_first_success_required": bool(settings.get("gray_first_success_required", previous["gray_first_success_required"])),
+        "daily_limit": max(1, min(int(settings.get("daily_limit") or (defaults["dailyLimit"] if profile_changed else previous["daily_limit"])), 100)),
+        "send_interval_seconds": max(3, min(int(settings.get("send_interval_seconds") or (defaults["intervalSeconds"] if profile_changed else previous["send_interval_seconds"])), 30)),
         "updatedAt": datetime.now().isoformat(),
     }
     workflow_persistence.write_json_atomic(_settings_file(), payload)
@@ -259,10 +273,10 @@ def _save_control(state: str, reason: str = "") -> dict:
     return payload
 
 
-def check_boss_login_status() -> dict:
+def check_boss_login_status(*, probe: bool = True) -> dict:
     from app.services.boss_scraper import check_login_status
 
-    return check_login_status()
+    return check_login_status(probe=probe)
 
 
 def check_boss_selector_health(job_url: str) -> dict:
@@ -283,7 +297,7 @@ def get_auto_send_settings() -> dict:
 
 @router.post("/auto-send-settings")
 def save_auto_send_settings(payload: GreetingSettingsRequest) -> dict:
-    return {"settings": _save_settings(payload.model_dump()), "profiles": FREQUENCY_PROFILES}
+    return {"settings": _save_settings(payload.model_dump(exclude_none=True)), "profiles": FREQUENCY_PROFILES}
 
 
 @router.post("/control")
@@ -314,6 +328,16 @@ def greeting_safety_summary() -> dict:
     settings = _load_settings()
     sent_today = count_sent_today()
     gray = _gray_mode_status(settings, records)
+    try:
+        # 安全摘要在所有页面挂载时都会读取；只能读取本地登录标记，
+        # 不能为了展示状态而启动 Chrome 或跳转 BOSS 页面。
+        login_status = check_boss_login_status(probe=False)
+    except Exception as exc:
+        login_status = {
+            "logged_in": False,
+            "message": f"BOSS 登录状态检测失败：{exc}",
+            "action": "验证 BOSS 登录后重试",
+        }
     failed_streak = 0
     for record in reversed(records):
         if record.get("status") in {"failed", "blocked"}:
@@ -323,6 +347,12 @@ def greeting_safety_summary() -> dict:
             break
     checks = [
         {
+            "key": "boss_login",
+            "status": "ok" if login_status.get("logged_in") else "error",
+            "message": str(login_status.get("message") or "未检测到有效 BOSS 登录"),
+            "action": str(login_status.get("action") or "验证 BOSS 登录"),
+        },
+        {
             "key": "auto_send_enabled",
             "status": "ok" if settings["auto_send_enabled"] else "warn",
             "message": "真实自动发送已开启" if settings["auto_send_enabled"] else "真实自动发送默认关闭",
@@ -330,9 +360,9 @@ def greeting_safety_summary() -> dict:
         },
         {
             "key": "daily_limit",
-            "status": "warn" if sent_today >= 15 else "ok",
-            "message": f"今日已发送 {sent_today} 条",
-            "action": "接近上限时暂停批量发送",
+            "status": "error" if sent_today >= settings["daily_limit"] else "ok",
+            "message": f"今日已发送 {sent_today}/{settings['daily_limit']} 条",
+            "action": "今日额度已用完，请明日再发送或调整发送上限",
         },
         {
             "key": "failure_streak",
@@ -351,7 +381,14 @@ def greeting_safety_summary() -> dict:
     return {
         "status": status,
         "settings": settings,
-        "summary": {"sentToday": sent_today, "failedStreak": failed_streak, "totalRecords": len(records), "grayMode": gray},
+        "summary": {
+            "sentToday": sent_today,
+            "dailyLimit": settings["daily_limit"],
+            "remaining": max(0, settings["daily_limit"] - sent_today),
+            "failedStreak": failed_streak,
+            "totalRecords": len(records),
+            "grayMode": gray,
+        },
         "checks": checks,
         "recommendations": [
             "自动发送前先运行预检，并确认本批岗位、话术和发送上限。",
@@ -367,7 +404,7 @@ def greeting_final_confirmation(payload: GreetingFinalConfirmationRequest) -> di
     safety = greeting_safety_summary()
     gray = safety["summary"].get("grayMode") or {}
     sent_today = int(safety["summary"]["sentToday"])
-    daily_limit = max(1, min(int(payload.daily_limit or 15), 100))
+    daily_limit = safety["settings"]["daily_limit"] if payload.mode == "browser_auto" else max(1, min(int(payload.daily_limit or 15), 100))
     remaining = max(0, daily_limit - sent_today)
     items = []
     for job in jobs:
@@ -383,8 +420,15 @@ def greeting_final_confirmation(payload: GreetingFinalConfirmationRequest) -> di
             "reasons": validation.reasons,
         })
     risk_items = []
-    if safety["status"] == "blocked":
-        risk_items.append("连续失败较多，建议先暂停并检查 BOSS 登录、风控或页面结构。")
+    for check in safety["checks"]:
+        if check["status"] != "error":
+            continue
+        if check["key"] == "boss_login":
+            risk_items.append(f"BOSS 登录校验未通过：{check['message']}。{check['action']}")
+        elif check["key"] == "failure_streak":
+            risk_items.append("连续失败较多，建议先暂停并检查 BOSS 登录、风控或页面结构。")
+        elif check["key"] == "daily_limit":
+            risk_items.append(f"今日发送额度已用完（{sent_today}/{safety['summary']['dailyLimit']}），请明日再发送或调整发送上限")
     invalid_count = sum(1 for item in items if not item["valid"])
     if invalid_count:
         risk_items.append(f"{invalid_count} 条话术未通过校验。")
@@ -401,7 +445,6 @@ def greeting_final_confirmation(payload: GreetingFinalConfirmationRequest) -> di
             "sentToday": sent_today,
             "dailyLimit": daily_limit,
             "remaining": remaining,
-            "batchLimit": max(1, min(int(payload.batch_limit or 5), 20)),
         },
         "items": items,
         "links": [item["url"] for item in items if item["url"]],
@@ -708,8 +751,8 @@ def generate_greeting_endpoint(payload: GreetingGenerateRequest) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="岗位不存在")
     try:
-        message = generate_greeting_with_ai(job, payload.resume, payload.jd_analysis, payload.style)
-        return {"jobId": job.id, "message": message, "source": "ai"}
+        message, source = generate_greeting_with_ai(job, payload.resume, payload.jd_analysis, payload.style)
+        return {"jobId": job.id, "message": message, "source": source}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"AI 话术生成失败: {exc}") from exc
 
@@ -766,6 +809,12 @@ def _send_greetings_impl(payload: GreetingSendRequest, workflow_task_id: str | N
     settings = _load_settings()
     if payload.mode == "browser_auto" and not settings["auto_send_enabled"]:
         raise HTTPException(status_code=403, detail="真实自动发送未开启，请先打开自动发送总开关")
+    if payload.mode == "browser_auto":
+        login_status = check_boss_login_status()
+        if not login_status.get("logged_in"):
+            message = str(login_status.get("message") or "未检测到有效 BOSS 登录")
+            action = str(login_status.get("action") or "请重新登录 BOSS 直聘")
+            raise HTTPException(status_code=401, detail=f"BOSS 登录校验未通过：{message}。{action}")
 
     job_index = _jobs_by_id()
     requested_ids = [job_id for job_id in payload.job_ids if job_id in job_index]
@@ -793,10 +842,9 @@ def _send_greetings_impl(payload: GreetingSendRequest, workflow_task_id: str | N
     skipped = list(candidates["skipped"])
     records = []
     sent = 0
-    batch_limit = max(1, min(int(payload.batch_limit or 5), 20))
-    daily_limit = max(1, min(int(payload.daily_limit or 15), 100))
+    daily_limit = settings["daily_limit"] if payload.mode == "browser_auto" else max(1, min(int(payload.daily_limit or 15), 100))
     remaining = max(0, daily_limit - count_sent_today())
-    send_interval_seconds = max(0, min(int(payload.send_interval_seconds or 0), 30))
+    send_interval_seconds = settings["send_interval_seconds"] if payload.mode == "browser_auto" else max(0, min(int(payload.send_interval_seconds or 0), 30))
     blocked_batch = False
     failed_job_ids: list[str] = []
     failed_messages: dict[str, str] = {}
@@ -814,7 +862,7 @@ def _send_greetings_impl(payload: GreetingSendRequest, workflow_task_id: str | N
             continue
         if job_id not in candidate_ids:
             continue
-        if sent >= batch_limit or sent >= remaining:
+        if sent >= remaining:
             skipped.append(_skip_item(job, "rate_limited"))
             continue
 
@@ -873,10 +921,9 @@ def _send_greetings_impl(payload: GreetingSendRequest, workflow_task_id: str | N
         "failed": failed,
         "skipped": len(skipped),
         "dailyLimit": daily_limit,
-        "batchLimit": batch_limit,
         "remainingBeforeSend": remaining,
     }
-    if failed or skipped:
+    if failed:
         partial_fail_task(task["id"], sent, len(requested_ids), "打招呼确认部分完成", "GREETING_PARTIAL", "检查跳过和失败原因后重试")
         update_task(
             task["id"],
@@ -888,7 +935,21 @@ def _send_greetings_impl(payload: GreetingSendRequest, workflow_task_id: str | N
             },
         )
     else:
-        complete_task(task["id"], done=sent, message="打招呼确认完成")
+        complete_task(
+            task["id"],
+            done=sent,
+            message=f"打招呼确认完成（跳过 {len(skipped)} 条）" if skipped else "打招呼确认完成",
+        )
+        if skipped:
+            update_task(
+                task["id"],
+                payload={
+                    **(task.get("payload") or {}),
+                    "failed_job_ids": [],
+                    "failed_messages": {},
+                    "skipped": skipped,
+                },
+            )
     return {"summary": summary, "records": records, "skipped": skipped, "taskId": task["id"]}
 
 
@@ -907,7 +968,6 @@ def retry_failed_greetings(task_id: str, reuse_task_id: str | None = None) -> di
         messages={str(k): str(v) for k, v in failed_messages.items()},
         confirm=True,
         mode=str(payload.get("mode") or "browser_auto"),
-        batch_limit=len(failed_job_ids),
         daily_limit=15,
         send_interval_seconds=5,
         stop_on_blocked=True,

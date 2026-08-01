@@ -26,6 +26,17 @@ def test_rankings_and_greetings_are_persisted(tmp_path, monkeypatch):
     assert persistence.load_greetings() == greetings
 
 
+def test_greeting_selection_is_persisted_separately_from_global_selection(tmp_path, monkeypatch):
+    monkeypatch.setattr(persistence, "DATA_DIR", tmp_path)
+
+    persistence.save_selection(["job-1", "job-2", "job-3"])
+    saved = persistence.save_greeting_selection(["job-2", "job-3"])
+
+    assert saved == ["job-2", "job-3"]
+    assert persistence.load_greeting_selection() == ["job-2", "job-3"]
+    assert persistence.load_selection() == ["job-1", "job-2", "job-3"]
+
+
 def test_send_record_prevents_duplicate_sent_status(tmp_path, monkeypatch):
     monkeypatch.setattr(persistence, "DATA_DIR", tmp_path)
 

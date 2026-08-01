@@ -33,6 +33,10 @@ def _prompt_versions_file():
     return workflow_persistence.DATA_DIR / "assistant" / "prompt_versions.json"
 
 
+def _prompt_versions_clear_marker_file():
+    return workflow_persistence.DATA_DIR / "assistant" / "prompt_versions_cleared.json"
+
+
 def _save_prompt_version(job: dict, kind: str, prompt_version: str, system_prompt: str, payload: dict, guidance: dict) -> dict:
     rows = _read_json(_prompt_versions_file(), [])
     if not isinstance(rows, list):
@@ -56,6 +60,44 @@ def _save_prompt_version(job: dict, kind: str, prompt_version: str, system_promp
     rows.append(record)
     write_json_atomic(_prompt_versions_file(), rows[-200:])
     return record
+
+
+def _backfill_prompt_versions_from_api_log(rows: list[dict]) -> list[dict]:
+    """Recover model/time metadata for AI calls made before prompt auditing was added."""
+    if rows or _prompt_versions_clear_marker_file().exists():
+        return rows
+    log_path = workflow_persistence.DATA_DIR / "logs" / "api_calls.jsonl"
+    if not log_path.exists():
+        return rows
+    recovered: list[dict] = []
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()[-200:]
+    except OSError:
+        return rows
+    for index, line in enumerate(lines):
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        detail = item.get("detail") if isinstance(item.get("detail"), dict) else {}
+        if item.get("category") != "ai" or detail.get("outcome") != "success":
+            continue
+        created_at = str(item.get("time") or datetime.now().isoformat(timespec="seconds"))
+        recovered.append({
+            "id": f"ai-historical-{index}-{created_at.replace(':', '').replace('+', '').replace('-', '')}",
+            "jobId": "",
+            "company": "",
+            "title": "",
+            "kind": "ai_historical",
+            "promptVersion": str(detail.get("model") or "未记录模型"),
+            "promptPreview": "历史 AI 调用（升级前未记录提示词）",
+            "payloadSummary": {"hasResume": False, "hasDiligence": False, "preferenceSignals": 0},
+            "feedbackGuidance": {"summary": {"total": 0, "useful": 0, "notUseful": 0}, "recentNotes": []},
+            "createdAt": created_at,
+        })
+    if recovered:
+        write_json_atomic(_prompt_versions_file(), recovered[-200:])
+    return recovered
 
 
 def _save_result(job: dict, kind: str, result: dict) -> dict:
@@ -152,6 +194,7 @@ def get_prompt_versions(kind: str = "", job_id: str = "") -> dict:
     rows = _read_json(_prompt_versions_file(), [])
     if not isinstance(rows, list):
         rows = []
+    rows = _backfill_prompt_versions_from_api_log(rows)
     if kind:
         rows = [row for row in rows if row.get("kind") == kind]
     if job_id:
@@ -179,6 +222,9 @@ def clear_prompt_versions(kind: str = "", job_id: str = "") -> dict:
         kept = []
     deleted = len(rows) - len(kept)
     write_json_atomic(_prompt_versions_file(), kept)
+    if not kind and not job_id:
+        # 清空是用户的明确选择；保留水位标记，避免刷新时把旧 API 日志回填回来。
+        write_json_atomic(_prompt_versions_clear_marker_file(), {"clearedAt": datetime.now().isoformat(timespec="seconds")})
     return {
         "deleted": deleted,
         "remaining": len(kept),
@@ -417,6 +463,7 @@ def generate_deep_report(payload: dict) -> dict:
             system_prompt,
             str(base),
             temperature=0.2,
+            record_version=False,
         )
         if isinstance(ai, dict) and not ai.get("error"):
             base["aiReport"] = ai

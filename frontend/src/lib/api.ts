@@ -98,8 +98,8 @@ export async function captureBossJobs(
   });
 }
 
-export async function bossLoginStatus(): Promise<BossLoginStatus> {
-  return fetchJson("/api/jobs/capture/boss/status");
+export async function bossLoginStatus(probe = false): Promise<BossLoginStatus> {
+  return fetchJson(`/api/jobs/capture/boss/status${probe ? "?probe=true" : ""}`);
 }
 
 export async function bossLogin(): Promise<{ status: string; message: string }> {
@@ -186,8 +186,9 @@ export async function getApplicationTimeline(): Promise<ApplicationTimeline> {
   return fetchJson("/api/jobs/application-timeline");
 }
 
-export async function getApplicationBoard(): Promise<ApplicationBoard> {
-  return fetchJson("/api/jobs/application-board");
+export async function getApplicationBoard(selectedJobIds?: string[]): Promise<ApplicationBoard> {
+  const query = selectedJobIds === undefined ? "" : `?selected_job_ids=${encodeURIComponent(selectedJobIds.join(","))}`;
+  return fetchJson(`/api/jobs/application-board${query}`);
 }
 
 export async function updateJobApplicationStatus(
@@ -265,11 +266,18 @@ export async function saveDiligenceNote(companyName: string, note: string): Prom
   });
 }
 
-export async function rankJobs(jobIds: string[], resume: unknown, diligenceReports: Record<string, unknown>, weights?: RankingWeights) {
+export async function rankJobs(
+  jobIds: string[],
+  resume: unknown,
+  diligenceReports: Record<string, unknown>,
+  weights?: RankingWeights,
+  continueExisting = false,
+  refreshAiMatches = false,
+) {
   return fetchJson("/api/scoring/rank", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ job_ids: jobIds, resume, diligence_reports: diligenceReports, weights }),
+    body: JSON.stringify({ job_ids: jobIds, resume, diligence_reports: diligenceReports, weights, continue_existing: continueExisting, refresh_ai_matches: refreshAiMatches }),
   });
 }
 
@@ -321,12 +329,12 @@ export async function deleteWorkflowTask(taskId: string): Promise<{ deleted: boo
   return fetchJson(`/api/workflow/tasks/${taskId}`, { method: "DELETE" });
 }
 
-export async function getDashboardSummary(): Promise<DashboardSummary> {
-  return fetchJson("/api/dashboard/summary");
+export async function getDashboardSummary(selectedJobIds: string[] = []): Promise<DashboardSummary> {
+  return fetchJson(`/api/dashboard/summary?selected_job_ids=${encodeURIComponent(selectedJobIds.join(","))}`);
 }
 
-export async function getOnboardingGuide(): Promise<import("./types").OnboardingGuide> {
-  return fetchJson("/api/dashboard/onboarding");
+export async function getOnboardingGuide(selectedJobIds: string[] = []): Promise<import("./types").OnboardingGuide> {
+  return fetchJson(`/api/dashboard/onboarding?selected_job_ids=${encodeURIComponent(selectedJobIds.join(","))}`);
 }
 
 export async function getOnboardingWizard(): Promise<import("./types").OnboardingWizard> {
@@ -345,8 +353,9 @@ export async function getDashboardTrends(days = 30): Promise<DashboardTrendRepor
   return fetchJson(`/api/dashboard/trends?days=${Math.max(1, Math.min(90, days))}`);
 }
 
-export async function getDataQualityCenter(): Promise<DataQualityCenter> {
-  return fetchJson("/api/dashboard/data-quality");
+export async function getDataQualityCenter(selectedJobIds?: string[]): Promise<DataQualityCenter> {
+  const query = selectedJobIds === undefined ? "" : `?selected_job_ids=${encodeURIComponent(selectedJobIds.join(","))}`;
+  return fetchJson(`/api/dashboard/data-quality${query}`);
 }
 
 export async function repairDataQuality(actions: string[] = []): Promise<DataQualityRepairResult> {
@@ -490,7 +499,6 @@ export async function getGreetingFinalConfirmation(payload: {
   messages: Record<string, string>;
   mode?: "manual_confirm" | "browser_auto";
   daily_limit?: number;
-  batch_limit?: number;
 }): Promise<GreetingFinalConfirmation> {
   return fetchJson("/api/greetings/final-confirmation", {
     method: "POST",
@@ -615,7 +623,6 @@ export async function sendGreetingConfirmations(payload: {
   messages: Record<string, string>;
   confirm: boolean;
   mode?: "manual_confirm" | "browser_auto";
-  batch_limit?: number;
   daily_limit?: number;
   send_interval_seconds?: number;
   stop_on_blocked?: boolean;
@@ -718,6 +725,10 @@ export async function deleteBatchJobs(jobIds: string[]): Promise<{ deleted: numb
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ job_ids: jobIds }),
   });
+}
+
+export async function deleteCaptureBatch(batchId: string): Promise<{ batchId: string; deleted: number; deletedJobIds: string[]; total: number }> {
+  return fetchJson(`/api/jobs/capture-batches/${encodeURIComponent(batchId)}`, { method: "DELETE" });
 }
 
 export async function clearAllJobs(): Promise<{ deleted: number; total: number }> {

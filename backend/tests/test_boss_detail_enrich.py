@@ -24,6 +24,47 @@ def test_stop_chrome_preserves_login_marker_by_default(monkeypatch, tmp_path):
     assert not session_file.exists()
 
 
+def test_stop_chrome_never_kills_an_unowned_process_on_the_cdp_port(monkeypatch, tmp_path):
+    import app.services.boss_scraper as scraper
+
+    pid_file = tmp_path / ".cdp_chrome.pid"
+    pid_file.write_text("888")
+    killed = []
+
+    def fake_run(command, **kwargs):
+        if command[0] == "lsof":
+            return SimpleNamespace(stdout="777\n888\n")
+        return SimpleNamespace(stdout=f"Google Chrome --remote-debugging-port={scraper.CDP_PORT} --user-data-dir={tmp_path}\n")
+
+    monkeypatch.setattr(scraper, "CDP_PROFILE", str(tmp_path))
+    monkeypatch.setattr(scraper.subprocess, "run", fake_run)
+    monkeypatch.setattr(scraper.os, "kill", lambda pid, signal: killed.append(pid))
+    monkeypatch.setattr(scraper._time, "sleep", lambda seconds: None)
+
+    scraper._stop_chrome()
+
+    assert killed == [888]
+
+
+def test_launch_chrome_bypasses_a_broken_system_proxy(monkeypatch, tmp_path):
+    import app.services.boss_scraper as scraper
+
+    commands = []
+
+    class FakeProcess:
+        pid = 12345
+
+    monkeypatch.setattr(scraper, "CDP_PROFILE", str(tmp_path / "profile"))
+    monkeypatch.setattr(scraper, "_find_chrome", lambda: "/Applications/Chrome")
+    monkeypatch.setattr(scraper, "_stop_chrome", lambda: None)
+    monkeypatch.setattr(scraper, "_chrome_running", lambda: True)
+    monkeypatch.setattr(scraper._time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(scraper.subprocess, "Popen", lambda command, **kwargs: commands.append(command) or FakeProcess())
+
+    assert scraper._launch_chrome()
+    assert "--no-proxy-server" in commands[0]
+
+
 def test_boss_login_closes_browser_and_preserves_session_marker(monkeypatch, tmp_path):
     import app.services.boss_scraper as scraper
 
@@ -68,7 +109,7 @@ def test_boss_login_closes_browser_and_preserves_session_marker(monkeypatch, tmp
     assert (tmp_path / ".boss_logged_in").exists()
 
 
-def test_boss_login_status_route_uses_real_probe(monkeypatch):
+def test_boss_login_status_route_only_probes_when_requested(monkeypatch):
     import app.services.boss_scraper as scraper
 
     called = {}
@@ -83,8 +124,13 @@ def test_boss_login_status_route_uses_real_probe(monkeypatch):
     response = client.get("/api/jobs/capture/boss/status")
 
     assert response.status_code == 200
-    assert called["probe"] is True
+    assert called["probe"] is False
     assert response.json()["logged_in"] is False
+
+    response = client.get("/api/jobs/capture/boss/status?probe=true")
+
+    assert response.status_code == 200
+    assert called["probe"] is True
 
 
 def test_login_status_does_not_trust_stale_marker_when_chrome_is_closed(monkeypatch, tmp_path):
@@ -456,6 +502,98 @@ def test_job_quality_excludes_blacklisted_jobs_from_jd_counts(monkeypatch):
     assert quality["summary"]["missing_jd"] == 1
     batch_a = next(batch for batch in quality["batches"] if batch["id"] == "batch-a")
     assert batch_a["missing_jd"] == 1
+
+
+def test_job_quality_exposes_diligence_risk_and_revision_feedback_job_ids(monkeypatch):
+    import app.routes.jobs as jobs_route
+    from app.services import feedback_store, workflow_persistence
+
+    monkeypatch.setattr(jobs_route, "is_company_blacklisted", lambda company: company == "黑名单公司")
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "risk-job": JobRecord(id="risk-job", title="风险岗位", company="展示公司"),
+        "jd-quality-job": JobRecord(id="jd-quality-job", title="JD 待修改岗位", company="JD 公司"),
+        "normal-job": JobRecord(id="normal-job", title="正常岗位", company="正常公司"),
+        "blacklisted-risk-job": JobRecord(id="blacklisted-risk-job", title="隐藏风险岗位", company="黑名单公司"),
+    })
+    monkeypatch.setattr(workflow_persistence, "load_diligence_reports", lambda: {
+        "分析公司": {
+            "companyName": "分析公司",
+            "sourceCompanyName": "展示公司",
+            "companyKey": "company-key",
+            "riskLevel": "high",
+        },
+        "黑名单公司": {
+            "companyName": "黑名单公司",
+            "riskLevel": "high",
+        },
+    })
+    monkeypatch.setattr(feedback_store, "list_feedback", lambda domain="", target_id="": [
+        {"domain": "diligence", "targetId": "company-key", "useful": False},
+        {"domain": "jd_quality", "targetId": "jd-quality-job", "useful": False},
+        {"domain": "ranking", "targetId": "deleted-job", "useful": False},
+    ])
+
+    quality = jobs_route._job_quality_report()
+
+    assert quality["summary"]["risk_jobs"] == 1
+    assert quality["summary"]["ai_feedback_needs_revision"] == 2
+    assert quality["diligence"]["riskJobIds"] == ["risk-job"]
+    assert quality["diligence"]["aiFeedbackNeedsRevisionJobIds"] == ["risk-job", "jd-quality-job"]
+
+
+def test_delete_capture_batch_removes_only_its_jobs_and_workflow_references(monkeypatch):
+    import app.routes.jobs as jobs_route
+    from app.services import workflow_persistence
+
+    jobs_route._job_store = {
+        "batch-a-1": JobRecord(id="batch-a-1", title="A1", company="公司 A", capture_batch_id="capture-a"),
+        "batch-a-2": JobRecord(id="batch-a-2", title="A2", company="公司 A", capture_batch_id="capture-a"),
+        "batch-b-1": JobRecord(id="batch-b-1", title="B1", company="公司 B", capture_batch_id="capture-b"),
+    }
+    archived: list[str] = []
+    saved = {"jobs": 0, "selection": None, "greeting": None, "rankings": None, "drafts": None}
+    monkeypatch.setattr(jobs_route, "_archive_jobs", lambda ids: archived.extend(ids))
+    monkeypatch.setattr(jobs_route, "_save_jobs", lambda: saved.__setitem__("jobs", saved["jobs"] + 1))
+    monkeypatch.setattr(jobs_route, "log_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(workflow_persistence, "load_selection", lambda: ["batch-a-1", "batch-b-1"])
+    monkeypatch.setattr(workflow_persistence, "save_selection", lambda ids: saved.__setitem__("selection", ids) or ids)
+    monkeypatch.setattr(workflow_persistence, "load_greeting_selection", lambda: ["batch-a-2", "batch-b-1"])
+    monkeypatch.setattr(workflow_persistence, "save_greeting_selection", lambda ids: saved.__setitem__("greeting", ids) or ids)
+    monkeypatch.setattr(workflow_persistence, "load_rankings", lambda: [{"jobId": "batch-a-1"}, {"jobId": "batch-b-1"}])
+    monkeypatch.setattr(workflow_persistence, "save_rankings", lambda rows: saved.__setitem__("rankings", rows) or rows)
+    monkeypatch.setattr(workflow_persistence, "load_greetings", lambda: {"batch-a-1": "A", "batch-b-1": "B"})
+    monkeypatch.setattr(workflow_persistence, "save_greetings", lambda rows: saved.__setitem__("drafts", rows) or rows)
+
+    response = TestClient(app).delete("/api/jobs/capture-batches/capture-a")
+
+    assert response.status_code == 200
+    assert response.json() == {"batchId": "capture-a", "deleted": 2, "deletedJobIds": ["batch-a-1", "batch-a-2"], "total": 1}
+    assert set(jobs_route._job_store) == {"batch-b-1"}
+    assert archived == ["batch-a-1", "batch-a-2"]
+    assert saved == {
+        "jobs": 1,
+        "selection": ["batch-b-1"],
+        "greeting": ["batch-b-1"],
+        "rankings": [{"jobId": "batch-b-1"}],
+        "drafts": {"batch-b-1": "B"},
+    }
+
+
+def test_data_quality_uses_selected_non_blacklisted_jobs(monkeypatch):
+    import app.routes.jobs as jobs_route
+    from app.services import maintenance_service
+
+    monkeypatch.setattr(jobs_route, "_job_store", {
+        "selected": JobRecord(id="selected", title="已选", company="正常公司", jd_text="完整 JD", jd_detail_fetched_at="2026-08-01T00:00:00"),
+        "unselected": JobRecord(id="unselected", title="未选", company="正常公司"),
+        "blacklisted": JobRecord(id="blacklisted", title="黑名单", company="黑名单公司", lifecycle_status="blacklisted"),
+    })
+    monkeypatch.setattr(maintenance_service.workflow_persistence, "load_rankings", lambda: [{"jobId": "selected"}])
+
+    quality = maintenance_service.data_quality_center(["selected", "blacklisted"])
+
+    assert quality["summary"]["totalJobs"] == 1
+    assert next(check for check in quality["checks"] if check["key"] == "missing_jd")["count"] == 0
 
 
 def test_enrich_jd_processes_all_explicitly_selected_jobs(monkeypatch, tmp_path):

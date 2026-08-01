@@ -54,24 +54,68 @@ function ranking(jobId: string): RankingResult {
 }
 
 describe("buildWorkflowTasks", () => {
-  test("summarizes full workflow progress from current data", () => {
+  test("summarizes workflow progress from the user's selected jobs", () => {
     const tasks = buildWorkflowTasks({
       jobs: [
-        job({ id: "job-1", company: "A", jd_text: "JD" }),
+        job({ id: "job-1", company: "A", jd_text: "JD", jd_detail_fetched_at: "2026-08-01T00:00:00Z" }),
         job({ id: "job-2", company: "B" }),
       ],
       selectedJobIds: ["job-1"],
+      greetingJobIds: ["job-1"],
       diligenceReports: { A: report("A") },
       rankingResults: [ranking("job-1")],
     });
 
     expect(tasks.map(t => [t.key, t.status, t.done, t.total])).toEqual([
       ["jobs", "done", 2, 2],
-      ["jd", "running", 1, 2],
+      ["jd", "done", 1, 1],
       ["diligence", "done", 1, 1],
       ["ranking", "done", 1, 1],
       ["greeting", "idle", 0, 1],
     ]);
+    expect(tasks[0]).toMatchObject({ label: "全库" });
+  });
+
+  test("does not mark selected jobs as JD-complete from another job's detail", () => {
+    const jd = buildWorkflowTasks({
+      jobs: [
+        job({ id: "selected", company: "A" }),
+        job({ id: "not-selected", company: "B", jd_text: "完整 JD" }),
+      ],
+      selectedJobIds: ["selected"],
+      greetingJobIds: [],
+      diligenceReports: {},
+      rankingResults: [],
+    }).find(task => task.key === "jd");
+
+    expect(jd).toMatchObject({ done: 0, total: 1, status: "idle" });
+  });
+
+  test("requires a fetched JD detail rather than an AI analysis cache", () => {
+    const jd = buildWorkflowTasks({
+      jobs: [job({ id: "selected", company: "A", jd_text: "只有分析缓存，没有详情抓取时间" })],
+      selectedJobIds: ["selected"],
+      greetingJobIds: [],
+      diligenceReports: {},
+      rankingResults: [],
+    }).find(task => task.key === "jd");
+
+    expect(jd).toMatchObject({ done: 0, total: 1, status: "idle" });
+  });
+
+  test("counts greeting progress against jobs selected on the ranking page", () => {
+    const input = {
+      jobs: [job({ id: "job-1" }), job({ id: "job-2" })],
+      selectedJobIds: ["job-1", "job-2"],
+      greetingJobIds: ["job-2"],
+      diligenceReports: {},
+      rankingResults: [ranking("job-1"), ranking("job-2")],
+      greetingTexts: { "job-2": "您好，我对贵司岗位很感兴趣，期待进一步沟通。" },
+    };
+
+    const greeting = buildWorkflowTasks(input).find(task => task.key === "greeting");
+
+    expect(greeting).toMatchObject({ done: 1, total: 1, status: "done" });
   });
 });
 
@@ -83,6 +127,7 @@ describe("buildWorkflowTodos", () => {
         job({ id: "job-2", company: "B", jd_text: "完整 JD" }),
       ],
       selectedJobIds: ["job-1", "job-2"],
+      greetingJobIds: ["job-1", "job-2"],
       diligenceReports: { B: report("B") },
       rankingResults: [],
       greetingTexts: {},

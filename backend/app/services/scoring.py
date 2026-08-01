@@ -21,7 +21,8 @@ from app.services.workflow_persistence import _read_json, write_json_atomic
 logger = logging.getLogger(__name__)
 RANKING_SETTINGS_FILE = workflow_persistence.DATA_DIR / "rankings" / "settings.json"
 RANKING_CACHE_FILE = workflow_persistence.DATA_DIR / "rankings" / "ranking_cache.json"
-RANKING_MAX_CONCURRENCY = 3
+RANKING_MAX_CONCURRENCY = 2
+MATCH_MAX_ATTEMPTS = 3
 _RANKING_MEMORY_CACHE: dict[str, dict] = {}
 _RANKING_CACHE_LOCK = threading.Lock()
 DEFAULT_RANKING_WEIGHTS = {"company_weight": 0.4, "match_weight": 0.6}
@@ -188,21 +189,27 @@ async def match_resume_to_job(resume: dict, job: dict, jd_analysis: dict) -> dic
 打分标准: 技能匹配占40%、经验匹配占30%、学历匹配占20%、综合素质占10%。
 只返回 JSON，不要其他内容。"""
 
-    try:
-        response = await client.chat(prompt, temperature=0.2, max_tokens=500)
-        result = _parse_json(response)
-        if not result:
-            return _fallback_match("")
-        # 确保必要字段
-        result.setdefault("match_score", 50)
-        result.setdefault("highlights", [])
-        result.setdefault("gaps", [])
-        result.setdefault("recommendation", "consider")
-        result.setdefault("reason", "匹配度一般")
-        return result
-    except Exception as e:
-        logger.warning(f"简历匹配失败: {e}")
-        return _fallback_match(str(e)[:100])
+    last_failure_reason = "invalid_response"
+    last_error = ""
+    for attempt in range(1, MATCH_MAX_ATTEMPTS + 1):
+        retry_hint = "" if attempt == 1 else "\n上一轮结果无法通过 JSON 校验。请严格只返回完整 JSON，所有字段均不可缺失，描述保持简短。"
+        try:
+            response = await client.chat(f"{prompt}{retry_hint}", temperature=0.2, max_tokens=500)
+            result = _parse_json(response)
+            failure_reason = _match_result_failure_reason(result)
+            if failure_reason is None:
+                result.setdefault("highlights", [])
+                result.setdefault("gaps", [])
+                result["matchStatus"] = "completed"
+                result["attemptCount"] = attempt
+                return result
+            last_failure_reason = failure_reason
+            logger.warning("简历匹配结果校验失败（第 %s/%s 次）：%s", attempt, MATCH_MAX_ATTEMPTS, failure_reason)
+        except Exception as exc:
+            last_failure_reason = "request_error"
+            last_error = str(exc)[:100]
+            logger.warning("简历匹配请求失败（第 %s/%s 次）：%s", attempt, MATCH_MAX_ATTEMPTS, last_error)
+    return _fallback_match(last_error, last_failure_reason, MATCH_MAX_ATTEMPTS)
 
 
 async def rank_jobs_ai(
@@ -211,6 +218,7 @@ async def rank_jobs_ai(
     diligence_reports: dict,
     weights: dict | None = None,
     progress_callback=None,
+    refresh_ai_matches: bool = False,
 ) -> list:
     """
     综合排序：公司尽调分(40%) + AI简历匹配度(60%)
@@ -232,6 +240,7 @@ async def rank_jobs_ai(
                 diligence_index,
                 active_weights,
                 preferences,
+                refresh_ai_matches,
             )
             if progress_callback:
                 async with progress_lock:
@@ -258,6 +267,7 @@ async def _rank_one_job(
     diligence_index: dict[str, dict],
     active_weights: dict,
     preferences: dict,
+    refresh_ai_matches: bool = False,
 ) -> dict:
     job_id = job.get("id", "")
     company = job.get("company", "")
@@ -278,10 +288,11 @@ async def _rank_one_job(
         resume=resume,
         jd_analysis=jd_analysis,
     )
-    match_result = _read_ranking_cache(match_cache_key)
-    if match_result is None:
+    match_result = None if refresh_ai_matches else _read_ranking_cache(match_cache_key)
+    if match_result is None or _is_temporary_match_result(match_result):
         match_result = await match_resume_to_job(resume, job, jd_analysis)
-        _write_ranking_cache(match_cache_key, match_result)
+        if not _is_temporary_match_result(match_result):
+            _write_ranking_cache(match_cache_key, match_result)
     match_score = match_result.get("match_score", 50)
 
     # 综合得分
@@ -303,6 +314,9 @@ async def _rank_one_job(
         "reason": match_result.get("reason", ""),
         "matchHighlights": match_result.get("highlights", []),
         "matchGaps": match_result.get("gaps", []),
+        "matchStatus": match_result.get("matchStatus", "completed"),
+        "failureReason": match_result.get("failureReason"),
+        "attemptCount": match_result.get("attemptCount", 1),
         "weights": active_weights,
         "explanation": _build_ranking_explanation(
             job=job,
@@ -321,6 +335,17 @@ def _ranking_cache_key(stage: str, **payload) -> str:
     data = {"stage": stage, "model": get_model(), **payload}
     encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_temporary_match_result(result: dict | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    reason = str(result.get("reason") or "").strip()
+    return (
+        result.get("matchStatus") == "failed"
+        or reason.startswith("AI 调用失败")
+        or "匹配度分析待AI配置后更新" in reason
+    )
 
 
 def _read_ranking_cache(key: str) -> dict | None:
@@ -393,6 +418,22 @@ def _parse_json(response: str) -> dict:
     return {}
 
 
+def _match_result_failure_reason(result: dict) -> str | None:
+    if not isinstance(result, dict) or not result:
+        return "invalid_response"
+    try:
+        score = float(result.get("match_score"))
+    except (TypeError, ValueError):
+        return "invalid_schema"
+    if not 0 <= score <= 100:
+        return "invalid_schema"
+    if str(result.get("recommendation") or "").strip() not in {"strong", "recommend", "consider", "not_recommend"}:
+        return "invalid_schema"
+    if not isinstance(result.get("highlights"), list) or not isinstance(result.get("gaps"), list):
+        return "invalid_schema"
+    return None
+
+
 def _fallback_jd_analysis(job: dict) -> dict:
     title = job.get("title", "")
     return {
@@ -406,8 +447,14 @@ def _fallback_jd_analysis(job: dict) -> dict:
     }
 
 
-def _fallback_match(error_msg: str = "") -> dict:
-    reason = f"AI 调用失败: {error_msg}" if error_msg else "匹配度分析待AI配置后更新（请在设置中配置API Key）"
+def _fallback_match(error_msg: str = "", failure_reason: str = "ai_unavailable", attempts: int = 1) -> dict:
+    reason_map = {
+        "invalid_response": "AI 返回内容无法解析为完整 JSON，已自动重试后仍未完成",
+        "invalid_schema": "AI 返回的匹配字段不完整，已自动重试后仍未完成",
+        "request_error": f"AI 请求失败: {error_msg}" if error_msg else "AI 请求失败，已自动重试后仍未完成",
+        "ai_unavailable": "未配置可用的 AI 服务，请在设置中配置 API Key 和模型",
+    }
+    reason = reason_map.get(failure_reason, "AI 匹配度暂未完成，请稍后重试")
     return {
         "match_score": 50,
         "skill_match_rate": 0.5,
@@ -417,6 +464,9 @@ def _fallback_match(error_msg: str = "") -> dict:
         "gaps": [],
         "recommendation": "consider",
         "reason": reason,
+        "matchStatus": "failed",
+        "failureReason": failure_reason,
+        "attemptCount": attempts,
     }
 
 

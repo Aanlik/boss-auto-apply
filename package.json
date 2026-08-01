@@ -6,8 +6,8 @@
   "main": "desktop/main.cjs",
   "scripts": {
     "desktop:build": "python3 scripts/build_desktop.py",
-    "desktop:pack": "electron-builder --mac dir",
-    "desktop:dist": "electron-builder --mac dmg"
+    "desktop:pack": "pnpm desktop:build mac-dir",
+    "desktop:dist": "pnpm desktop:build mac-dmg"
   },
   "build": {
     "appId": "com.bossworkbench.desktop",

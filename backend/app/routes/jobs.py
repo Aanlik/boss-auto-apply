@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.models.job import JobRecord, JobFilter
 from app.services import workflow_persistence
+from app.services import feedback_store
 from app.services.workflow_persistence import _read_json, write_json_atomic
 from app.services.city_codes import list_city_options
 from app.services.boss_filter_options import list_filter_options, normalize_capture_filters
@@ -268,6 +269,62 @@ def _job_quality_report() -> dict:
     duplicate_groups.sort(key=lambda item: (-item["count"], item["company"], item["title"]))
 
     quality_jobs = [job for job in jobs if not is_blacklisted(job)]
+    diligence_reports = workflow_persistence.load_diligence_reports()
+    diligence_index: dict[str, dict] = {}
+    diligence_aliases: dict[int, set[str]] = {}
+    for key, report in diligence_reports.items():
+        if not isinstance(report, dict):
+            continue
+        business = report.get("businessInfo") if isinstance(report.get("businessInfo"), dict) else {}
+        aliases = {
+            str(value).strip()
+            for value in (
+                key,
+                report.get("companyName"),
+                report.get("sourceCompanyName"),
+                report.get("companyKey"),
+                business.get("companyName"),
+                business.get("sourceCompanyName"),
+                business.get("companyKey"),
+                business.get("unifiedCreditCode"),
+            )
+            if str(value or "").strip()
+        }
+        diligence_aliases[id(report)] = aliases
+        for alias in aliases:
+            diligence_index[alias] = report
+    revision_feedback = [
+        item for item in feedback_store.list_feedback()
+        if item.get("useful") is not True and str(item.get("targetId") or "").strip()
+    ]
+    revision_feedback_targets = {
+        str(item.get("targetId") or "").strip()
+        for item in revision_feedback
+        if str(item.get("domain") or "").strip() == "diligence"
+    }
+    direct_revision_job_ids = {
+        str(item.get("targetId") or "").strip()
+        for item in revision_feedback
+        if str(item.get("domain") or "").strip() in {"jd_quality", "ranking", "greeting", "deep_report"}
+    }
+    risk_job_ids: list[str] = []
+    feedback_revision_job_ids: list[str] = []
+    for job in quality_jobs:
+        report = next(
+            (
+                diligence_index[str(value).strip()]
+                for value in (job.company,)
+                if str(value or "").strip() in diligence_index
+            ),
+            None,
+        )
+        if report and str(report.get("riskLevel") or "").strip().lower() in {"high", "高"}:
+            risk_job_ids.append(job.id)
+        if (
+            job.id in direct_revision_job_ids
+            or (report and diligence_aliases.get(id(report), set()) & revision_feedback_targets)
+        ):
+            feedback_revision_job_ids.append(job.id)
     with_jd = sum(1 for job in quality_jobs if _has_detail_jd(job))
     suspected_expired = sum(1 for job in jobs if job.lifecycle_status == "suspected_expired")
     blacklisted = sum(1 for job in jobs if is_blacklisted(job))
@@ -324,10 +381,16 @@ def _job_quality_report() -> dict:
             "blacklisted": blacklisted,
             "duplicate_groups": len(duplicate_groups),
             "duplicate_jobs": duplicate_jobs,
+            "risk_jobs": len(risk_job_ids),
+            "ai_feedback_needs_revision": len(feedback_revision_job_ids),
             "application_statuses": application_statuses,
             "batch_count": len(batch_index),
         },
         "duplicateGroups": duplicate_groups,
+        "diligence": {
+            "riskJobIds": risk_job_ids,
+            "aiFeedbackNeedsRevisionJobIds": feedback_revision_job_ids,
+        },
         "batches": batches,
     }
 
@@ -599,10 +662,10 @@ def retry_failed_jd_details(task_id: str, reuse_task_id: str | None = None) -> d
 
 
 @router.get("/capture/boss/status")
-def boss_login_status() -> dict:
-    """检查 BOSS 直聘登录状态（Chrome 运行中时会实际探测，未运行时回退本地标记）。"""
+def boss_login_status(probe: bool = False) -> dict:
+    """读取 BOSS 登录状态；仅显式 probe 时才启动浏览器验证 Cookie。"""
     from app.services.boss_scraper import check_login_status
-    return check_login_status(probe=True)
+    return check_login_status(probe=probe)
 
 
 @router.get("/capture/boss/filter-options")
@@ -613,6 +676,13 @@ def boss_capture_filter_options() -> dict:
 @router.post("/capture/boss")
 def capture_from_boss_endpoint(payload: dict) -> dict:
     """从 Boss 直聘真实抓取岗位。"""
+    from app.services.boss_scraper import check_login_status
+
+    login_status = check_login_status(probe=True)
+    if not login_status.get("logged_in"):
+        message = str(login_status.get("message") or "未检测到有效 BOSS 登录")
+        action = str(login_status.get("action") or "请重新登录 BOSS 直聘")
+        raise HTTPException(status_code=401, detail=f"BOSS 登录校验未通过：{message}。{action}")
     keyword = payload.get("keyword", "Python")
     city = payload.get("city") or ""  # 空字符串 = 全国
     max_pages = min(int(payload.get("max_pages", 3)), 10)
@@ -1102,7 +1172,7 @@ def application_timeline(limit: int = 50) -> dict:
 
 
 @router.get("/application-board")
-def application_crm_board() -> dict:
+def application_crm_board(selected_job_ids: str | None = None) -> dict:
     labels = {
         "pending": "待处理",
         "greeted": "已打招呼",
@@ -1115,7 +1185,12 @@ def application_crm_board() -> dict:
         key: {"key": key, "label": label, "count": 0, "jobs": []}
         for key, label in labels.items()
     }
+    selected_ids = {job_id for job_id in (selected_job_ids or "").split(",") if job_id}
     for job in _all_jobs():
+        if selected_job_ids is not None and job.id not in selected_ids:
+            continue
+        if job.lifecycle_status == "blacklisted" or is_company_blacklisted(job.company):
+            continue
         status = job.application_status if job.application_status in columns else "pending"
         item = {
             "id": job.id,
@@ -1130,7 +1205,7 @@ def application_crm_board() -> dict:
         columns[status]["jobs"].append(item)
         columns[status]["count"] += 1
     for column in columns.values():
-        column["jobs"] = sorted(column["jobs"], key=lambda item: str(item.get("updatedAt") or ""), reverse=True)[:20]
+        column["jobs"] = sorted(column["jobs"], key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
     return {
         "summary": {"total": sum(column["count"] for column in columns.values())},
         "columns": columns,
@@ -1278,6 +1353,44 @@ def application_funnel() -> dict:
         "batches": batches,
         "recommendations": recommendations or ["当前求职漏斗健康，继续跟进推荐岗位。"],
     }
+
+@router.delete("/capture-batches/{batch_id}")
+def delete_capture_batch(batch_id: str) -> dict:
+    """永久删除一个抓取批次内的岗位，不影响其他批次。"""
+    target_ids = [job.id for job in _job_store.values() if job.capture_batch_id == batch_id]
+    if not target_ids:
+        raise HTTPException(status_code=404, detail=f"抓取批次 {batch_id} 不存在或已删除")
+
+    target_id_set = set(target_ids)
+    _archive_jobs(target_ids)
+    for job_id in target_ids:
+        del _job_store[job_id]
+    _save_jobs()
+
+    workflow_persistence.save_selection([
+        job_id for job_id in workflow_persistence.load_selection()
+        if job_id not in target_id_set
+    ])
+    workflow_persistence.save_greeting_selection([
+        job_id for job_id in workflow_persistence.load_greeting_selection()
+        if job_id not in target_id_set
+    ])
+    workflow_persistence.save_rankings([
+        item for item in workflow_persistence.load_rankings()
+        if str(item.get("jobId") or item.get("job_id") or "") not in target_id_set
+    ])
+    workflow_persistence.save_greetings({
+        job_id: text for job_id, text in workflow_persistence.load_greetings().items()
+        if job_id not in target_id_set
+    })
+    log_event(
+        "warning",
+        "capture_batch_delete",
+        f"永久删除抓取批次 {batch_id}，岗位 {len(target_ids)} 个",
+        {"batchId": batch_id, "jobIds": target_ids, "deleted": len(target_ids)},
+    )
+    return {"batchId": batch_id, "deleted": len(target_ids), "deletedJobIds": target_ids, "total": len(_job_store)}
+
 
 @router.delete("/batch")
 def delete_batch_jobs(payload: BatchDeleteRequest) -> dict:

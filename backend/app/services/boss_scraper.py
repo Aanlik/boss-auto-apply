@@ -391,7 +391,7 @@ def _launch_chrome(url="about:blank"):
     chrome_log = chrome_log_path.open("a", encoding="utf-8", buffering=1)
     chrome_log.write(f"\n=== Chrome launch port={CDP_PORT} executable={chrome} ===\n")
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             [
                 chrome,
                 f"--remote-debugging-port={CDP_PORT}",
@@ -400,6 +400,9 @@ def _launch_chrome(url="about:blank"):
                 "--no-default-browser-check",
                 "--disable-background-networking",
                 "--disable-sync",
+                # 仅供应用自动化使用的 Chrome 不继承系统代理。若本机代理客户端
+                # 已退出但系统仍指向本地端口，继承代理会导致 Page.navigate 直接失败。
+                "--no-proxy-server",
                 "--window-size=1440,900",
                 "--window-position=100,100",
                 "--disable-blink-features=AutomationControlled",
@@ -411,6 +414,7 @@ def _launch_chrome(url="about:blank"):
             stdout=chrome_log,
             stderr=subprocess.STDOUT,
         )
+        (Path(CDP_PROFILE) / ".cdp_chrome.pid").write_text(str(process.pid), encoding="utf-8")
     except Exception:
         chrome_log.close()
         logger.exception("Chrome 启动失败")
@@ -428,23 +432,31 @@ def _launch_chrome(url="about:blank"):
 
 def _stop_chrome(clear_session: bool = False):
     """仅停止我们启动的 CDP Chrome 进程（不影响用户正常 Chrome）。"""
+    pid_file = Path(CDP_PROFILE) / ".cdp_chrome.pid"
     try:
-        # macOS/Linux: 按端口精确匹配，避免误杀用户 Chrome
+        # 只终止由 _launch_chrome 写入的 Chrome PID。端口可能被桌面后端占用，
+        # 不能再通过 lsof 按端口杀进程，否则会误杀应用自身。
         import signal as _signal
-        result = subprocess.run(
-            ["lsof", "-ti", f"tcp:{CDP_PORT}"],
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        process = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
             capture_output=True, text=True, timeout=5,
         )
-        for pid_str in result.stdout.strip().split("\n"):
-            pid = pid_str.strip()
-            if pid:
-                try:
-                    logger.info("关闭 Chrome CDP 进程: pid=%s port=%d", pid, CDP_PORT)
-                    os.kill(int(pid), _signal.SIGTERM)
-                except (OSError, ValueError):
-                    pass
+        command = process.stdout.strip()
+        expected_port = f"--remote-debugging-port={CDP_PORT}"
+        expected_profile = f"--user-data-dir={CDP_PROFILE}"
+        if expected_port in command and expected_profile in command:
+            logger.info("关闭应用启动的 Chrome CDP 进程: pid=%s port=%d", pid, CDP_PORT)
+            os.kill(pid, _signal.SIGTERM)
+        elif command:
+            logger.warning("跳过未识别的 CDP PID，避免误杀: pid=%s", pid)
     except Exception:
         pass
+    finally:
+        try:
+            pid_file.unlink()
+        except FileNotFoundError:
+            pass
     _time.sleep(0.5)
     if clear_session:
         session_file = Path(CDP_PROFILE) / ".boss_logged_in"

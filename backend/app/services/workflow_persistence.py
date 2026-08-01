@@ -165,6 +165,16 @@ def load_selection() -> list[str]:
     return data if isinstance(data, list) else []
 
 
+def save_greeting_selection(greeting_job_ids: list[str]) -> list[str]:
+    _write_json(DATA_DIR / "workflow" / "greeting_selection.json", greeting_job_ids)
+    return greeting_job_ids
+
+
+def load_greeting_selection() -> list[str]:
+    data = _read_json(DATA_DIR / "workflow" / "greeting_selection.json", [])
+    return data if isinstance(data, list) else []
+
+
 def save_send_record(job_id: str, status: str, note: str = "", message: str = "", dry_run: bool = False) -> dict:
     if not job_id:
         raise ValueError("job_id is required")

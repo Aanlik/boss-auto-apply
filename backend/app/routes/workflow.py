@@ -159,3 +159,18 @@ def save_selection(payload: dict) -> dict:
     if not isinstance(ids, list):
         raise HTTPException(status_code=400, detail="selectedJobIds must be a list")
     return {"selectedJobIds": _save([str(i) for i in ids])}
+
+
+@router.get("/greeting-selection")
+def get_greeting_selection() -> dict:
+    from app.services.workflow_persistence import load_greeting_selection
+    return {"greetingJobIds": load_greeting_selection()}
+
+
+@router.post("/greeting-selection")
+def save_greeting_selection(payload: dict) -> dict:
+    from app.services.workflow_persistence import save_greeting_selection as _save
+    ids = payload.get("greetingJobIds", [])
+    if not isinstance(ids, list):
+        raise HTTPException(status_code=400, detail="greetingJobIds must be a list")
+    return {"greetingJobIds": _save([str(i) for i in ids])}

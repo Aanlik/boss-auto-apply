@@ -20,6 +20,7 @@ const SCHEMA_VERSION = 4;
 function createEmptyState(): WorkflowState {
   return {
     selectedJobIds: [],
+    greetingJobIds: [],
     resumeProfile: null,
     uploadedFiles: [],
     diligenceReports: {},
@@ -46,6 +47,7 @@ function loadState(): WorkflowState {
     }
     return {
       selectedJobIds: Array.isArray(parsed.selectedJobIds) ? parsed.selectedJobIds : [],
+      greetingJobIds: Array.isArray(parsed.greetingJobIds) ? parsed.greetingJobIds : [],
       resumeProfile: parsed.resumeProfile || null,
       uploadedFiles: Array.isArray(parsed.uploadedFiles) ? parsed.uploadedFiles : [],
       diligenceReports: parsed.diligenceReports || {},
@@ -110,6 +112,7 @@ type Action =
   | { type: "SELECT_ALL_JOBS"; jobIds: string[] }
   | { type: "CLEAR_SELECTION" }
   | { type: "SET_SELECTION"; jobIds: string[] }
+  | { type: "SET_GREETING_SELECTION"; jobIds: string[] }
   | { type: "SET_DILIGENCE_REPORTS"; reports: Record<string, DiligenceReport> }
   | { type: "SET_RANKING_RESULTS"; results: RankingResult[] }
   | { type: "SET_JD_ANALYSES"; analyses: Record<string, JDAnalysis> }
@@ -138,6 +141,8 @@ function reducer(state: WorkflowState, action: Action): WorkflowState {
       return { ...state, selectedJobIds: [] };
     case "SET_SELECTION":
       return { ...state, selectedJobIds: action.jobIds };
+    case "SET_GREETING_SELECTION":
+      return { ...state, greetingJobIds: action.jobIds };
     case "SET_DILIGENCE_REPORTS":
       return { ...state, diligenceReports: action.reports };
     case "SET_RANKING_RESULTS":
@@ -165,6 +170,7 @@ function reducer(state: WorkflowState, action: Action): WorkflowState {
 
 type BackendHydrationPayload = {
   selection?: { selectedJobIds?: unknown };
+  greetingSelection?: { greetingJobIds?: unknown };
   activeResume?: { profile?: unknown };
   files?: { files?: unknown };
   jobs?: { jobs?: unknown };
@@ -181,6 +187,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function hydrateWorkflowStateFromBackend(state: WorkflowState, payload: BackendHydrationPayload): WorkflowState {
   const jobs = Array.isArray(payload.jobs?.jobs) ? payload.jobs.jobs : [];
+  const savedGreetingJobIds = Array.isArray(payload.greetingSelection?.greetingJobIds)
+    ? payload.greetingSelection.greetingJobIds.map(String)
+    : null;
   const savedJdAnalyses = Object.fromEntries(
     jobs
       .filter((job): job is Record<string, unknown> => isRecord(job) && Boolean(job.id) && isRecord(job.jd_analysis))
@@ -192,6 +201,8 @@ export function hydrateWorkflowStateFromBackend(state: WorkflowState, payload: B
     selectedJobIds: Array.isArray(payload.selection?.selectedJobIds)
       ? payload.selection.selectedJobIds.map(String)
       : state.selectedJobIds,
+    // 后端已持久化时以其为准，避免过期的浏览器缓存重新带回旧的打招呼批次。
+    greetingJobIds: savedGreetingJobIds ?? state.greetingJobIds,
     resumeProfile: isRecord(payload.activeResume?.profile)
       ? payload.activeResume.profile as WorkflowState["resumeProfile"]
       : state.resumeProfile,
@@ -199,7 +210,7 @@ export function hydrateWorkflowStateFromBackend(state: WorkflowState, payload: B
       ? payload.files.files as WorkflowState["uploadedFiles"]
       : state.uploadedFiles,
     diligenceReports: isRecord(payload.diligence?.reports)
-      ? { ...state.diligenceReports, ...payload.diligence.reports } as WorkflowState["diligenceReports"]
+      ? payload.diligence.reports as WorkflowState["diligenceReports"]
       : state.diligenceReports,
     rankingResults: Array.isArray(payload.rankings?.rankings)
       ? payload.rankings.rankings as WorkflowState["rankingResults"]
@@ -209,7 +220,7 @@ export function hydrateWorkflowStateFromBackend(state: WorkflowState, payload: B
       ? { ...state.optimizations, ...payload.optimizations.optimizations } as WorkflowState["optimizations"]
       : state.optimizations,
     greetingTexts: isRecord(payload.greetings?.greetings)
-      ? { ...state.greetingTexts, ...payload.greetings.greetings } as WorkflowState["greetingTexts"]
+      ? payload.greetings.greetings as WorkflowState["greetingTexts"]
       : state.greetingTexts,
     chatMessages: isRecord(payload.chats?.chats)
       ? { ...state.chatMessages, ...payload.chats.chats } as WorkflowState["chatMessages"]
@@ -224,6 +235,7 @@ const DispatchCtx = createContext<Dispatch<Action>>(() => {});
 // ── 后端 selection 同步 ──
 let _selectionSyncReady = false;
 let _selectionSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let _greetingSelectionSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
 function syncSelectionToBackend(ids: string[]) {
   if (!_selectionSyncReady) return;
@@ -237,6 +249,18 @@ function syncSelectionToBackend(ids: string[]) {
   }, 500);
 }
 
+function syncGreetingSelectionToBackend(ids: string[]) {
+  if (!_selectionSyncReady) return;
+  if (_greetingSelectionSyncTimer) clearTimeout(_greetingSelectionSyncTimer);
+  _greetingSelectionSyncTimer = setTimeout(() => {
+    fetch("/api/workflow/greeting-selection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ greetingJobIds: ids }),
+    }).catch(() => {});
+  }, 100);
+}
+
 export function WorkflowProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, null, loadState);
   useEffect(() => { persist(state); }, [state]);
@@ -245,6 +269,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     Promise.all([
       fetch("/api/workflow/selection").then(r => r.json()).catch(() => ({})),
+      fetch("/api/workflow/greeting-selection").then(r => r.json()).catch(() => ({})),
       fetch("/api/resumes/active").then(r => r.json()).catch(() => ({})),
       fetch("/api/resumes/files").then(r => r.json()).catch(() => ({})),
       fetch("/api/jobs/pool?include_hidden=true").then(r => r.json()).catch(() => ({})),
@@ -254,9 +279,10 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       fetch("/api/resumes/optimizations").then(r => r.json()).catch(() => ({})),
       fetch("/api/resumes/chat/load").then(r => r.json()).catch(() => ({})),
     ])
-      .then(([selection, activeResume, files, jobs, diligence, rankings, greetings, optimizations, chats]) => {
+      .then(([selection, greetingSelection, activeResume, files, jobs, diligence, rankings, greetings, optimizations, chats]) => {
         dispatch(actions.hydrateFromBackend({
           selection,
+          greetingSelection,
           activeResume,
           files,
           jobs,
@@ -275,6 +301,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     syncSelectionToBackend(state.selectedJobIds);
   }, [state.selectedJobIds]);
+
+  // 排序页带入的打招呼目标独立持久化，避免页面切换或本地缓存降级时丢失批次。
+  useEffect(() => {
+    syncGreetingSelectionToBackend(state.greetingJobIds);
+  }, [state.greetingJobIds]);
 
   return (
     <StateCtx.Provider value={state}>
@@ -297,6 +328,7 @@ export const actions = {
   selectAllJobs: (jobIds: string[]): Action => ({ type: "SELECT_ALL_JOBS", jobIds }),
   clearSelection: (): Action => ({ type: "CLEAR_SELECTION" }),
   setSelection: (jobIds: string[]): Action => ({ type: "SET_SELECTION", jobIds }),
+  setGreetingSelection: (jobIds: string[]): Action => ({ type: "SET_GREETING_SELECTION", jobIds }),
   setDiligenceReports: (reports: Record<string, DiligenceReport>): Action => ({ type: "SET_DILIGENCE_REPORTS", reports }),
   setRankingResults: (results: RankingResult[]): Action => ({ type: "SET_RANKING_RESULTS", results }),
   setJdAnalyses: (analyses: Record<string, JDAnalysis>): Action => ({ type: "SET_JD_ANALYSES", analyses }),

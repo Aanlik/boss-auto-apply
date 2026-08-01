@@ -9,6 +9,25 @@ from app.models.job import JobRecord
 client = TestClient(app)
 
 
+def test_task_retention_never_discards_running_tasks_when_history_is_full(tmp_path, monkeypatch):
+    from app.services import workflow_tasks
+
+    monkeypatch.setattr(workflow_tasks, "TASKS_FILE", tmp_path / "workflow" / "tasks.json")
+    workflow_tasks._save_tasks([
+        {"id": f"completed-{index}", "status": "completed", "updatedAt": f"2026-01-01T00:00:{index:02d}+00:00"}
+        for index in range(100)
+    ])
+
+    first = workflow_tasks.start_task("diligence", "公司尽调", total=1)
+    second = workflow_tasks.start_task("diligence", "公司尽调", total=1)
+
+    workflow_tasks.complete_task(first["id"], done=1, message="完成")
+    workflow_tasks.complete_task(second["id"], done=1, message="完成")
+
+    completed_ids = {task["id"] for task in workflow_tasks.load_tasks(limit=200)}
+    assert {first["id"], second["id"]} <= completed_ids
+
+
 def test_workflow_center_groups_running_failed_and_retryable_tasks(tmp_path, monkeypatch):
     from app.services import workflow_persistence, workflow_tasks
 
@@ -171,6 +190,24 @@ def test_application_crm_board_groups_jobs_by_status(monkeypatch):
     assert body["summary"]["total"] == 2
     assert body["columns"]["greeted"]["count"] == 1
     assert body["columns"]["interviewing"]["jobs"][0]["company"] == "技术公司"
+
+
+def test_application_crm_board_returns_every_job_in_a_column(monkeypatch):
+    import app.routes.jobs as jobs_route
+
+    jobs_route._job_store.clear()
+    for index in range(21):
+        jobs_route._job_store[f"job-{index}"] = JobRecord(
+            id=f"job-{index}",
+            title="产品经理",
+            company=f"示例科技{index}",
+            application_status="pending",
+        )
+
+    body = jobs_route.application_crm_board()
+
+    assert body["columns"]["pending"]["count"] == 21
+    assert len(body["columns"]["pending"]["jobs"]) == 21
 
 
 def test_application_board_move_updates_status_and_refreshes_board(monkeypatch):

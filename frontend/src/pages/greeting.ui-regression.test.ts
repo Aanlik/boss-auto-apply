@@ -23,6 +23,53 @@ describe("Greeting UI regressions", () => {
     expect(types).not.toMatch(/GreetingRecoveryPanel/);
   });
 
+  test("lets users clear the displayed greeting skip reasons", () => {
+    const greeting = readProjectFile("src/pages/greeting.tsx");
+
+    expect(greeting).toMatch(/清空跳过原因/);
+    expect(greeting).toMatch(/setCandidateResult\(previous/);
+  });
+
+  test("does not present automatic sending as available before BOSS login passes", () => {
+    const greeting = readProjectFile("src/pages/greeting.tsx");
+
+    expect(greeting).toMatch(/isAutoSendReady/);
+    expect(greeting).toMatch(/"不可发送"/);
+    expect(greeting).toMatch(/BOSS 登录未验证/);
+  });
+
+  test("masks sensitive details in a greeting until the user explicitly enters edit mode", () => {
+    const greeting = readProjectFile("src/pages/greeting.tsx");
+
+    expect(greeting).toMatch(/maskGreetingSensitiveText/);
+    expect(greeting).toMatch(/编辑完整话术/);
+    expect(greeting).toMatch(/显示已脱敏内容/);
+    expect(greeting).toMatch(/邮箱\\s\*\[:：\]/);
+  });
+
+  test("shows the actual automatic-send blocker and exposes preflight beside the disabled action", () => {
+    const greeting = readProjectFile("src/pages/greeting.tsx");
+
+    expect(greeting).toMatch(/formatSafetyCheckMessage/);
+    expect(greeting).toMatch(/return check\.message/);
+    expect(greeting).toMatch(/发送前预检/);
+    expect(greeting).not.toMatch(/灰度记录已通过，但当前不可发送/);
+  });
+
+  test("shows the saved frequency profile as the selected option", () => {
+    const greeting = readProjectFile("src/pages/greeting.tsx");
+
+    expect(greeting).toMatch(/const selectedFrequencyProfile = useMemo/);
+    expect(greeting).toMatch(/value=\{selectedFrequencyProfile\}/);
+    expect(greeting).not.toMatch(/defaultValue=""/);
+  });
+
+  test("uses a unique key when a job has duplicate custom tags", () => {
+    const greeting = readProjectFile("src/pages/greeting.tsx");
+
+    expect(greeting).toContain("key={`${job.id}-${tag}-${index}`}");
+  });
+
   test("keeps the PDF preview close button above the embedded PDF viewer", () => {
     const overlayRule = cssRule(".pdf-preview-overlay");
     const closeRule = cssRule(".pdf-preview-close");

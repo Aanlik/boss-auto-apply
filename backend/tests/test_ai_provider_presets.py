@@ -17,3 +17,28 @@ def test_stale_preset_model_falls_back_to_recommended_model(monkeypatch):
     })
 
     assert ai_client.get_model() == "deepseek-v4-flash"
+
+
+def test_successful_ai_json_call_persists_a_version_record(tmp_path, monkeypatch):
+    from app.services import workflow_persistence
+
+    class FakeCompletions:
+        def create(self, **_kwargs):
+            return type("Response", (), {
+                "choices": [type("Choice", (), {"message": type("Message", (), {"content": '{"message":"ok"}'})()})()],
+            })()
+
+    fake_client = type("Client", (), {"chat": type("Chat", (), {"completions": FakeCompletions()})()})()
+    monkeypatch.setattr(workflow_persistence, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(ai_client, "test_mode_enabled", lambda: False)
+    monkeypatch.setattr(ai_client, "get_client", lambda: fake_client)
+    monkeypatch.setattr(ai_client, "get_model", lambda: "test-model")
+    monkeypatch.setattr(ai_client, "get_config", lambda: {"base_url": "https://example.test"})
+    monkeypatch.setattr(ai_client, "run_with_resilience", lambda _category, operation, **_kwargs: operation())
+
+    assert ai_client.chat_json("生成招呼语", "岗位信息") == {"message": "ok"}
+
+    rows = workflow_persistence._read_json(tmp_path / "assistant" / "prompt_versions.json", [])
+    assert rows[0]["kind"] == "ai_generation"
+    assert rows[0]["promptVersion"] == "test-model"
+    assert rows[0]["promptPreview"] == "生成招呼语"

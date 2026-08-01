@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { clearAssistantPromptVersions, compareAssistantPromptVersions, deleteAssistantPromptVersion, editAssistantDeepReport, exportAssistantDeepReportUrl, getAiFeedbackSummary, getApplicationBoard, getApplicationFunnel, getApplicationStrategy, getApplicationTimeline, getAssistantDeepReport, getAssistantPromptVersions, getDashboardSummary, getDashboardTrends, getDataQualityCenter, getDiligenceReports, getFollowups, getGreetingTemplateEffectiveness, getInterviewPrep, getJdQuality, getOnboardingGuide, getRankingResults, getReviewCenter, getResumeRewriteAdvice, getRiskExplanation, getWeeklyReport, getWorkflowCenter, listJobPool, moveApplicationBoardJob, repairDataQuality } from "../lib/api";
+import { clearAssistantPromptVersions, compareAssistantPromptVersions, deleteAssistantPromptVersion, editAssistantDeepReport, exportAssistantDeepReportUrl, getApplicationBoard, getApplicationFunnel, getApplicationStrategy, getApplicationTimeline, getAssistantDeepReport, getAssistantPromptVersions, getDashboardSummary, getDashboardTrends, getDataQualityCenter, getDiligenceReports, getFollowups, getGreetingTemplateEffectiveness, getInterviewPrep, getJdQuality, getJobPoolQuality, getOnboardingGuide, getRankingResults, getReviewCenter, getResumeRewriteAdvice, getRiskExplanation, getWeeklyReport, getWorkflowCenter, listJobPool, moveApplicationBoardJob, repairDataQuality } from "../lib/api";
 import { useWorkflowState } from "../lib/store";
 import { ensureDashboardPanelVisible } from "../lib/dashboardPanels";
-import type { AiFeedbackSummary, ApplicationBoard, ApplicationFunnel, ApplicationStrategy, ApplicationTimeline, AssistantPromptVersionCompare, AssistantPromptVersions, DashboardSummary, DashboardTrendReport, DataQualityCenter, DeepReportSections, FollowupReminder, GreetingTemplateEffectiveness, InterviewPrep, JdQualityInsight, JobApplicationStatus, JobPosting, OnboardingGuide, ReviewCenter, ResumeRewriteAdvice, RiskExplanation, WeeklyReport, WorkflowCenter } from "../lib/types";
+import { resolveDashboardQualityFilter, setDashboardNavigation, type JobQualityFilter } from "../lib/dashboardNavigation";
+import { buildJobNavigation, dashboardScopeLabel, type DashboardScope } from "../lib/dashboardScope";
+import type { ApplicationBoard, ApplicationFunnel, ApplicationStrategy, ApplicationTimeline, AssistantPromptVersionCompare, AssistantPromptVersions, DashboardSummary, DashboardTrendReport, DataQualityCenter, DeepReportSections, FollowupReminder, GreetingTemplateEffectiveness, InterviewPrep, JdQualityInsight, JobApplicationStatus, JobPoolQuality, JobPosting, OnboardingGuide, ReviewCenter, ResumeRewriteAdvice, RiskExplanation, WeeklyReport, WorkflowCenter } from "../lib/types";
 import { ErrorBanner, Spinner } from "../components/SharedUI";
 import AiFeedbackButtons from "../components/AiFeedbackButtons";
 
@@ -79,7 +81,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
   const [dataQuality, setDataQuality] = useState<DataQualityCenter | null>(null);
   const [promptVersions, setPromptVersions] = useState<AssistantPromptVersions | null>(null);
   const [promptCompare, setPromptCompare] = useState<AssistantPromptVersionCompare | null>(null);
-  const [feedbackSummary, setFeedbackSummary] = useState<AiFeedbackSummary | null>(null);
+  const [jobQuality, setJobQuality] = useState<JobPoolQuality | null>(null);
   const [templateEffectiveness, setTemplateEffectiveness] = useState<GreetingTemplateEffectiveness | null>(null);
   const [jobs, setJobs] = useState<JobPosting[]>([]);
   const [followups, setFollowups] = useState<FollowupReminder[]>([]);
@@ -102,27 +104,28 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
   const [showPanelCustomizer, setShowPanelCustomizer] = useState(false);
   const [promptVersionsCollapsed, setPromptVersionsCollapsed] = useState(true);
   const [promptVersionsRefreshing, setPromptVersionsRefreshing] = useState(false);
+  const [collapsedBoardColumns, setCollapsedBoardColumns] = useState<Set<string>>(() => new Set());
   const reviewPanelRef = useRef<HTMLDivElement | null>(null);
 
   async function loadSummary() {
     setLoading(true);
     setError("");
     try {
-      const [nextSummary, pool, reminders, nextFunnel, nextTimeline, nextBoard, nextWorkflowCenter, nextOnboarding, nextReview, nextWeeklyReport, nextTrendReport, nextDataQuality, nextPromptVersions, nextFeedbackSummary, nextTemplateEffectiveness] = await Promise.all([
-        getDashboardSummary(),
+      const [nextSummary, pool, reminders, nextFunnel, nextTimeline, nextBoard, nextWorkflowCenter, nextOnboarding, nextReview, nextWeeklyReport, nextTrendReport, nextDataQuality, nextPromptVersions, nextJobQuality, nextTemplateEffectiveness] = await Promise.all([
+        getDashboardSummary(workflow.selectedJobIds),
         listJobPool(),
         getFollowups(),
         getApplicationFunnel(),
         getApplicationTimeline(),
-        getApplicationBoard(),
+        getApplicationBoard(workflow.selectedJobIds),
         getWorkflowCenter(),
-        getOnboardingGuide(),
+        getOnboardingGuide(workflow.selectedJobIds),
         getReviewCenter(),
         getWeeklyReport(),
         getDashboardTrends(30),
-        getDataQualityCenter(),
-        getAssistantPromptVersions("deep_report"),
-        getAiFeedbackSummary(),
+        getDataQualityCenter(workflow.selectedJobIds),
+        getAssistantPromptVersions(),
+        getJobPoolQuality(),
         getGreetingTemplateEffectiveness(),
       ]);
       setSummary(nextSummary);
@@ -138,7 +141,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
       setTrendReport(nextTrendReport);
       setDataQuality(nextDataQuality);
       setPromptVersions(nextPromptVersions);
-      setFeedbackSummary(nextFeedbackSummary);
+      setJobQuality(nextJobQuality);
       setTemplateEffectiveness(nextTemplateEffectiveness);
     } catch (err) {
       setError(err instanceof Error ? err.message : "仪表盘加载失败");
@@ -151,10 +154,60 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
     loadSummary();
   }, []);
 
+  async function refreshLiveDashboard() {
+    try {
+      const [nextSummary, pool, reminders, nextFunnel, nextTimeline, nextBoard, nextWorkflowCenter, nextDataQuality, nextOnboarding, nextReview, nextWeeklyReport, nextTrendReport, nextPromptVersions, nextJobQuality, nextTemplateEffectiveness] = await Promise.all([
+        getDashboardSummary(workflow.selectedJobIds),
+        listJobPool(),
+        getFollowups(),
+        getApplicationFunnel(),
+        getApplicationTimeline(),
+        getApplicationBoard(workflow.selectedJobIds),
+        getWorkflowCenter(),
+        getDataQualityCenter(workflow.selectedJobIds),
+        getOnboardingGuide(workflow.selectedJobIds),
+        getReviewCenter(),
+        getWeeklyReport(),
+        getDashboardTrends(30),
+        getAssistantPromptVersions(),
+        getJobPoolQuality(),
+        getGreetingTemplateEffectiveness(),
+      ]);
+      setSummary(nextSummary);
+      setJobs(pool.jobs || []);
+      setFollowups(reminders.reminders || []);
+      setFunnel(nextFunnel);
+      setTimeline(nextTimeline);
+      setApplicationBoard(nextBoard);
+      setWorkflowCenter(nextWorkflowCenter);
+      setDataQuality(nextDataQuality);
+      setOnboarding(nextOnboarding);
+      setReviewCenter(nextReview);
+      setWeeklyReport(nextWeeklyReport);
+      setTrendReport(nextTrendReport);
+      setPromptVersions(nextPromptVersions);
+      setJobQuality(nextJobQuality);
+      setTemplateEffectiveness(nextTemplateEffectiveness);
+    } catch {
+      // 静默轮询失败不覆盖用户当前看到的数据，手动刷新仍会显示具体错误。
+    }
+  }
+
+  useEffect(() => {
+    void refreshLiveDashboard();
+    const timer = window.setInterval(refreshLiveDashboard, 10000);
+    const onFocus = () => { void refreshLiveDashboard(); };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [workflow.selectedJobIds]);
+
   async function refreshPromptVersions(silent = false) {
     if (!silent) setPromptVersionsRefreshing(true);
     try {
-      setPromptVersions(await getAssistantPromptVersions("deep_report"));
+      setPromptVersions(await getAssistantPromptVersions());
     } catch (err) {
       if (!silent) setError(err instanceof Error ? err.message : "AI 版本记录刷新失败");
     } finally {
@@ -177,6 +230,17 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
       localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(next));
       return next;
     });
+  }
+
+  function goToJobs(qualityFilter: JobQualityFilter = "", applicationStatus = "", decisionStatus = "", scope: DashboardScope = "selected") {
+    setDashboardNavigation(buildJobNavigation({ qualityFilter, applicationStatus, decisionStatus, scope, selectedCount: summary?.jobs.total || 0 }));
+    onNavigate?.("jobs");
+  }
+
+  function navigateQualityCheck(key: string, page: string) {
+    const qualityFilter = resolveDashboardQualityFilter(key);
+    if (qualityFilter) return goToJobs(qualityFilter);
+    onNavigate?.(page);
   }
 
   function movePanel(key: DashboardPanelKey, direction: number) {
@@ -211,6 +275,15 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
     }, 0);
   }
 
+  function toggleBoardColumn(columnKey: string) {
+    setCollapsedBoardColumns(previous => {
+      const next = new Set(previous);
+      if (next.has(columnKey)) next.delete(columnKey);
+      else next.add(columnKey);
+      return next;
+    });
+  }
+
   const focusJob = jobs.find(job => workflow.selectedJobIds.includes(job.id)) || jobs[0] || null;
 
   async function moveBoardJob(jobId: string, status: JobApplicationStatus) {
@@ -219,7 +292,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
       const [nextTimeline, nextFunnel, nextSummary] = await Promise.all([
         getApplicationTimeline(),
         getApplicationFunnel(),
-        getDashboardSummary(),
+        getDashboardSummary(workflow.selectedJobIds),
       ]);
       setApplicationBoard(result.board);
       setTimeline(nextTimeline);
@@ -312,7 +385,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
   async function onClearPromptVersions() {
     if (!confirm("确定清空 AI 版本记录？此操作只清理记录列表，不影响已生成的报告。")) return;
     try {
-      await clearAssistantPromptVersions("deep_report");
+      await clearAssistantPromptVersions();
       setPromptCompare(null);
       await refreshPromptVersions(true);
     } catch (err) {
@@ -364,7 +437,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
           {panelVisible("readiness") && (
           <div className="readiness-panel" style={{ order: panelOrder("readiness") }}>
             <div className="readiness-panel__main">
-              <span className="page-kicker">上线级流程引导</span>
+              <span className="page-kicker">上线级流程引导 · {dashboardScopeLabel("selected", summary.jobs.total)}</span>
               <h3>{stageLabel(summary.readiness.stage)}</h3>
               <p>{summary.readiness.nextAction.reason}</p>
               <button type="button" className="button-primary" onClick={() => onNavigate?.(summary.readiness.nextAction.page)}>
@@ -373,17 +446,24 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
             </div>
             <div className="readiness-score" aria-label="流程质量分">
               <span>流程质量</span>
-              <strong>{summary.readiness.qualityScore}</strong>
-              <em>/100</em>
+              <div className="readiness-score__value">
+                <strong>{summary.readiness.qualityScore}</strong>
+                <em>/100</em>
+              </div>
+              <small>流程完成度，不等同于数据质量</small>
             </div>
             <div className="readiness-blockers">
+              <button type="button" className="readiness-blocker readiness-blocker--selected" onClick={() => goToJobs()}>
+                <span>已选岗位</span>
+                <strong>{summary.jobs.total}</strong>
+              </button>
               {summary.readiness.blockers.length > 0 ? (
                 summary.readiness.blockers.slice(0, 4).map(item => (
                   <button
                     type="button"
                     key={item.key}
                     className={`readiness-blocker readiness-blocker--${item.severity}`}
-                    onClick={() => onNavigate?.(blockerPage(item.key))}
+                    onClick={() => blockerPage(item.key) === "jobs" ? goToJobs() : onNavigate?.(blockerPage(item.key))}
                   >
                     <span>{item.label}</span>
                     <strong>{item.count}</strong>
@@ -401,13 +481,13 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
 
           {panelVisible("metrics") && (
           <div className="dashboard-metric-grid" style={{ order: panelOrder("metrics") }}>
-            <MetricCard title="岗位总数" value={summary.jobs.total} action="查看岗位" onClick={() => onNavigate?.("jobs")} />
-            <MetricCard title="待补 JD" value={summary.jobs.missingJd} tone={summary.jobs.missingJd > 0 ? "warn" : "ok"} action="补全 JD" onClick={() => onNavigate?.("jobs")} />
+            <MetricCard title="岗位总数" value={summary.jobs.total} action="查看岗位" onClick={() => goToJobs()} />
+            <MetricCard title="待补 JD" value={summary.jobs.missingJd} tone={summary.jobs.missingJd > 0 ? "warn" : "ok"} action="补全 JD" onClick={() => goToJobs("missing_jd")} />
             <MetricCard title="待尽调公司" value={summary.diligence.pendingCompanies} tone={summary.diligence.pendingCompanies > 0 ? "warn" : "ok"} action="进入尽调" onClick={() => onNavigate?.("diligence")} />
             <MetricCard title="推荐岗位" value={summary.decisions.recommended || summary.ranking.recommended} tone="ok" action="查看排序" onClick={() => onNavigate?.("ranking")} />
-            <MetricCard title="风险岗位" value={summary.decisions.risky + summary.jobs.blacklisted} tone={summary.decisions.risky + summary.jobs.blacklisted > 0 ? "danger" : "ok"} action="复核风险" onClick={() => onNavigate?.("jobs")} />
-            <MetricCard title="疑似过期" value={summary.jobs.suspectedExpired} tone={summary.jobs.suspectedExpired > 0 ? "warn" : "ok"} action="清理维护" onClick={() => onNavigate?.("jobs")} />
-            <MetricCard title="AI 反馈" value={feedbackSummary?.summary.total || 0} tone={(feedbackSummary?.summary.notUseful || 0) > 0 ? "warn" : "neutral"} action={`${feedbackSummary?.summary.notUseful || 0} 条需改`} onClick={showReviewPanel} />
+            <MetricCard title="风险岗位" value={summary.decisions.risky + summary.jobs.blacklisted} tone={summary.decisions.risky + summary.jobs.blacklisted > 0 ? "danger" : "ok"} action="复核风险" onClick={() => goToJobs("risk_jobs", "", "risky")} />
+            <MetricCard title="疑似过期" value={summary.jobs.suspectedExpired} tone={summary.jobs.suspectedExpired > 0 ? "warn" : "ok"} action="清理维护" onClick={() => goToJobs("suspected_expired")} />
+            <MetricCard title="AI 反馈" value={jobQuality?.summary.ai_feedback_needs_revision || 0} tone={(jobQuality?.summary.ai_feedback_needs_revision || 0) > 0 ? "warn" : "neutral"} action={`${jobQuality?.summary.ai_feedback_needs_revision || 0} 条需改`} onClick={() => goToJobs("ai_feedback_needs_revision", "", "", "history")} />
           </div>
           )}
 
@@ -416,17 +496,17 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
-                    <div className="page-kicker">30 天趋势</div>
+                    <div className="page-kicker">30 天趋势 · 全库历史</div>
                     <p className="capture-panel-copy">看扩池、JD、尽调、触达和回复是否连续推进。</p>
                   </div>
                   <span className="tag tag--green">回复率 {trendReport.summary.replyRate}%</span>
                 </div>
                 <div className="dashboard-trend-metrics">
-                  <MetricCard title="新增" value={trendReport.summary.capturedJobs} action={`JD ${trendReport.summary.jdReadyRate}%`} onClick={() => onNavigate?.("jobs")} />
+                  <MetricCard title="新增" value={trendReport.summary.capturedJobs} action={`全库 JD ${trendReport.summary.jdReadyRate}%`} onClick={() => goToJobs("", "", "", "history")} />
                   <MetricCard title="尽调" value={trendReport.summary.diligenceDone} action="证据" onClick={() => onNavigate?.("diligence")} />
                   <MetricCard title="发送" value={trendReport.summary.greetingsSent} tone="ok" action="触达" onClick={() => onNavigate?.("greeting")} />
                   <MetricCard title="回复" value={trendReport.summary.replies} tone="ok" action={`积极 ${trendReport.summary.positiveReplyRate}%`} onClick={() => onNavigate?.("greeting")} />
-                  <MetricCard title="面试" value={trendReport.summary.interviewing} tone="ok" action={`${trendReport.summary.interviewRate}%`} onClick={() => onNavigate?.("jobs")} />
+                  <MetricCard title="面试" value={trendReport.summary.interviewing} tone="ok" action={`${trendReport.summary.interviewRate}%`} onClick={() => goToJobs("", "interviewing", "", "history")} />
                 </div>
                 <div className="dashboard-trend-chart">
                   {trendReport.series.slice(-14).map(day => {
@@ -456,7 +536,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 <div className="page-section__top">
                   <div>
                     <div className="page-kicker">新手引导</div>
-                    <p className="capture-panel-copy">按顺序完成，系统会自动保留当前模块和流程状态。</p>
+                    <p className="capture-panel-copy">按顺序完成，统计范围为当前勾选的 {onboarding.scope?.selectedJobs ?? 0} 个岗位。</p>
                   </div>
                   <button type="button" className="button-primary" onClick={() => onNavigate?.(onboarding.nextStep.page)}>
                     {onboarding.nextStep.action || onboarding.nextStep.label}
@@ -487,7 +567,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
-                    <div className="page-kicker">数据质量体检</div>
+                    <div className="page-kicker">数据质量体检 · {dashboardScopeLabel("selected", summary.jobs.total)}</div>
                     <p className="capture-panel-copy">集中发现会影响排序、尽调、触达和统计准确性的问题。</p>
                   </div>
                   <span className={dataQuality.summary.errors > 0 ? "tag tag--red" : "tag tag--green"}>质量 {dataQuality.summary.score}</span>
@@ -495,7 +575,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 </div>
                 <div className="data-quality-grid">
                   {dataQuality.checks.map(check => (
-                    <button type="button" key={check.key} className={`data-quality-card data-quality-card--${check.severity}`} onClick={() => onNavigate?.(check.page)}>
+                    <button type="button" key={check.key} className={`data-quality-card data-quality-card--${check.severity}`} onClick={() => navigateQualityCheck(check.key, check.page)}>
                       <span>{check.label}</span>
                       <strong>{check.count}</strong>
                       <small>{check.reason}</small>
@@ -518,11 +598,11 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 <span className="tag tag--muted">更新于 {summary.generatedAt.slice(0, 19).replace("T", " ")}</span>
               </div>
               <div className="dashboard-action-list">
-                {summary.jobs.missingJd > 0 && <ActionRow title="补齐 JD 详情" desc={`${summary.jobs.missingJd} 个岗位缺少 JD，尽调和排序会受影响。`} action="去处理" onClick={() => onNavigate?.("jobs")} />}
+                {summary.jobs.missingJd > 0 && <ActionRow title="补齐 JD 详情" desc={`${summary.jobs.missingJd} 个岗位缺少 JD，尽调和排序会受影响。`} action="去处理" onClick={() => goToJobs("missing_jd")} />}
                 {summary.diligence.pendingCompanies > 0 && <ActionRow title="完成公司尽调" desc={`${summary.diligence.pendingCompanies} 家公司还没有尽调报告。`} action="去尽调" onClick={() => onNavigate?.("diligence")} />}
                 {summary.ranking.total === 0 && summary.jobs.total > 0 && <ActionRow title="生成综合排序" desc="当前还没有排序结果，无法稳定进入打招呼优先级判断。" action="去排序" onClick={() => onNavigate?.("ranking")} />}
-                {summary.jobs.suspectedExpired > 0 && <ActionRow title="清理疑似过期岗位" desc="过期岗位会污染排序结果，建议保留或归档。" action="查看岗位" onClick={() => onNavigate?.("jobs")} />}
-                {summary.jobs.total === 0 && <ActionRow title="开始抓取岗位" desc="岗位池为空，先配置搜索条件并抓取第一批岗位。" action="去抓取" onClick={() => onNavigate?.("jobs")} />}
+                {summary.jobs.suspectedExpired > 0 && <ActionRow title="清理疑似过期岗位" desc="过期岗位会污染排序结果，建议保留或归档。" action="查看岗位" onClick={() => goToJobs("suspected_expired")} />}
+                {summary.jobs.total === 0 && <ActionRow title="先选择候选岗位" desc="岗位池已有数据；请在岗位页勾选感兴趣的岗位后再进入后续流程。" action="去岗位页" onClick={() => goToJobs()} />}
               </div>
             </div>
           </div>
@@ -533,14 +613,14 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
-                    <div className="page-kicker">求职转化复盘</div>
+                    <div className="page-kicker">求职转化复盘 · 全库历史</div>
                     <p className="capture-panel-copy">用真实状态反馈调整关键词、筛选条件和投递策略。</p>
                   </div>
                 </div>
                 <div className="dashboard-funnel-grid">
-                  <MetricCard title="已触达" value={funnel.summary.contacted} tone="neutral" action={`${funnel.summary.contactRate}%`} onClick={() => onNavigate?.("jobs")} />
-                  <MetricCard title="面试中" value={funnel.summary.interviewing} tone="ok" action={`${funnel.summary.interviewRate}%`} onClick={() => onNavigate?.("jobs")} />
-                  <MetricCard title="已拒绝" value={funnel.summary.rejected} tone={funnel.summary.rejected > funnel.summary.interviewing ? "warn" : "neutral"} action={`${funnel.summary.rejectionRate}%`} onClick={() => onNavigate?.("jobs")} />
+                  <MetricCard title="已触达" value={funnel.summary.contacted} tone="neutral" action={`${funnel.summary.contactRate}%`} onClick={() => goToJobs("", "greeted", "", "history")} />
+                  <MetricCard title="面试中" value={funnel.summary.interviewing} tone="ok" action={`${funnel.summary.interviewRate}%`} onClick={() => goToJobs("", "interviewing", "", "history")} />
+                  <MetricCard title="已拒绝" value={funnel.summary.rejected} tone={funnel.summary.rejected > funnel.summary.interviewing ? "warn" : "neutral"} action={`${funnel.summary.rejectionRate}%`} onClick={() => goToJobs("", "rejected", "", "history")} />
                   <MetricCard title="推荐岗位" value={funnel.summary.recommended} tone="ok" action="复盘来源" onClick={() => onNavigate?.("ranking")} />
                 </div>
                 <div className="dashboard-action-list">
@@ -557,7 +637,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
-                    <div className="page-kicker">招呼语效果分析</div>
+                    <div className="page-kicker">招呼语效果分析 · 全库历史</div>
                     <p className="capture-panel-copy">按岗位类型复盘发送、回复和积极回复，帮助优化下一批话术。</p>
                   </div>
                   <span className="tag tag--green">回复率 {templateEffectiveness.summary.replyRate}%</span>
@@ -585,7 +665,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
               <div className="panel-inner">
                 <div className="page-section__top">
                   <div>
-                    <div className="page-kicker">求职 CRM 看板</div>
+                    <div className="page-kicker">求职 CRM 看板 · {dashboardScopeLabel("selected", applicationBoard.summary.total)}</div>
                     <p className="capture-panel-copy">按求职状态查看岗位推进情况。</p>
                   </div>
                   <span className="tag tag--muted">岗位 {applicationBoard.summary.total}</span>
@@ -605,10 +685,18 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                       }}
                     >
                       <div className="application-board-column__top">
-                        <strong>{column.label}</strong>
-                        <span>{column.count}</span>
+                        <div className="application-board-column__label"><strong>{column.label}</strong><span>{column.count}</span></div>
+                        <button
+                          type="button"
+                          className="application-board-column__collapse"
+                          aria-label={collapsedBoardColumns.has(column.key) ? "展开看板内容" : "收起看板内容"}
+                          aria-expanded={!collapsedBoardColumns.has(column.key)}
+                          onClick={() => toggleBoardColumn(column.key)}
+                        >
+                          {collapsedBoardColumns.has(column.key) ? "展开" : "收起"}
+                        </button>
                       </div>
-                      {column.jobs.slice(0, 3).map(job => (
+                      {!collapsedBoardColumns.has(column.key) && column.jobs.map(job => (
                         <div
                           key={job.id}
                           className="application-board-card"
@@ -618,7 +706,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                             event.dataTransfer.effectAllowed = "move";
                           }}
                         >
-                          <button type="button" className="application-board-card__main" onClick={() => onNavigate?.("jobs")}>
+                          <button type="button" className="application-board-card__main" onClick={() => goToJobs("", column.key, "", "selected")}>
                             <strong>{job.company}</strong>
                             <span>{job.title}</span>
                             <small>{job.salary || job.note || "暂无备注"}</small>
@@ -633,7 +721,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                           </select>
                         </div>
                       ))}
-                      {column.jobs.length === 0 && <p className="application-board-empty">拖到这里</p>}
+                      {!collapsedBoardColumns.has(column.key) && column.jobs.length === 0 && <p className="application-board-empty">拖到这里</p>}
                     </div>
                   ))}
                 </div>
@@ -859,7 +947,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 <div className="page-section__top">
                   <div>
                     <div className="page-kicker">AI 版本记录</div>
-                    <p className="capture-panel-copy">记录深度报告使用的提示词版本和反馈快照。</p>
+                    <p className="capture-panel-copy">记录实际 AI 调用的模型与提示词版本；不保存岗位原文、简历或个人信息。</p>
                   </div>
                   <div className="toolbar-strip">
                     <span className="tag tag--muted">记录 {promptVersions?.summary.total || 0}</span>
@@ -878,12 +966,12 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                   <div className="prompt-version-list">
                     {promptVersions.versions.slice(0, 5).map(item => (
                       <div key={item.id} className="prompt-version-item">
-                        <strong>{item.company || "未命名公司"} · {item.title || "未命名岗位"}</strong>
-                        <span>{item.promptVersion} · 偏好信号 {item.payloadSummary.preferenceSignals}</span>
+                        <strong>{item.company || "通用 AI 调用"}{item.title ? ` · ${item.title}` : ""}</strong>
+                        <span>{item.kind} · {item.promptVersion} · 偏好信号 {item.payloadSummary.preferenceSignals}</span>
                         <p>{item.feedbackGuidance.recentNotes?.[0] || item.promptPreview}</p>
                         <time>{item.createdAt.replace("T", " ").slice(0, 19)}</time>
                         <div className="prompt-version-item__actions">
-                          <button type="button" className="button-secondary button-secondary--sm" onClick={() => loadPromptCompare(item.jobId)}>对比版本</button>
+                          {item.kind === "deep_report" && <button type="button" className="button-secondary button-secondary--sm" onClick={() => loadPromptCompare(item.jobId)}>对比版本</button>}
                           <button type="button" className="button-quiet button-danger" onClick={() => onDeletePromptVersion(item.id)}>删除</button>
                         </div>
                       </div>
@@ -895,7 +983,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
                 ) : promptVersionsCollapsed ? (
                   <p className="assistant-empty">版本记录已折叠，点击展开查看最近记录。</p>
                 ) : (
-                  <p className="assistant-empty">暂无 AI 提示词版本记录。生成深度报告后会自动沉淀。</p>
+                  <p className="assistant-empty">暂无 AI 提示词版本记录。完成一次 AI 话术、JD 分析、排序或深度报告后会自动沉淀。</p>
                 )}
                 {!promptVersionsCollapsed && promptCompare && (
                   <div className="prompt-version-compare">
@@ -934,6 +1022,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
 function stageLabel(stage: DashboardSummary["readiness"]["stage"]): string {
   const labels: Record<DashboardSummary["readiness"]["stage"], string> = {
     setup: "先完成基础配置",
+    select_jobs: "先选择感兴趣的岗位",
     complete_jd: "先补齐岗位详情",
     diligence: "进入公司尽调",
     ranking: "生成综合排序",

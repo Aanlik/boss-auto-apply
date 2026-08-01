@@ -6,11 +6,12 @@ import base64
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from openai import OpenAI
 from app.services.external_service import ProviderFailure, run_with_resilience, test_mode_enabled
 from app.services import workflow_persistence
-from app.services.workflow_persistence import write_json_atomic
+from app.services.workflow_persistence import _read_json, write_json_atomic
 from app.services.secret_store import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger("ai_client")
@@ -179,7 +180,32 @@ def get_model() -> str:
     return defaults[0] if defaults else "gpt-5.6"
 
 
-def chat_json(system: str, user: str, model: str | None = None, temperature: float = 0.3):
+def _record_ai_version(system: str, model: str, kind: str = "ai_generation") -> None:
+    """Persist a compact prompt/model audit record without storing user-provided content."""
+    try:
+        path = workflow_persistence.DATA_DIR / "assistant" / "prompt_versions.json"
+        rows = _read_json(path, [])
+        if not isinstance(rows, list):
+            rows = []
+        now = datetime.now(timezone.utc)
+        rows.append({
+            "id": f"{kind}-{now.strftime('%Y%m%d%H%M%S%f')}",
+            "jobId": "",
+            "company": "",
+            "title": "",
+            "kind": kind,
+            "promptVersion": model,
+            "promptPreview": system[:220],
+            "payloadSummary": {"hasResume": False, "hasDiligence": False, "preferenceSignals": 0},
+            "feedbackGuidance": {"summary": {"total": 0, "useful": 0, "notUseful": 0}, "recentNotes": []},
+            "createdAt": now.isoformat(timespec="seconds"),
+        })
+        write_json_atomic(path, rows[-200:])
+    except Exception as exc:
+        logger.warning("写入 AI 版本记录失败: %s", exc)
+
+
+def chat_json(system: str, user: str, model: str | None = None, temperature: float = 0.3, record_version: bool = True):
     """调用 AI chat，要求返回 JSON，自动解析。使用配置的模型。"""
     if test_mode_enabled():
         return {
@@ -228,6 +254,8 @@ def chat_json(system: str, user: str, model: str | None = None, temperature: flo
         )
     except Exception:
         pass
+    if record_version:
+        _record_ai_version(system, active_model)
 
     text = resp.choices[0].message.content
     try:
@@ -305,6 +333,7 @@ def _chat_sync(prompt: str, temperature: float, max_tokens: int) -> str:
             )
         except Exception:
             pass
+        _record_ai_version("文本 AI 调用", model, kind="ai_chat")
         return resp.choices[0].message.content or ""
     except Exception as exc:
         try:

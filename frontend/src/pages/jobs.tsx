@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useMemo, useRef } from "react";
-import { listJobPool, getJobPoolQuality, listBossCities, listBossFilterOptions, captureBossJobs, bossLogin, bossLoginStatus, enrichJdDetails, deleteJob, deleteBatchJobs, tagJob, clearAllJobs, listCompanyBlacklist, addCompanyBlacklist, deleteCompanyBlacklist, exportCompanyBlacklist, importCompanyBlacklist, cleanupExpiredJobs, keepExpiredJobs, mergeDuplicateJobs, compareJobs, updateJobApplicationStatus, updateJobDecisionStatus, exportJobsUrl, listJobSearchPresets, saveJobSearchPreset, deleteJobSearchPreset } from "../lib/api";
+import { listJobPool, getJobPoolQuality, listBossCities, listBossFilterOptions, captureBossJobs, bossLogin, bossLoginStatus, enrichJdDetails, deleteJob, deleteBatchJobs, deleteCaptureBatch, tagJob, clearAllJobs, listCompanyBlacklist, addCompanyBlacklist, deleteCompanyBlacklist, exportCompanyBlacklist, importCompanyBlacklist, cleanupExpiredJobs, keepExpiredJobs, mergeDuplicateJobs, compareJobs, updateJobApplicationStatus, updateJobDecisionStatus, exportJobsUrl, listJobSearchPresets, saveJobSearchPreset, deleteJobSearchPreset } from "../lib/api";
 import type { BossCaptureFilters, BossFilterOptions, BossLoginStatus, CompanyBlacklistItem, JobApplicationStatus, JobComparison, JobDecisionStatus, JobPoolQuality, JobPosting, JobSearchPreset } from "../lib/types";
 import { HIDDEN_COMMON_TAGS_KEY, useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
@@ -10,6 +10,7 @@ import { CompanyBlacklistPanel } from "../components/CompanyBlacklistPanel";
 import { buildCommonTags } from "../lib/jobTags";
 import { groupJobsByCompany } from "../lib/jobGrouping";
 import { formatApiError } from "../lib/workflowInsights";
+import { consumeDashboardNavigation, type JobQualityFilter } from "../lib/dashboardNavigation";
 
 const FALLBACK_CITY_OPTIONS = ["全国", "北京", "上海", "广州", "深圳", "杭州", "成都", "南京", "武汉", "西安", "郑州", "长沙", "苏州"];
 const FILTER_LABELS: Array<[keyof BossCaptureFilters, string]> = [
@@ -35,20 +36,25 @@ const DECISION_STATUS_LABELS: Record<JobDecisionStatus, string> = {
   abandoned: "放弃",
   risky: "风险",
 };
-type QualityFilterKey = "" | "with_jd" | "missing_jd" | "suspected_expired" | "blacklisted" | "duplicates";
+type QualityFilterKey = "" | "with_jd" | JobQualityFilter | "duplicates";
 type JobViewMode = "card" | "compact" | "table";
 
 const QUALITY_FILTER_LABELS: Record<Exclude<QualityFilterKey, "">, string> = {
   with_jd: "已获取 JD",
   missing_jd: "缺少 JD",
+  low_quality_jd: "低质量 JD",
   suspected_expired: "疑似过期",
   blacklisted: "黑名单命中",
   duplicates: "重复岗位",
+  ai_feedback_needs_revision: "AI 反馈需修改",
+  risk_jobs: "尽调高风险岗位",
+  missing_business_name: "缺少工商名称",
+  no_rankings: "未完成排序",
 };
-const HIDDEN_CAPTURE_BATCHES_KEY = "boss-hidden-capture-batches";
+type CaptureBatch = NonNullable<JobPoolQuality["batches"]>[number];
 
 export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (page: string) => void; visible?: boolean }) {
-  const { selectedJobIds } = useWorkflowState();
+  const { selectedJobIds, rankingResults, greetingJobIds, greetingTexts } = useWorkflowState();
   const dispatch = useWorkflowDispatch();
 
   // ---- 抓取参数 ----
@@ -77,8 +83,10 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   const [filterApplicationStatus, setFilterApplicationStatus] = useState("");
   const [filterDecisionStatus, setFilterDecisionStatus] = useState("");
   const [qualityFilter, setQualityFilter] = useState<QualityFilterKey>("");
+  const [selectedOnly, setSelectedOnly] = useState(false);
   const [viewMode, setViewMode] = useState<JobViewMode>("card");
   const [groupByCompany, setGroupByCompany] = useState(false);
+  const [showSelectedJobs, setShowSelectedJobs] = useState(false);
   const [collapsedCompanyGroups, setCollapsedCompanyGroups] = useState<Set<string>>(() => new Set());
 
   // ---- 数据状态 ----
@@ -96,17 +104,8 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   const [blacklistExpanded, setBlacklistExpanded] = useState(false);
   const [quality, setQuality] = useState<JobPoolQuality | null>(null);
   const [duplicatesExpanded, setDuplicatesExpanded] = useState(false);
-  const [batchesExpanded, setBatchesExpanded] = useState(true);
+  const [batchesExpanded, setBatchesExpanded] = useState(false);
   const [showAllCaptureBatches, setShowAllCaptureBatches] = useState(false);
-  const [hiddenCaptureBatches, setHiddenCaptureBatches] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
-    try {
-      const parsed = JSON.parse(window.localStorage.getItem(HIDDEN_CAPTURE_BATCHES_KEY) || "[]");
-      return Array.isArray(parsed) ? parsed.map(String) : [];
-    } catch {
-      return [];
-    }
-  });
   const [comparison, setComparison] = useState<JobComparison | null>(null);
   const blacklistImportRef = useRef<HTMLInputElement | null>(null);
   const [hiddenCommonTags, setHiddenCommonTags] = useState<string[]>(() => {
@@ -121,15 +120,29 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
 
   useEffect(() => {
     if (visible) {
+      const intent = consumeDashboardNavigation("jobs");
+      if (intent?.jobs?.qualityFilter !== undefined) setQualityFilter(intent.jobs.qualityFilter);
+      if (intent?.jobs?.selectedOnly !== undefined) setSelectedOnly(intent.jobs.selectedOnly);
+      if (intent?.jobs?.applicationStatus !== undefined) setFilterApplicationStatus(intent.jobs.applicationStatus);
+      if (intent?.jobs?.decisionStatus !== undefined) setFilterDecisionStatus(intent.jobs.decisionStatus);
       loadCityOptions();
       loadFilterOptions();
       loadBlacklist();
       loadSearchPresets();
       loadJobs(qualityFilter === "blacklisted");
       loadQuality();
-      // JD 抓取进行中不触发 checkStatus，防止抢占 Chrome 导致页面跳转
-      if (!loading || loading !== "enrich") checkStatus();
+      // 进入岗位页只读取本地登录标记，不启动浏览器。
+      if (!loading || loading !== "enrich") checkStatus(false);
     }
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return;
+    // 被动心跳只读取本地标记，不抢占或拉起 BOSS 浏览器。
+    const timer = window.setInterval(() => {
+      checkStatus(false);
+    }, 60_000);
+    return () => window.clearInterval(timer);
   }, [visible]);
 
   useEffect(() => {
@@ -211,20 +224,30 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
 
   function applyQualityFilter(nextFilter: QualityFilterKey) {
     setQualityFilter(nextFilter);
+    setSelectedOnly(false);
     void reloadJobsForQualityFilter(nextFilter);
   }
 
-  function hideCaptureBatch(batchId: string) {
-    setHiddenCaptureBatches(prev => {
-      const next = prev.includes(batchId) ? prev : [...prev, batchId];
-      window.localStorage.setItem(HIDDEN_CAPTURE_BATCHES_KEY, JSON.stringify(next));
-      return next;
-    });
-  }
-
-  function clearHiddenCaptureBatches() {
-    window.localStorage.removeItem(HIDDEN_CAPTURE_BATCHES_KEY);
-    setHiddenCaptureBatches([]);
+  async function onDeleteCaptureBatch(batch: CaptureBatch) {
+    const confirmed = window.confirm(
+      `永久删除该批次？\n\n${batch.keyword || "手动录入"} · ${batch.city || "全国"}\n将删除该批次中的 ${batch.total} 个岗位，其他批次不受影响。`,
+    );
+    if (!confirmed) return;
+    setLoading(`delete-capture-batch:${batch.id}`);
+    setError("");
+    try {
+      const result = await deleteCaptureBatch(batch.id);
+      const deletedIds = new Set(result.deletedJobIds);
+      dispatch(actions.setSelection(selectedJobIds.filter(id => !deletedIds.has(id))));
+      dispatch(actions.setGreetingSelection(greetingJobIds.filter(id => !deletedIds.has(id))));
+      dispatch(actions.setRankingResults(rankingResults.filter(item => !deletedIds.has(item.jobId))));
+      dispatch(actions.setGreetingTexts(Object.fromEntries(Object.entries(greetingTexts).filter(([id]) => !deletedIds.has(id)))));
+      await Promise.all([reloadJobsForQualityFilter(), loadQuality()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除抓取批次失败");
+    } finally {
+      setLoading("");
+    }
   }
 
   function refreshCurrentPage() {
@@ -239,14 +262,14 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
     }
   }
 
-  async function checkStatus() {
-    try { const r = await bossLoginStatus(); setLoggedIn(r.logged_in); setLoginStatus(r); }
+  async function checkStatus(probe = false) {
+    try { const r = await bossLoginStatus(probe); setLoggedIn(r.logged_in); setLoginStatus(r); }
     catch (err) { console.warn("[jobs] 检查登录状态失败:", err); }
   }
 
   async function onLogin() {
     setLoading("login"); setError("");
-    try { const r = await bossLogin(); if (r.status === "ok") { setLoggedIn(true); await checkStatus(); } else setError(r.message || "登录失败"); }
+    try { const r = await bossLogin(); if (r.status === "ok") { setLoggedIn(true); await checkStatus(false); } else setError(r.message || "登录失败"); }
     catch (err) { setError(err instanceof Error ? err.message : "登录失败"); }
     finally { setLoading(prev => prev === "login" ? "" : prev); }
   }
@@ -582,14 +605,23 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
 
   const filteredJobs = useMemo(() => {
     const duplicateJobIds = new Set((quality?.duplicateGroups || []).flatMap(group => group.jobIds));
+    const riskJobIds = new Set(quality?.diligence?.riskJobIds || []);
+    const feedbackRevisionJobIds = new Set(quality?.diligence?.aiFeedbackNeedsRevisionJobIds || []);
+    const rankedJobIds = new Set(rankingResults.map(result => result.jobId));
     return jobs.filter(j => {
+      if (selectedOnly && !selectedJobIds.includes(j.id)) return false;
       if (qualityFilter !== "blacklisted" && j.lifecycle_status === "blacklisted") return false;
       const hasDetailJd = Boolean((j.jd_text || "").trim() && (j.jd_detail_fetched_at || "").trim());
       if (qualityFilter === "with_jd" && !hasDetailJd) return false;
       if (qualityFilter === "missing_jd" && hasDetailJd) return false;
+      if (qualityFilter === "low_quality_jd" && (!hasDetailJd || (j.jd_text || "").trim().length >= 80)) return false;
       if (qualityFilter === "suspected_expired" && j.lifecycle_status !== "suspected_expired") return false;
       if (qualityFilter === "blacklisted" && j.lifecycle_status !== "blacklisted") return false;
       if (qualityFilter === "duplicates" && !duplicateJobIds.has(j.id)) return false;
+      if (qualityFilter === "risk_jobs" && !riskJobIds.has(j.id)) return false;
+      if (qualityFilter === "ai_feedback_needs_revision" && !feedbackRevisionJobIds.has(j.id)) return false;
+      if (qualityFilter === "missing_business_name" && (j.company_key || j.company.includes("有限公司"))) return false;
+      if (qualityFilter === "no_rankings" && rankedJobIds.has(j.id)) return false;
       if (filterText) {
         const kw = filterText.toLowerCase();
         const matchTitle = j.title.toLowerCase().includes(kw);
@@ -677,11 +709,14 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       {selectedJobs.length > 0 && (
         <div className="panel panel-strong">
           <div className="panel-inner">
-            <div className="page-section__top" style={{ marginBottom: selectedJobs.length > 0 ? 10 : 0 }}>
-              <div className="page-kicker" style={{ marginBottom: 0 }}>当前已选 ({selectedJobs.length})</div>
-              <button type="button" className="button-quiet" onClick={clearSel}>清空选择</button>
+            <div className="page-section__top" style={{ marginBottom: showSelectedJobs ? 10 : 0 }}>
+              <div className="page-kicker" style={{ marginBottom: 0 }}>当前已选 {selectedJobs.length} 个岗位</div>
+              <div className="toolbar-strip">
+                <button type="button" className="button-quiet" onClick={() => setShowSelectedJobs(prev => !prev)}>{showSelectedJobs ? "收起已选岗位" : "展开已选岗位"}</button>
+                <button type="button" className="button-quiet" onClick={clearSel}>清空选择</button>
+              </div>
             </div>
-            <div className="selected-mini-bar">
+            {showSelectedJobs && <div className="selected-mini-bar">
               {selectedJobs.map(j => (
                 <div key={j.id} className="selected-mini-card" onClick={() => toggleJob(j.id)} title="点击取消选择">
                   <span style={{ fontSize: 15, lineHeight: 1 }}>×</span>
@@ -689,7 +724,7 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
                   <span style={{ color: "var(--text-muted)", fontSize: 10 }}>{j.company}</span>
                 </div>
               ))}
-            </div>
+            </div>}
             {comparison && (
               <div className="job-comparison-panel">
                 <div className="page-section__top">
@@ -747,8 +782,8 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
                   {loading === "login" ? "登录中..." : "登录 BOSS"}
                 </button>
               )}
-              <button type="button" className="button-secondary" disabled={loading === "login"} onClick={checkStatus}>
-                重新检测
+              <button type="button" className="button-secondary" disabled={loading === "login"} onClick={() => checkStatus(true)}>
+                验证登录有效性
               </button>
             </div>
           </div>
@@ -840,8 +875,8 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
           <div className="panel-inner">
             <div className="page-section__top" style={{ marginBottom: 12 }}>
               <div>
-                <div className="page-kicker" style={{ marginBottom: 4 }}>岗位池质量</div>
-                <p className="capture-panel-copy">点击卡片可直接筛出对应岗位，用于定位缺失 JD、重复、过期等数据问题。</p>
+                <div className="page-kicker" style={{ marginBottom: 4 }}>岗位池质量 · 全库（不含黑名单）</div>
+                <p className="capture-panel-copy">统计范围是全库岗位，不等同于上方当前已选岗位。点击卡片可直接筛出对应岗位，用于定位缺失 JD、重复、过期等数据问题。</p>
               </div>
               <div className="toolbar-strip">
                 {qualityFilter && (
@@ -878,27 +913,29 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
               <button type="button" className={`quality-metric ${qualityFilter === "duplicates" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("duplicates")}>
                 <span>重复岗位</span><strong>{quality.summary.duplicate_jobs}</strong>
               </button>
+              <button type="button" className={`quality-metric ${qualityFilter === "ai_feedback_needs_revision" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("ai_feedback_needs_revision")}>
+                <span>AI 反馈需修改</span><strong>{quality.summary.ai_feedback_needs_revision}</strong>
+              </button>
+              <button type="button" className={`quality-metric ${qualityFilter === "risk_jobs" ? "quality-metric--active" : ""}`} onClick={() => applyQualityFilter("risk_jobs")}>
+                <span>尽调高风险岗位</span><strong>{quality.summary.risk_jobs}</strong>
+              </button>
               <div className="quality-metric quality-metric--static">
                 <span>抓取批次</span><strong>{quality.summary.batch_count || 0}</strong>
               </div>
             </div>
             {quality.batches && quality.batches.length > 0 && (() => {
-              const availableBatches = quality.batches.filter(batch => !hiddenCaptureBatches.includes(batch.id));
-              const visibleBatches = showAllCaptureBatches ? availableBatches : availableBatches.slice(0, 4);
+              const visibleBatches = showAllCaptureBatches ? quality.batches : quality.batches.slice(0, 4);
               return (
                 <section className="batch-summary" aria-label="抓取批次详情">
                   <div className="batch-summary-header">
                     <div>
                       <strong>抓取批次详情</strong>
-                      <span>{visibleBatches.length}/{availableBatches.length} 个显示中{hiddenCaptureBatches.length ? ` · 已隐藏 ${hiddenCaptureBatches.length}` : ""}</span>
+                      <span>{visibleBatches.length}/{quality.batches.length} 个显示中</span>
                     </div>
                     <div className="batch-summary-actions">
-                      {hiddenCaptureBatches.length > 0 && (
-                        <button type="button" className="button-quiet button-quiet--sm" onClick={clearHiddenCaptureBatches}>恢复已删除批次</button>
-                      )}
-                      {availableBatches.length > 4 && (
+                      {quality.batches.length > 4 && (
                         <button type="button" className="button-quiet button-quiet--sm" onClick={() => setShowAllCaptureBatches(prev => !prev)}>
-                          {showAllCaptureBatches ? "仅显示最新 4 个" : `显示全部批次 (${availableBatches.length})`}
+                          {showAllCaptureBatches ? "仅显示最新 4 个" : `显示全部批次 (${quality.batches.length})`}
                         </button>
                       )}
                       <button type="button" className="button-quiet button-quiet--sm" aria-expanded={batchesExpanded} onClick={() => setBatchesExpanded(prev => !prev)}>
@@ -915,7 +952,9 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
                             <p>{batch.capturedAt || "无时间"} · {batch.total} 个岗位 · 缺少 JD {batch.missing_jd}</p>
                             <code title={batch.id}>{batch.id}</code>
                           </div>
-                          <button type="button" className="button-quiet button-quiet--sm batch-summary-delete" onClick={() => hideCaptureBatch(batch.id)}>删除</button>
+                          <button type="button" className="button-quiet button-quiet--sm batch-summary-delete" disabled={loading === `delete-capture-batch:${batch.id}`} onClick={() => onDeleteCaptureBatch(batch)}>
+                            {loading === `delete-capture-batch:${batch.id}` ? "删除中…" : "永久删除"}
+                          </button>
                         </div>
                       )) : <p className="batch-summary-empty">暂无显示中的批次</p>}
                     </div>

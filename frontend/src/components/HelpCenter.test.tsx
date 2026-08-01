@@ -29,6 +29,8 @@ describe("HelpCenter", () => {
     expect(await screen.findByText("帮助内容使用内置版本")).toBeVisible();
     expect(screen.getByText("推荐步骤")).toBeVisible();
     expect(screen.getByText("重试加载")).toBeVisible();
+    expect(screen.getByText(/顶部为全库状态/)).toBeVisible();
+    expect(screen.getByText(/发送前必须通过 BOSS 登录预检/)).toBeVisible();
   });
 
   test("点击重试后展示接口返回的帮助内容", async () => {
