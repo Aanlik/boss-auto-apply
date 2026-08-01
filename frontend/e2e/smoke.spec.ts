@@ -42,6 +42,18 @@ test("岗位、尽调和排序模块可以依次访问", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "综合排序" })).toBeVisible();
 });
 
+test("切换模块后回到页面顶部", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "仪表盘" }).click();
+  await page.waitForFunction(() => document.documentElement.scrollHeight > window.innerHeight);
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "排序", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "综合排序" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+});
+
 test("浏览器上下文可获取内联 PDF 预览", async ({ page }) => {
   const response = await page.request.post("/api/resumes/preview-pdf", {
     data: {

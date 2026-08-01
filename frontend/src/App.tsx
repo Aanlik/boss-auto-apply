@@ -84,6 +84,10 @@ function AppShell() {
     refreshGlobalStatus();
   }, [page]);
 
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [page]);
+
   function setPage(pageKey: PageKey) {
     setPageState(pageKey);
     if (typeof window !== "undefined") {

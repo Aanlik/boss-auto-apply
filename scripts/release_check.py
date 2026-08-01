@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ class Check:
     name: str
     command: list[str]
     cwd: Path
+    env: dict[str, str] | None = None
 
     @property
     def display(self) -> str:
@@ -24,8 +26,11 @@ class Check:
 
 
 def checks() -> list[Check]:
+    backend_path = str(REPO_ROOT / "backend")
+    existing_pythonpath = os.environ.get("PYTHONPATH", "")
+    pythonpath = os.pathsep.join(part for part in (backend_path, existing_pythonpath) if part)
     return [
-        Check("后端全量测试", ["pytest", "-q"], REPO_ROOT),
+        Check("后端全量测试", [sys.executable, "-m", "pytest", "backend/tests", "-q"], REPO_ROOT, {"PYTHONPATH": pythonpath}),
         Check("前端校验", ["pnpm", "validate"], REPO_ROOT / "frontend"),
         Check("Git 空白与换行检查", ["git", "diff", "--check"], REPO_ROOT),
         Check("本地密钥扫描", [sys.executable, str(Path(__file__).resolve()), "--local-secret-scan"], REPO_ROOT),
@@ -61,7 +66,9 @@ def local_secret_scan() -> int:
 
 def run_check(check: Check) -> int:
     print(f"\n== {check.name}: {check.display}")
-    result = subprocess.run(check.command, cwd=check.cwd, check=False)
+    environment = os.environ.copy()
+    environment.update(check.env or {})
+    result = subprocess.run(check.command, cwd=check.cwd, env=environment, check=False)
     if result.returncode:
         print(f"!! {check.name} failed with exit code {result.returncode}")
     return result.returncode
