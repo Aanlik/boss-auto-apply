@@ -7,16 +7,23 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import hashlib
 import logging
+import threading
 from pathlib import Path
 from app.services import workflow_persistence
-from app.services.ai_client import get_ai_client
+from app.services.ai_client import get_ai_client, get_model
 from app.services.feedback_store import list_feedback
 from app.services.preferences import load_preferences
 from app.services.workflow_persistence import _read_json, write_json_atomic
 
 logger = logging.getLogger(__name__)
 RANKING_SETTINGS_FILE = workflow_persistence.DATA_DIR / "rankings" / "settings.json"
+RANKING_CACHE_FILE = workflow_persistence.DATA_DIR / "rankings" / "ranking_cache.json"
+RANKING_MAX_CONCURRENCY = 3
+_RANKING_MEMORY_CACHE: dict[str, dict] = {}
+_RANKING_CACHE_LOCK = threading.Lock()
 DEFAULT_RANKING_WEIGHTS = {"company_weight": 0.4, "match_weight": 0.6}
 RANKING_WEIGHT_TEMPLATES = {
     "balanced": {
@@ -198,63 +205,151 @@ async def match_resume_to_job(resume: dict, job: dict, jd_analysis: dict) -> dic
         return _fallback_match(str(e)[:100])
 
 
-async def rank_jobs_ai(jobs: list, resume: dict, diligence_reports: dict, weights: dict | None = None) -> list:
+async def rank_jobs_ai(
+    jobs: list,
+    resume: dict,
+    diligence_reports: dict,
+    weights: dict | None = None,
+    progress_callback=None,
+) -> list:
     """
     综合排序：公司尽调分(40%) + AI简历匹配度(60%)
     """
-    results = []
     diligence_index = _build_diligence_index(diligence_reports)
     active_weights = load_feedback_adjusted_weights(weights or load_ranking_weights())
-    for job in jobs:
-        job_id = job.get("id", "")
-        company = job.get("company", "")
-        diligence = _find_diligence_for_job(job, diligence_reports, diligence_index)
+    preferences = load_preferences()
+    semaphore = asyncio.Semaphore(RANKING_MAX_CONCURRENCY)
+    progress_lock = asyncio.Lock()
+    completed = 0
 
-        # 公司得分
-        company_score = diligence.get("companyScore", 50)
+    async def rank_one(job: dict) -> dict:
+        nonlocal completed
+        async with semaphore:
+            result = await _rank_one_job(
+                job,
+                resume,
+                diligence_reports,
+                diligence_index,
+                active_weights,
+                preferences,
+            )
+            if progress_callback:
+                async with progress_lock:
+                    completed += 1
+                    try:
+                        callback_result = progress_callback(completed, len(jobs), result)
+                        if asyncio.iscoroutine(callback_result):
+                            await callback_result
+                    except Exception as exc:
+                        logger.warning("排序进度回写失败: %s", exc)
+            return result
 
-        # JD 解析
-        jd_analysis = await analyze_jd_for_matching(job)
-
-        # 简历匹配
-        match_result = await match_resume_to_job(resume, job, jd_analysis)
-        match_score = match_result.get("match_score", 50)
-
-        # 综合得分
-        composite = round(
-            company_score * active_weights["company_weight"]
-            + match_score * active_weights["match_weight"]
-        )
-
-        results.append({
-            "jobId": job_id,
-            "jobTitle": job.get("title", ""),
-            "company": company,
-            "companyKey": job.get("company_key") or job.get("companyKey") or diligence.get("companyKey", ""),
-            "salary": job.get("salary", ""),
-            "companyScore": company_score,
-            "matchScore": match_score,
-            "compositeScore": composite,
-            "recommendation": match_result.get("recommendation", "consider"),
-            "reason": match_result.get("reason", ""),
-            "matchHighlights": match_result.get("highlights", []),
-            "matchGaps": match_result.get("gaps", []),
-            "weights": active_weights,
-            "explanation": _build_ranking_explanation(
-                job=job,
-                diligence=diligence,
-                jd_analysis=jd_analysis,
-                match_result=match_result,
-                company_score=company_score,
-                match_score=match_score,
-                composite_score=composite,
-                preferences=load_preferences(),
-            ),
-        })
+    results = await asyncio.gather(*(rank_one(job) for job in jobs))
 
     # 按综合得分降序排列
     results.sort(key=lambda x: x["compositeScore"], reverse=True)
     return results
+
+
+async def _rank_one_job(
+    job: dict,
+    resume: dict,
+    diligence_reports: dict,
+    diligence_index: dict[str, dict],
+    active_weights: dict,
+    preferences: dict,
+) -> dict:
+    job_id = job.get("id", "")
+    company = job.get("company", "")
+    diligence = _find_diligence_for_job(job, diligence_reports, diligence_index)
+
+    # 公司得分
+    company_score = diligence.get("companyScore", 50)
+
+    jd_cache_key = _ranking_cache_key("jd", job=job)
+    jd_analysis = _read_ranking_cache(jd_cache_key)
+    if jd_analysis is None:
+        jd_analysis = await analyze_jd_for_matching(job)
+        _write_ranking_cache(jd_cache_key, jd_analysis)
+
+    match_cache_key = _ranking_cache_key(
+        "match",
+        job=job,
+        resume=resume,
+        jd_analysis=jd_analysis,
+    )
+    match_result = _read_ranking_cache(match_cache_key)
+    if match_result is None:
+        match_result = await match_resume_to_job(resume, job, jd_analysis)
+        _write_ranking_cache(match_cache_key, match_result)
+    match_score = match_result.get("match_score", 50)
+
+    # 综合得分
+    composite = round(
+        company_score * active_weights["company_weight"]
+        + match_score * active_weights["match_weight"]
+    )
+
+    return {
+        "jobId": job_id,
+        "jobTitle": job.get("title", ""),
+        "company": company,
+        "companyKey": job.get("company_key") or job.get("companyKey") or diligence.get("companyKey", ""),
+        "salary": job.get("salary", ""),
+        "companyScore": company_score,
+        "matchScore": match_score,
+        "compositeScore": composite,
+        "recommendation": match_result.get("recommendation", "consider"),
+        "reason": match_result.get("reason", ""),
+        "matchHighlights": match_result.get("highlights", []),
+        "matchGaps": match_result.get("gaps", []),
+        "weights": active_weights,
+        "explanation": _build_ranking_explanation(
+            job=job,
+            diligence=diligence,
+            jd_analysis=jd_analysis,
+            match_result=match_result,
+            company_score=company_score,
+            match_score=match_score,
+            composite_score=composite,
+            preferences=preferences,
+        ),
+    }
+
+
+def _ranking_cache_key(stage: str, **payload) -> str:
+    data = {"stage": stage, "model": get_model(), **payload}
+    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _read_ranking_cache(key: str) -> dict | None:
+    cached = _RANKING_MEMORY_CACHE.get(key)
+    if isinstance(cached, dict):
+        return cached
+    stored = _read_json(RANKING_CACHE_FILE, {})
+    if not isinstance(stored, dict):
+        return None
+    value = stored.get(key)
+    if isinstance(value, dict):
+        _RANKING_MEMORY_CACHE[key] = value
+        return value
+    return None
+
+
+def _write_ranking_cache(key: str, value: dict) -> None:
+    if not isinstance(value, dict):
+        return
+    with _RANKING_CACHE_LOCK:
+        _RANKING_MEMORY_CACHE[key] = value
+        stored = _read_json(RANKING_CACHE_FILE, {})
+        if not isinstance(stored, dict):
+            stored = {}
+        stored[key] = value
+        # 只保留最近 500 条，避免长期运行导致缓存无限增长。
+        if len(stored) > 500:
+            stored = dict(list(stored.items())[-500:])
+        write_json_atomic(RANKING_CACHE_FILE, stored)
 
 
 def _build_diligence_index(diligence_reports: dict) -> dict[str, dict]:

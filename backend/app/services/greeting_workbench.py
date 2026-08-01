@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 from app.models.job import JobRecord
 from app.services.company_blacklist import is_company_blacklisted
+from app.services.ai_client import chat_json
 from app.services.workflow_persistence import load_send_records
 
 
@@ -132,6 +134,41 @@ def generate_greeting(job: JobRecord, resume_summary: str = "", style: str = "�
         f"{resume_hint}过往关注{skills}等内容，{style_hint}，"
         "希望有机会进一步沟通，谢谢。"
     )
+
+
+def generate_greeting_with_ai(
+    job: JobRecord,
+    resume: dict | None = None,
+    jd_analysis: dict | None = None,
+    style: str = "稳妥自然",
+) -> str:
+    """根据岗位 JD、JD 分析和简历生成可直接发送的个性化话术。"""
+    resume = resume if isinstance(resume, dict) else {}
+    jd_analysis = jd_analysis if isinstance(jd_analysis, dict) else {}
+    system = (
+        "你是一名专业的求职沟通顾问。请根据岗位 JD、岗位分析和候选人简历，生成一条真实、"
+        "简洁、自然的中文 BOSS 直聘首句打招呼话术。必须突出 1-2 个岗位要求与候选人经历的真实匹配点，"
+        "不能编造简历中没有的经历，不能提及你是 AI，不要使用模板变量，不要写标题或解释。"
+        "控制在 45-100 个汉字，结尾自然表达希望进一步沟通。"
+    )
+    user = json.dumps({
+        "style": style,
+        "job": {
+            "title": job.title,
+            "company": job.company,
+            "jd": job.jd_text or "",
+            "keywords": job.keywords or [],
+        },
+        "jd_analysis": jd_analysis,
+        "resume": resume,
+        "output_schema": {"message": "string"},
+    }, ensure_ascii=False)
+    result = chat_json(system, user, temperature=0.7)
+    message = str(result.get("message") or result.get("greeting") or "").strip() if isinstance(result, dict) else ""
+    validation = validate_greeting(message)
+    if not validation.ok:
+        raise ValueError(f"AI 生成的话术未通过校验: {', '.join(validation.reasons)}")
+    return message
 
 
 def build_greeting_record(job: JobRecord, message: str, status: str = "draft", dry_run: bool = True) -> dict:

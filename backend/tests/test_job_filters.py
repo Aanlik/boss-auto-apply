@@ -12,3 +12,17 @@ def test_filter_jobs_by_model():
     result = filter_jobs_by_model(jobs, JobFilter(keywords=["Python"], city="深圳", min_salary=20))
     assert len(result) == 2
     assert result[0].id == "1"
+
+
+def test_min_salary_matches_jobs_whose_salary_range_reaches_threshold():
+    from app.models.job import JobRecord
+
+    jobs = [
+        JobRecord(id="range", title="岗位", company="A", salary="10-15K", salary_min=10, salary_max=15),
+        JobRecord(id="edge", title="岗位", company="B", salary="8-13K", salary_min=8, salary_max=13),
+        JobRecord(id="below", title="岗位", company="C", salary="10-12K", salary_min=10, salary_max=12),
+    ]
+
+    result = filter_jobs_by_model(jobs, JobFilter(min_salary=13))
+
+    assert [job.id for job in result] == ["range", "edge"]

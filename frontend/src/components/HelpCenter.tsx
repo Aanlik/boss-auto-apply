@@ -41,7 +41,7 @@ const FALLBACK_HELP_CENTER: HelpCenterData = {
       label: "尽调",
       purpose: "整合工商 API、搜索证据和 AI 分析，判断公司风险与行业趋势。",
       whenToUse: ["岗位进入重点候选池后", "排序前需要补风险证据时"],
-      nextStep: "优先对推荐岗位公司做一键尽调，再复核工商名称和风险证据。",
+      nextStep: "优先对推荐岗位公司做公司尽调，再复核工商名称和风险证据。",
       steps: ["确认工商注册名", "刷新工商和搜索证据", "查看风险和行业趋势"],
       goodSignals: ["工商字段完整", "证据有来源和刷新时间"],
       commonFailures: ["工商 API 配置错误", "搜索证据不足", "公司名称不一致"],

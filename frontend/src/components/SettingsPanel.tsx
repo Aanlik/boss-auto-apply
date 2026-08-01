@@ -16,10 +16,10 @@ import type { JobsImportWizard, OnboardingWizard, UserPreferences } from "../lib
 
 // 内置默认预设 — 即使 API 延迟也能立刻显示
 const DEFAULT_PRESETS: Record<string, ProviderPreset> = {
-  openai: { name: "OpenAI", base_url: "", models: ["gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"] },
-  deepseek: { name: "DeepSeek", base_url: "https://api.deepseek.com", models: ["deepseek-chat", "deepseek-reasoner"] },
-  zhipu: { name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/paas/v4", models: ["glm-4-flash", "glm-4-plus"] },
-  moonshot: { name: "月之暗面", base_url: "https://api.moonshot.cn/v1", models: ["moonshot-v1-8k", "moonshot-v1-32k"] },
+  openai: { name: "OpenAI", base_url: "", models: ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4-mini"] },
+  deepseek: { name: "DeepSeek", base_url: "https://api.deepseek.com", models: ["deepseek-v4-flash", "deepseek-v4-pro"] },
+  zhipu: { name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/paas/v4", models: ["glm-5.2", "glm-5-turbo", "glm-5", "glm-4.7", "glm-4.6"] },
+  moonshot: { name: "月之暗面", base_url: "https://api.moonshot.cn/v1", models: ["kimi-k3", "kimi-k2.7-code-highspeed", "kimi-k2.7-code", "kimi-k2.6"] },
   custom: { name: "自定义", base_url: "", models: [] },
 };
 
@@ -264,7 +264,13 @@ export default function SettingsPanel({ show, onClose }: { show: boolean; onClos
         <div style={{ marginTop: 16 }}>
           <div className="settings-row">
             <label className="settings-label">供应商</label>
-            <select className="form-input form-input--inline" value={provider} onChange={e => setProvider(e.target.value)}>
+            <select className="form-input form-input--inline" value={provider} onChange={e => {
+              const nextProvider = e.target.value;
+              const nextPreset = presets[nextProvider];
+              setProvider(nextProvider);
+              setBaseUrlInput(nextPreset?.base_url || "");
+              setModelInput(nextPreset?.models?.[0] || "");
+            }}>
               {Object.entries(presets).map(([k, v]) => <option key={k} value={k}>{v.name}</option>)}
             </select>
           </div>

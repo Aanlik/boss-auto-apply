@@ -11,7 +11,9 @@ def filter_jobs_by_model(jobs: list[JobRecord], filters: JobFilter) -> list[JobR
                 continue
         if filters.city and job.city != filters.city:
             continue
-        if filters.min_salary and job.salary_min < filters.min_salary:
+        # 最低薪资筛选判断岗位区间是否能达到门槛，例如 10-15K 应命中 13K。
+        salary_upper = job.salary_max or job.salary_min
+        if filters.min_salary and salary_upper < filters.min_salary:
             continue
         results.append(job)
     return results

@@ -28,4 +28,11 @@ describe("Jobs JD enrichment UI regressions", () => {
     expect(jobsPage).toContain("function refreshCurrentPage()");
     expect(jobsPage).toMatch(/window\.location\.reload\(\)/);
   });
+
+  test("uses stable containers when jobs are grouped by company", () => {
+    const jobsPage = readFileSync(resolve(process.cwd(), "src/pages/jobs.tsx"), "utf8");
+
+    expect(jobsPage).toContain('className="job-company-groups"');
+    expect(jobsPage).toContain("<Fragment key={group.key}>");
+  });
 });

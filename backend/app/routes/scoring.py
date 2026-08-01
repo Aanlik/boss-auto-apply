@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
+import json
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Response
@@ -13,7 +15,7 @@ from app.services.scoring import (
     save_ranking_weights,
 )
 from app.services.workflow_persistence import load_rankings, save_rankings
-from app.services.workflow_tasks import complete_task, fail_task, start_task
+from app.services.workflow_tasks import complete_task, fail_task, find_running_task, start_task, update_task
 
 router = APIRouter(prefix="/api/scoring", tags=["scoring"])
 
@@ -108,9 +110,38 @@ async def rank_jobs_endpoint(payload: dict) -> dict:
         # 回退: 使用 payload 中的 simplified 数据
         raise HTTPException(status_code=404, detail="无法找到岗位详情")
 
-    task = start_task("ranking", "综合排序", total=len(job_list), payload={"job_ids": job_ids})
+    idempotency_key = hashlib.sha256(json.dumps({
+        "job_ids": sorted(str(item) for item in job_ids),
+        "resume": resume,
+        "diligence_reports": diligence_reports,
+        "weights": payload.get("weights") or {},
+    }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    running_task = find_running_task(idempotency_key)
+    if running_task:
+        raise HTTPException(status_code=409, detail="相同岗位的综合排序正在进行，请稍候查看任务进度")
+
+    task = start_task(
+        "ranking",
+        "综合排序",
+        total=len(job_list),
+        payload={"job_ids": job_ids},
+        idempotency_key=idempotency_key,
+    )
     try:
-        rankings = await rank_jobs_ai(job_list, resume, diligence_reports, payload.get("weights"))
+        async def on_progress(done: int, total: int, result: dict) -> None:
+            update_task(
+                task["id"],
+                done=done,
+                message=f"正在分析 {done}/{total}: {result.get('company', '')} · {result.get('jobTitle', '')}",
+            )
+
+        rankings = await rank_jobs_ai(
+            job_list,
+            resume,
+            diligence_reports,
+            payload.get("weights"),
+            progress_callback=on_progress,
+        )
         save_rankings(rankings)
         complete_task(task["id"], done=len(rankings), message=f"综合排序完成，生成 {len(rankings)} 个结果")
         return {"rankings": rankings}

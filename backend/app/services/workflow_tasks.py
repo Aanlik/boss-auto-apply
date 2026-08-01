@@ -150,6 +150,20 @@ def get_task(task_id: str) -> dict | None:
     return None
 
 
+def find_running_task(idempotency_key: str) -> dict | None:
+    if not idempotency_key:
+        return None
+    return next(
+        (
+            task
+            for task in load_tasks(limit=100)
+            if task.get("idempotencyKey") == idempotency_key
+            and task.get("status") in {"queued", "running"}
+        ),
+        None,
+    )
+
+
 def restart_task(task_id: str) -> dict:
     """Reuse a failed task record for a new execution attempt."""
     task = get_task(task_id)

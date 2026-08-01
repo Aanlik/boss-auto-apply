@@ -15,6 +15,16 @@ export type JdAnalysisAction = {
   disabled: boolean;
 };
 
+export type CompanyDiligenceAction = {
+  label: string;
+  targetIds: string[];
+  disabled: boolean;
+};
+
+function companyIdentity(job: JobPosting): string {
+  return String(job.company_key || job.company || "").trim().toLowerCase();
+}
+
 type ResolveDiligencePrimaryActionInput = {
   jobs: JobPosting[];
   selectedJobIds: string[];
@@ -48,7 +58,41 @@ export function resolveJdAnalysisAction(input: {
   const missingCount = selectedJobs.filter(job => !input.jdAnalyses[job.id]).length;
   return {
     label: missingCount > 0 ? `一键 JD 分析 (${missingCount})` : `一键重新分析 JD (${selectedJobs.length})`,
-    targetIds,
+    targetIds: missingCount > 0
+      ? selectedJobs.filter(job => !input.jdAnalyses[job.id]).map(job => job.id)
+      : targetIds,
+    disabled: false,
+  };
+}
+
+export function resolveCompanyDiligenceAction(input: {
+  jobs: JobPosting[];
+  selectedJobIds: string[];
+  diligenceReports: Record<string, DiligenceReport>;
+}): CompanyDiligenceAction {
+  const selectedJobs = input.jobs.filter(job => input.selectedJobIds.includes(job.id));
+  if (selectedJobs.length === 0) {
+    return { label: "一键公司尽调", targetIds: [], disabled: true };
+  }
+
+  const missingJobs = selectedJobs.filter(job => !hasDiligence(job, input.diligenceReports));
+  const missingCompanies = new Set<string>();
+  const missingTargetIds = missingJobs.filter(job => {
+    const key = companyIdentity(job);
+    if (missingCompanies.has(key)) return false;
+    missingCompanies.add(key);
+    return true;
+  }).map(job => job.id);
+  const rerunCompanies = new Set<string>();
+  const rerunTargetIds = selectedJobs.filter(job => {
+    const key = companyIdentity(job);
+    if (rerunCompanies.has(key)) return false;
+    rerunCompanies.add(key);
+    return true;
+  }).map(job => job.id);
+  return {
+    label: missingJobs.length > 0 ? `一键公司尽调 (${missingTargetIds.length})` : `一键重新公司尽调 (${rerunTargetIds.length})`,
+    targetIds: missingJobs.length > 0 ? missingTargetIds : rerunTargetIds,
     disabled: false,
   };
 }
@@ -63,7 +107,7 @@ export function resolveDiligencePrimaryAction(input: ResolveDiligencePrimaryActi
   if (missingAnalysis.length > 0) {
     return {
       kind: "analyze_jd",
-      label: `一键 JD 分析 (${missingAnalysis.length})`,
+      label: "AI 分析 JD",
       targetIds: missingAnalysis.map(job => job.id),
       disabled: false,
     };
@@ -73,7 +117,7 @@ export function resolveDiligencePrimaryAction(input: ResolveDiligencePrimaryActi
   if (missingDiligence.length > 0) {
     return {
       kind: "diligence",
-      label: `一键尽调 (${missingDiligence.length})`,
+      label: "公司尽调",
       targetIds: missingDiligence.map(job => job.id),
       disabled: false,
     };
@@ -81,7 +125,7 @@ export function resolveDiligencePrimaryAction(input: ResolveDiligencePrimaryActi
 
   return {
     kind: "rediligence",
-    label: `一键重新公司尽调 (${selectedJobs.length})`,
+    label: "重新公司尽调",
     targetIds: selectedJobs.map(job => job.id),
     disabled: false,
   };

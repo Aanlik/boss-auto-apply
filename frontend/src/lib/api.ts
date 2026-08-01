@@ -635,6 +635,19 @@ export async function saveGreetingDrafts(greetings: Record<string, string>): Pro
   });
 }
 
+export async function generateGreeting(payload: {
+  job_id: string;
+  resume: import("./types").ResumeProfile;
+  jd_analysis?: import("./types").JDAnalysis | null;
+  style?: string;
+}): Promise<{ jobId: string; message: string; source: string }> {
+  return fetchJson("/api/greetings/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getSendRecords(): Promise<{ records: Array<{ jobId: string; status: string; note: string; updatedAt: string }> }> {
   return fetchJson("/api/greetings/send-records");
 }

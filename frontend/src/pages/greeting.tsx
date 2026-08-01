@@ -25,6 +25,7 @@ import {
   getSendRecords,
   saveGreetingAcceptanceRecord,
   saveGreetingDrafts,
+  generateGreeting,
   saveGreetingReply,
   saveGreetingAutoSendSettings,
   sendGreetingConfirmations,
@@ -212,9 +213,9 @@ export default function GreetingPage() {
 	    setLoading(prev => ({ ...prev, [job.id + "-greet"]: "生成中…" }));
 	    try {
 	      const jdA = await ensureJDAnalysis(job);
-	      const skills = resumeProfile?.skills?.join("、") || "相关技术";
-	      const highlights = jdA?.must_have_skills?.slice(0, 3).join("、") || job.keywords?.slice(0, 3).join("、") || "岗位要求";
-	      const next = { ...greetingTexts, [job.id]: `您好，我对贵司的「${job.title}」岗位非常感兴趣。我有 ${skills} 方面的经验，熟悉 ${highlights} 等技术，希望能有机会进一步沟通。` };
+	      if (!resumeProfile) { setError("请先上传简历"); return; }
+	      const generated = await generateGreeting({ job_id: job.id, resume: resumeProfile, jd_analysis: jdA });
+	      const next = { ...greetingTexts, [job.id]: generated.message };
 	      dispatch(actions.setGreetingTexts(next));
 	      await saveGreetingDrafts(next);
 	    } catch (err) { setError(err instanceof Error ? err.message : "生成失败"); }
@@ -234,9 +235,9 @@ export default function GreetingPage() {
 	        if (!job) continue;
 	        setWorkbenchLoading(`生成中 ${i + 1}/${targets.length}…`);
 	        const jdA = await ensureJDAnalysis(job);
-	        const skills = resumeProfile?.skills?.join("、") || "相关技术";
-	        const highlights = jdA?.must_have_skills?.slice(0, 3).join("、") || job.keywords?.slice(0, 3).join("、") || "岗位要求";
-	        next[targets[i]] = `您好，我对贵司的「${job.title}」岗位非常感兴趣。我有 ${skills} 方面的经验，熟悉 ${highlights} 等技术，希望能有机会进一步沟通。`;
+	        if (!resumeProfile) { setError("请先上传简历"); return; }
+	        const generated = await generateGreeting({ job_id: job.id, resume: resumeProfile, jd_analysis: jdA });
+	        next[targets[i]] = generated.message;
 	      }
 	      dispatch(actions.setGreetingTexts(next));
 	      await saveGreetingDrafts(next);

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from app.services.scoring import analyze_jd_for_matching, match_resume_to_job, rank_jobs_ai
 
 
@@ -79,3 +80,66 @@ def test_ranking_feedback_adjusts_weights_toward_company_risk(tmp_path, monkeypa
     assert weights["company_weight"] > 0.4
     assert weights["match_weight"] < 0.6
     assert any("公司风险" in item for item in weights["feedbackSignals"])
+
+
+def test_rank_jobs_reuses_jd_and_match_cache(tmp_path, monkeypatch):
+    import app.services.scoring as scoring
+
+    monkeypatch.setattr(scoring, "RANKING_CACHE_FILE", tmp_path / "ranking_cache.json")
+    scoring._RANKING_MEMORY_CACHE.clear()
+    calls = {"jd": 0, "match": 0}
+
+    async def fake_jd(job):
+        calls["jd"] += 1
+        return {"core_requirements": [job["title"]]}
+
+    async def fake_match(resume, job, jd_analysis):
+        calls["match"] += 1
+        return {"match_score": 80, "highlights": [], "gaps": [], "recommendation": "recommend", "reason": "匹配"}
+
+    monkeypatch.setattr(scoring, "analyze_jd_for_matching", fake_jd)
+    monkeypatch.setattr(scoring, "match_resume_to_job", fake_match)
+    jobs = [{"id": "cache-job", "title": "后端工程师", "company": "示例科技", "jd_text": "Python", "salary": "15-25K"}]
+    resume = {"skills": ["Python"]}
+
+    asyncio.run(rank_jobs_ai(jobs, resume, {}))
+    asyncio.run(rank_jobs_ai(jobs, resume, {}))
+
+    assert calls == {"jd": 1, "match": 1}
+    assert json.loads((tmp_path / "ranking_cache.json").read_text())
+
+
+def test_rank_jobs_limits_ai_concurrency(tmp_path, monkeypatch):
+    import app.services.scoring as scoring
+
+    monkeypatch.setattr(scoring, "RANKING_CACHE_FILE", tmp_path / "ranking_cache.json")
+    scoring._RANKING_MEMORY_CACHE.clear()
+    active = 0
+    peak = 0
+
+    async def fake_jd(job):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {"core_requirements": [job["title"]]}
+
+    async def fake_match(resume, job, jd_analysis):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {"match_score": 80, "highlights": [], "gaps": [], "recommendation": "recommend", "reason": "匹配"}
+
+    monkeypatch.setattr(scoring, "analyze_jd_for_matching", fake_jd)
+    monkeypatch.setattr(scoring, "match_resume_to_job", fake_match)
+    jobs = [
+        {"id": f"concurrent-{i}", "title": f"岗位{i}", "company": "示例科技", "jd_text": str(i)}
+        for i in range(8)
+    ]
+
+    asyncio.run(rank_jobs_ai(jobs, {"skills": ["Python"]}, {}))
+
+    assert peak <= scoring.RANKING_MAX_CONCURRENCY

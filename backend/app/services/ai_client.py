@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import base64
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -24,22 +25,22 @@ PROVIDER_PRESETS = {
     "openai": {
         "name": "OpenAI",
         "base_url": "",
-        "models": ["gpt-4.1-mini", "gpt-4o", "gpt-4o-mini", "gpt-4.1", "o4-mini"],
+        "models": ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4-mini"],
     },
     "deepseek": {
         "name": "DeepSeek",
         "base_url": "https://api.deepseek.com",
-        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
     },
     "zhipu": {
         "name": "智谱 GLM",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "models": ["glm-4-flash", "glm-4-plus", "glm-4"],
+        "models": ["glm-5.2", "glm-5-turbo", "glm-5", "glm-4.7", "glm-4.6"],
     },
     "moonshot": {
         "name": "月之暗面 Moonshot",
         "base_url": "https://api.moonshot.cn/v1",
-        "models": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+        "models": ["kimi-k3", "kimi-k2.7-code-highspeed", "kimi-k2.7-code", "kimi-k2.6"],
     },
     "custom": {
         "name": "自定义",
@@ -167,13 +168,15 @@ def get_model() -> str:
     """获取当前配置的模型名，回退到预设默认值。"""
     cfg = get_config()
     model = cfg.get("model", "")
-    if model:
-        return model
-    # 回退到供应商默认模型
     provider = cfg.get("provider", "openai")
     preset = PROVIDER_PRESETS.get(provider, {})
     defaults = preset.get("models", [])
-    return defaults[0] if defaults else "gpt-4.1-mini"
+    if model and (provider == "custom" or model in defaults):
+        return model
+    if model and defaults:
+        logger.warning("供应商 %s 的模型 %s 已不在当前预设中，回退到 %s", provider, model, defaults[0])
+    # 回退到供应商默认模型
+    return defaults[0] if defaults else "gpt-5.6"
 
 
 def chat_json(system: str, user: str, model: str | None = None, temperature: float = 0.3):
@@ -275,15 +278,48 @@ async def ocr_image_async(image_bytes: bytes, filename: str = "") -> str:
 
 async def chat(prompt: str, temperature: float = 0.3, max_tokens: int = 2000) -> str:
     """简单对话接口 — 发送单条 prompt，返回文本"""
+    return await asyncio.to_thread(_chat_sync, prompt, temperature, max_tokens)
+
+
+def _chat_sync(prompt: str, temperature: float, max_tokens: int) -> str:
+    """在线程中执行同步 SDK 请求，避免阻塞 FastAPI 事件循环。"""
     client = get_client()
     model = get_model()
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    return resp.choices[0].message.content or ""
+    started = time.time()
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        try:
+            from app.services.maintenance_service import log_api_call
+            log_api_call(
+                "ai",
+                "POST",
+                str(get_config().get("base_url") or "openai"),
+                200,
+                int((time.time() - started) * 1000),
+                {"model": model, "stage": "ranking", "outcome": "success"},
+            )
+        except Exception:
+            pass
+        return resp.choices[0].message.content or ""
+    except Exception as exc:
+        try:
+            from app.services.maintenance_service import log_api_call
+            log_api_call(
+                "ai",
+                "POST",
+                str(get_config().get("base_url") or "openai"),
+                500,
+                int((time.time() - started) * 1000),
+                {"model": model, "stage": "ranking", "outcome": "failure", "error": str(exc)[:200]},
+            )
+        except Exception:
+            pass
+        raise
 
 
 def get_ai_client():

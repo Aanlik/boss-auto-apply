@@ -6,10 +6,11 @@ import ChatPanel from "../components/ChatPanel";
 import { EmptyState, ErrorBanner } from "../components/SharedUI";
 import { buildDiligenceEvidence } from "../lib/workflowInsights";
 import AiFeedbackButtons from "../components/AiFeedbackButtons";
-import { resolveDiligencePrimaryAction, resolveJdAnalysisAction } from "../lib/diligenceActions";
+import { resolveCompanyDiligenceAction, resolveJdAnalysisAction } from "../lib/diligenceActions";
+import { runWithConcurrency } from "../lib/asyncPool";
 
 type CardState = { jdExpanded: boolean; ddExpanded: boolean; chatExpanded: boolean };
-type BatchProgress = { kind: "jd" | "dd"; done: number; total: number; current: string } | null;
+type BatchProgress = { done: number; total: number; current: string } | null;
 
 export default function DiligencePage({ onNavigate }: { onNavigate?: (page: string) => void }) {
   const { selectedJobIds, jdAnalyses, diligenceReports, chatMessages } = useWorkflowState();
@@ -19,7 +20,8 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
   const [localSelection, setLocalSelection] = useState<string[]>(() => [...selectedJobIds]);
   const [cardStates, setCardStates] = useState<Record<string, CardState>>({});
   const [loading, setLoading] = useState<Record<string, boolean>>({});
-  const [batchProgress, setBatchProgress] = useState<BatchProgress>(null);
+  const [jdBatchProgress, setJdBatchProgress] = useState<BatchProgress>(null);
+  const [companyBatchProgress, setCompanyBatchProgress] = useState<BatchProgress>(null);
   const [error, setError] = useState("");
 
   // useRef 追踪最新累积数据，避免闭包过期导致覆盖
@@ -124,23 +126,25 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
     const explicitTargets = targetIds ? new Set(targetIds) : null;
     const targets = jobs.filter(job => explicitTargets ? explicitTargets.has(job.id) : localSelection.includes(job.id) && !accumulated[job.id]);
     if (targets.length === 0) return;
-    setBatchProgress({ kind: "jd", done: 0, total: targets.length, current: targets[0].title });
-    for (const job of targets) {
+    setJdBatchProgress({ done: 0, total: targets.length, current: targets[0].title });
+    let completed = 0;
+    await runWithConcurrency(targets, 3, async job => {
       setLoading(prev => ({ ...prev, [job.id]: true }));
-      setBatchProgress(prev => prev ? { ...prev, current: job.title } : prev);
+      setJdBatchProgress(prev => prev ? { ...prev, current: job.title } : prev);
       try {
         const data = await analyzeJD({ job_id: job.id, title: job.title, company: job.company, jd_text: job.jd_text });
         accumulated[job.id] = data;
-        // 每完成一个立即写到 store
         dispatch(actions.setJdAnalyses({ ...accumulated }));
       } catch (err) {
-        setError(err instanceof Error ? err.message : `JD分析失败: ${job.title}`);
+        setError(prev => prev || (err instanceof Error ? err.message : `JD分析失败: ${job.title}`));
+      } finally {
+        setLoading(prev => ({ ...prev, [job.id]: false }));
+        completed += 1;
+        setJdBatchProgress(prev => prev ? { ...prev, done: completed } : prev);
       }
-      setLoading(prev => ({ ...prev, [job.id]: false }));
-      setBatchProgress(prev => prev ? { ...prev, done: prev.done + 1 } : prev);
-    }
+    });
     dispatch(actions.setJdAnalyses({ ...accumulated }));
-    setBatchProgress(null);
+    setJdBatchProgress(null);
   }
 
   // ── 公司尽调（单条）──
@@ -179,16 +183,17 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
     }
   }
 
-  // ── 一键尽调 ──
+  // ── 批量公司尽调 ──
   async function diligenceSelected(targetIds?: string[]) {
     const accumulatedReports = { ...diligenceRef.current };
     const explicitTargets = targetIds ? new Set(targetIds) : null;
     const targets = jobs.filter(job => explicitTargets ? explicitTargets.has(job.id) : localSelection.includes(job.id) && !diligenceForJob(job));
     if (targets.length === 0) return;
-    setBatchProgress({ kind: "dd", done: 0, total: targets.length, current: targets[0].company });
-    for (const job of targets) {
+    setCompanyBatchProgress({ done: 0, total: targets.length, current: targets[0].company });
+    let completed = 0;
+    await runWithConcurrency(targets, 3, async job => {
       setLoading(prev => ({ ...prev, [job.id + "-dd"]: true }));
-      setBatchProgress(prev => prev ? { ...prev, current: job.company } : prev);
+      setCompanyBatchProgress(prev => prev ? { ...prev, current: job.company } : prev);
       try {
         const report = await evaluateCompany({
           company_name: job.company, job_title: job.title,
@@ -200,13 +205,15 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
         if (job.company !== canonicalKey) delete accumulatedReports[job.company];
         dispatch(actions.setDiligenceReports({ ...accumulatedReports }));
       } catch (err) {
-        setError(err instanceof Error ? err.message : `尽调失败: ${job.company}`);
+        setError(prev => prev || (err instanceof Error ? err.message : `尽调失败: ${job.company}`));
+      } finally {
+        setLoading(prev => ({ ...prev, [job.id + "-dd"]: false }));
+        completed += 1;
+        setCompanyBatchProgress(prev => prev ? { ...prev, done: completed } : prev);
       }
-      setLoading(prev => ({ ...prev, [job.id + "-dd"]: false }));
-      setBatchProgress(prev => prev ? { ...prev, done: prev.done + 1 } : prev);
-    }
+    });
     dispatch(actions.setDiligenceReports({ ...accumulatedReports }));
-    setBatchProgress(null);
+    setCompanyBatchProgress(null);
   }
 
   const uniqueCompanies = useMemo(
@@ -214,46 +221,18 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
     [jobs]
   );
 
-  const primaryAction = useMemo(() => resolveDiligencePrimaryAction({
-    jobs,
-    selectedJobIds: localSelection,
-    jdAnalyses,
-    diligenceReports,
-  }), [jobs, localSelection, jdAnalyses, diligenceReports]);
   const jdAction = useMemo(() => resolveJdAnalysisAction({
     jobs,
     selectedJobIds: localSelection,
     jdAnalyses,
   }), [jobs, localSelection, jdAnalyses]);
-  const primaryActionBusy = batchProgress !== null || primaryAction.targetIds.some(id => loading[id] || loading[id + "-dd"]);
-  const jdActionBusy = batchProgress?.kind === "jd" || jdAction.targetIds.some(id => loading[id]);
-
-  async function runPrimaryAction() {
-    if (primaryAction.disabled || primaryActionBusy) return;
-    if (primaryAction.kind === "analyze_jd") {
-      await analyzeSelectedJD(primaryAction.targetIds);
-    } else if (primaryAction.kind === "diligence" || primaryAction.kind === "rediligence") {
-      await diligenceSelected(primaryAction.targetIds);
-    }
-  }
-
-  function primaryActionForJob(job: JobPosting) {
-    return resolveDiligencePrimaryAction({
-      jobs: [job],
-      selectedJobIds: [job.id],
-      jdAnalyses,
-      diligenceReports,
-    });
-  }
-
-  async function runPrimaryActionForJob(job: JobPosting) {
-    const action = primaryActionForJob(job);
-    if (action.kind === "analyze_jd") {
-      await onAnalyzeJD(job);
-    } else if (action.kind === "diligence" || action.kind === "rediligence") {
-      await onCompanyDiligence(job);
-    }
-  }
+  const companyAction = useMemo(() => resolveCompanyDiligenceAction({
+    jobs,
+    selectedJobIds: localSelection,
+    diligenceReports,
+  }), [jobs, localSelection, diligenceReports]);
+  const jdActionBusy = jdBatchProgress !== null || jdAction.targetIds.some(id => loading[id]);
+  const companyActionBusy = companyBatchProgress !== null || companyAction.targetIds.some(id => loading[id + "-dd"]);
 
   function goToRanking() {
     if (localSelection.length === 0) return;
@@ -269,17 +248,15 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
           <h2 className="page-title">公司尽调 & JD 分析</h2>
           <p className="page-copy">千帆智能搜索 + AI 总结 → AI 整合分析，综合评估公司风险与前景。</p>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+	        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
 	          <button type="button" className="button-primary" onClick={() => analyzeSelectedJD(jdAction.targetIds)}
 	            disabled={jdAction.disabled || jdActionBusy}>
-	            {batchProgress?.kind === "jd" ? `JD分析 ${batchProgress.done}/${batchProgress.total}` : jdAction.label}
+            {jdBatchProgress ? `JD分析 ${jdBatchProgress.done}/${jdBatchProgress.total}` : jdAction.label}
 	          </button>
-	          {primaryAction.kind !== "analyze_jd" && (
-	          <button type="button" className="button-primary" onClick={runPrimaryAction}
-	            disabled={primaryAction.disabled || primaryActionBusy}>
-	            {batchProgress?.kind === "dd" ? `尽调 ${batchProgress.done}/${batchProgress.total}` : primaryAction.label}
+	          <button type="button" className="button-primary" onClick={() => diligenceSelected(companyAction.targetIds)}
+	            disabled={companyAction.disabled || companyActionBusy}>
+            {companyBatchProgress ? `尽调 ${companyBatchProgress.done}/${companyBatchProgress.total}` : companyAction.label}
 	          </button>
-	          )}
           {localSelection.length > 0 && (
             <button type="button" className="button-primary" onClick={goToRanking}
               style={{ background: "var(--accent-strong)" }}>
@@ -295,15 +272,24 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
       </div>
 
       {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}
-      {batchProgress && (
+      {jdBatchProgress && (
         <div className="panel panel-strong">
           <div className="panel-inner">
             <div className="toolbar-strip">
-              <span className="page-kicker" style={{ margin: 0 }}>
-                {batchProgress.kind === "jd" ? "JD 分析进度" : "公司尽调进度"}
-              </span>
-              <span className="tag tag--active">{batchProgress.done}/{batchProgress.total}</span>
-              <span className="text-muted" style={{ fontSize: 12 }}>当前：{batchProgress.current}</span>
+              <span className="page-kicker" style={{ margin: 0 }}>JD 分析进度</span>
+              <span className="tag tag--active">{jdBatchProgress.done}/{jdBatchProgress.total}</span>
+              <span className="text-muted" style={{ fontSize: 12 }}>当前：{jdBatchProgress.current}</span>
+            </div>
+          </div>
+        </div>
+      )}
+      {companyBatchProgress && (
+        <div className="panel panel-strong">
+          <div className="panel-inner">
+            <div className="toolbar-strip">
+              <span className="page-kicker" style={{ margin: 0 }}>公司尽调进度</span>
+              <span className="tag tag--active">{companyBatchProgress.done}/{companyBatchProgress.total}</span>
+              <span className="text-muted" style={{ fontSize: 12 }}>当前：{companyBatchProgress.current}</span>
             </div>
           </div>
         </div>
@@ -337,8 +323,6 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
         const cs = cardStates[job.id] || { jdExpanded: false, ddExpanded: false, chatExpanded: false };
         const busyJd = loading[job.id];
         const busyDd = loading[job.id + "-dd"];
-        const cardAction = primaryActionForJob(job);
-        const cardBusy = busyJd || busyDd;
 
         return (
           <div key={job.id} className={`panel panel-strong${sel ? " job-card--selected" : ""}`}>
@@ -367,9 +351,13 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
                       </span>
                     </>
                   )}
+                  <button type="button" className="button-secondary button-secondary--sm"
+                    disabled={!!busyJd} onClick={() => onAnalyzeJD(job)}>
+                    {busyJd ? "JD 分析中…" : analysis ? "重新分析 JD" : "AI 分析 JD"}
+                  </button>
                   <button type="button" className="button-primary button-secondary--sm"
-                    disabled={cardAction.disabled || cardBusy} onClick={() => runPrimaryActionForJob(job)}>
-                    {busyJd ? "分析中…" : busyDd ? "尽调中…" : cardAction.kind === "analyze_jd" ? "AI 分析 JD" : cardAction.kind === "diligence" ? "公司尽调" : "重新公司尽调"}
+                    disabled={!!busyDd} onClick={() => onCompanyDiligence(job)}>
+                    {busyDd ? "公司尽调中…" : diligence ? "重新公司尽调" : "公司尽调"}
                   </button>
                   {diligence && (
                     <>

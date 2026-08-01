@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { Fragment, useState, useEffect, useMemo, useRef } from "react";
 import { listJobPool, getJobPoolQuality, listBossCities, listBossFilterOptions, captureBossJobs, bossLogin, bossLoginStatus, enrichJdDetails, deleteJob, deleteBatchJobs, tagJob, clearAllJobs, listCompanyBlacklist, addCompanyBlacklist, deleteCompanyBlacklist, exportCompanyBlacklist, importCompanyBlacklist, cleanupExpiredJobs, keepExpiredJobs, mergeDuplicateJobs, compareJobs, updateJobApplicationStatus, updateJobDecisionStatus, exportJobsUrl, listJobSearchPresets, saveJobSearchPreset, deleteJobSearchPreset } from "../lib/api";
 import type { BossCaptureFilters, BossFilterOptions, BossLoginStatus, CompanyBlacklistItem, JobApplicationStatus, JobComparison, JobDecisionStatus, JobPoolQuality, JobPosting, JobSearchPreset } from "../lib/types";
 import { HIDDEN_COMMON_TAGS_KEY, useWorkflowState, useWorkflowDispatch, actions } from "../lib/store";
@@ -8,6 +8,7 @@ import { JobFilterPanel } from "../components/JobFilterPanel";
 import { JobCard } from "../components/JobCard";
 import { CompanyBlacklistPanel } from "../components/CompanyBlacklistPanel";
 import { buildCommonTags } from "../lib/jobTags";
+import { groupJobsByCompany } from "../lib/jobGrouping";
 import { formatApiError } from "../lib/workflowInsights";
 
 const FALLBACK_CITY_OPTIONS = ["全国", "北京", "上海", "广州", "深圳", "杭州", "成都", "南京", "武汉", "西安", "郑州", "长沙", "苏州"];
@@ -77,6 +78,8 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   const [filterDecisionStatus, setFilterDecisionStatus] = useState("");
   const [qualityFilter, setQualityFilter] = useState<QualityFilterKey>("");
   const [viewMode, setViewMode] = useState<JobViewMode>("card");
+  const [groupByCompany, setGroupByCompany] = useState(false);
+  const [collapsedCompanyGroups, setCollapsedCompanyGroups] = useState<Set<string>>(() => new Set());
 
   // ---- 数据状态 ----
   const [jobs, setJobs] = useState<JobPosting[]>([]);
@@ -599,7 +602,8 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
       if (filterCity && (!j.city || !j.city.includes(filterCity))) return false;
       if (filterSalaryMin) {
         const min = parseInt(filterSalaryMin, 10);
-        if (!isNaN(min) && (j.salary_min || 0) < min) return false;
+        const salaryUpper = j.salary_max || j.salary_min || 0;
+        if (!isNaN(min) && salaryUpper < min) return false;
       }
       if (filterSalaryMax) {
         const max = parseInt(filterSalaryMax, 10);
@@ -627,6 +631,16 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
   const cities = useMemo(() => [...new Set(jobs.map(j => j.city).filter(Boolean))].sort(), [jobs]);
   const allTags = useMemo(() => buildCommonTags(jobs, hiddenCommonTags), [jobs, hiddenCommonTags]);
   const expiredJobs = useMemo(() => jobs.filter(j => j.lifecycle_status === "suspected_expired"), [jobs]);
+  const companyGroups = useMemo(() => groupJobsByCompany(filteredJobs), [filteredJobs]);
+
+  function toggleCompanyGroup(groupKey: string) {
+    setCollapsedCompanyGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
+  }
 
   const selectedJobs = useMemo(() => jobs.filter(j => selectedJobIds.includes(j.id)), [jobs, selectedJobIds]);
 
@@ -1005,6 +1019,10 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
               {mode === "card" ? "卡片" : mode === "compact" ? "紧凑" : "表格"}
             </button>
           ))}
+          <label className="view-mode-toggle">
+            <input type="checkbox" checked={groupByCompany} onChange={e => setGroupByCompany(e.target.checked)} />
+            <span>按公司合并展示</span>
+          </label>
         </div>
       )}
 
@@ -1031,7 +1049,35 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
               </tr>
             </thead>
             <tbody>
-              {filteredJobs.map(job => (
+              {groupByCompany ? companyGroups.map(group => {
+                const collapsed = collapsedCompanyGroups.has(group.key);
+                return <Fragment key={group.key}>
+                  <tr className="job-company-group-row">
+                    <td colSpan={8}>
+                      <button type="button" className="job-company-group-toggle" onClick={() => toggleCompanyGroup(group.key)}>
+                        <span>{collapsed ? "▸" : "▾"}</span>
+                        <strong>{group.company}</strong>
+                        <span className="text-muted">{group.jobs.length} 个岗位</span>
+                      </button>
+                    </td>
+                  </tr>
+                  {!collapsed && group.jobs.map(job => (
+                    <tr key={job.id} className={selectedJobIds.includes(job.id) ? "job-table-row--selected" : ""}>
+                      <td><input type="checkbox" checked={selectedJobIds.includes(job.id)} onChange={() => toggleJob(job.id)} /></td>
+                      <td><strong>{job.title}</strong></td>
+                      <td>{job.company}</td>
+                      <td>{job.city || "未知"}</td>
+                      <td>{job.salary || "面议"}</td>
+                      <td>{APPLICATION_STATUS_LABELS[(job.application_status || "pending") as JobApplicationStatus]}</td>
+                      <td>{DECISION_STATUS_LABELS[(job.decision_status || "undecided") as JobDecisionStatus]}</td>
+                      <td>
+                        <button type="button" className="button-quiet" onClick={() => setDetailId(detailId === job.id ? null : job.id)}>JD</button>
+                        <button type="button" className="button-quiet button-danger" onClick={() => onDeleteOne(job.id)}>删除</button>
+                      </td>
+                    </tr>
+                  ))}
+                </Fragment>;
+              }) : filteredJobs.map(job => (
                 <tr key={job.id} className={selectedJobIds.includes(job.id) ? "job-table-row--selected" : ""}>
                   <td><input type="checkbox" checked={selectedJobIds.includes(job.id)} onChange={() => toggleJob(job.id)} /></td>
                   <td><strong>{job.title}</strong></td>
@@ -1050,7 +1096,31 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
           </table>
         </div>
       ) : viewMode === "compact" ? (
-        <ul className="list-reset job-compact-list">
+        groupByCompany ? <div className="job-company-groups">{companyGroups.map(group => {
+          const collapsed = collapsedCompanyGroups.has(group.key);
+          return <section key={group.key} className="job-company-group">
+            <button type="button" className="job-company-group-heading" onClick={() => toggleCompanyGroup(group.key)}>
+              <span>{collapsed ? "▸" : "▾"}</span><strong>{group.company}</strong><span>{group.jobs.length} 个岗位</span>
+            </button>
+            {!collapsed && <ul className="list-reset job-compact-list">
+              {group.jobs.map(job => (
+                <li key={job.id} className={`job-compact-row${selectedJobIds.includes(job.id) ? " job-compact-row--selected" : ""}`}>
+                  <input type="checkbox" checked={selectedJobIds.includes(job.id)} onChange={() => toggleJob(job.id)} />
+                  <strong>{job.title}</strong>
+                  <span>{job.company}</span>
+                  <span>{job.city || "未知"} · {job.salary || "面议"}</span>
+                  <select className="form-input form-input--inline" value={job.application_status || "pending"} onChange={e => onUpdateApplicationStatus(job, e.target.value as JobApplicationStatus)}>
+                    {(Object.keys(APPLICATION_STATUS_LABELS) as JobApplicationStatus[]).map(status => <option key={status} value={status}>{APPLICATION_STATUS_LABELS[status]}</option>)}
+                  </select>
+                  <select className="form-input form-input--inline" value={job.decision_status || "undecided"} onChange={e => onUpdateDecisionStatus(job, e.target.value as JobDecisionStatus)}>
+                    {(Object.keys(DECISION_STATUS_LABELS) as JobDecisionStatus[]).map(status => <option key={status} value={status}>{DECISION_STATUS_LABELS[status]}</option>)}
+                  </select>
+                  <button type="button" className="button-quiet" onClick={() => setDetailId(detailId === job.id ? null : job.id)}>JD</button>
+                </li>
+              ))}
+            </ul>}
+          </section>;
+        })}</div> : <ul className="list-reset job-compact-list">
           {filteredJobs.map(job => (
             <li key={job.id} className={`job-compact-row${selectedJobIds.includes(job.id) ? " job-compact-row--selected" : ""}`}>
               <input type="checkbox" checked={selectedJobIds.includes(job.id)} onChange={() => toggleJob(job.id)} />
@@ -1068,7 +1138,55 @@ export default function JobsPage({ onNavigate, visible = true }: { onNavigate: (
           ))}
         </ul>
       ) : (
-        <ul className="list-reset job-grid">
+        groupByCompany ? <div className="job-company-groups">{companyGroups.map(group => {
+          const collapsed = collapsedCompanyGroups.has(group.key);
+          return <section key={group.key} className="job-company-group">
+            <button type="button" className="job-company-group-heading" onClick={() => toggleCompanyGroup(group.key)}>
+              <span>{collapsed ? "▸" : "▾"}</span><strong>{group.company}</strong><span>{group.jobs.length} 个岗位</span>
+            </button>
+            {!collapsed && <ul className="list-reset job-grid">
+              {group.jobs.map(job => {
+                const sel = selectedJobIds.includes(job.id);
+                const showDetail = detailId === job.id;
+                const tags = customTags[job.id] || [];
+                return <JobCard
+                  key={job.id}
+                  job={job}
+                  selected={sel}
+                  expanded={showDetail}
+                  customTags={tags}
+                  tagInput={tagInputs[job.id] || ""}
+                  filterTagList={filterTagList}
+                  greeted={Boolean(greetedStatus[job.id])}
+                  statusLabels={APPLICATION_STATUS_LABELS}
+                  decisionLabels={DECISION_STATUS_LABELS}
+                  onToggleSelected={() => toggleJob(job.id)}
+                  onToggleDetail={() => setDetailId(showDetail ? null : job.id)}
+                  onStatusChange={(status) => onUpdateApplicationStatus(job, status)}
+                  onDecisionChange={(status) => onUpdateDecisionStatus(job, status)}
+                  onRemoveCustomTag={(tag: string) => {
+                    const newTags = tags.filter(x => x !== tag);
+                    setCustomTags(prev => ({ ...prev, [job.id]: newTags }));
+                    tagJob(job.id, { tags: newTags }).catch((e: unknown) => {
+                      setCustomTags(prev => ({ ...prev, [job.id]: tags }));
+                      setError(e instanceof Error ? e.message : "删除标签失败");
+                    });
+                  }}
+                  onTagInputChange={(value) => setTagInputs(prev => ({ ...prev, [job.id]: value }))}
+                  onAddCustomTag={() => addCustomTag(job.id, tagInputs[job.id] || "")}
+                  onToggleKeywordTag={(keyword) => {
+                    const current = filterTagList;
+                    setFilterTags(current.includes(keyword.toLowerCase())
+                      ? current.filter(x => x !== keyword.toLowerCase()).join(", ")
+                      : [...current, keyword.toLowerCase()].join(", "));
+                  }}
+                  onAddBlacklist={() => addBlacklist(job.company)}
+                  onDelete={() => onDeleteOne(job.id)}
+                />;
+              })}
+            </ul>}
+          </section>;
+        })}</div> : <ul className="list-reset job-grid">
           {filteredJobs.map(job => {
             const sel = selectedJobIds.includes(job.id);
             const showDetail = detailId === job.id;

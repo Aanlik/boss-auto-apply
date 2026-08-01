@@ -101,3 +101,27 @@ def test_company_score_penalizes_enterprise_risk_signals():
 
     assert risky_score < clean_score
     assert risk in ("medium", "high")
+
+
+def test_evaluate_company_returns_saved_report_before_running_new_diligence(monkeypatch):
+    import asyncio
+    import app.routes.diligence as diligence_route
+
+    cached = {
+        "companyName": "示例科技有限公司",
+        "sourceCompanyName": "示例科技",
+        "companyKey": "credit-1",
+        "companyScore": 82,
+        "riskLevel": "low",
+    }
+    monkeypatch.setattr(diligence_route, "find_diligence_report", lambda _: cached)
+
+    async def should_not_run(**kwargs):
+        raise AssertionError("已有报告时不应重新执行全量尽调")
+
+    monkeypatch.setattr(diligence_route, "run_full_diligence", should_not_run)
+
+    result = asyncio.run(diligence_route.evaluate_company({"company_name": "示例科技"}))
+
+    assert result["companyScore"] == 82
+    assert result["cacheHit"] is True

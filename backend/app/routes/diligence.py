@@ -107,6 +107,10 @@ async def evaluate_company(payload: dict) -> dict:
     if not company_name:
         raise HTTPException(status_code=400, detail="缺少公司名称")
 
+    existing = find_diligence_report(company_name)
+    if existing and not chat_history and not bool(payload.get("force")):
+        return {**existing, "cacheHit": True}
+
     task = start_task("diligence", "公司尽调", total=1, payload={"company_name": company_name, "job_title": job_title})
     try:
         report = await run_full_diligence(

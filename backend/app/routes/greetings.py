@@ -28,6 +28,7 @@ from app.services.greeting_workbench import (
     build_greeting_record,
     count_sent_today,
     generate_greeting,
+    generate_greeting_with_ai,
     validate_greeting,
 )
 from app.services.workflow_persistence import (
@@ -54,6 +55,13 @@ class GreetingValidateItem(BaseModel):
 
 class GreetingValidateRequest(BaseModel):
     items: list[GreetingValidateItem] = Field(default_factory=list)
+
+
+class GreetingGenerateRequest(BaseModel):
+    job_id: str
+    resume: dict = Field(default_factory=dict)
+    jd_analysis: dict = Field(default_factory=dict)
+    style: str = "稳妥自然"
 
 
 
@@ -692,6 +700,18 @@ def greeting_followups(now: str = "") -> dict:
 @router.post("/candidates")
 def greeting_candidates(payload: GreetingCandidateRequest) -> dict:
     return build_greeting_candidates(_all_jobs(), payload.job_ids)
+
+
+@router.post("/generate")
+def generate_greeting_endpoint(payload: GreetingGenerateRequest) -> dict:
+    job = next((item for item in _all_jobs() if item.id == payload.job_id), None)
+    if not job:
+        raise HTTPException(status_code=404, detail="岗位不存在")
+    try:
+        message = generate_greeting_with_ai(job, payload.resume, payload.jd_analysis, payload.style)
+        return {"jobId": job.id, "message": message, "source": "ai"}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"AI 话术生成失败: {exc}") from exc
 
 
 @router.post("/validate")
