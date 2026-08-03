@@ -31,6 +31,7 @@ describe("HelpCenter", () => {
     expect(screen.getByText("重试加载")).toBeVisible();
     expect(screen.getByText(/顶部为全库状态/)).toBeVisible();
     expect(screen.getByText(/发送前必须通过 BOSS 登录预检/)).toBeVisible();
+    expect(screen.getByText(/自动打招呼按钮为什么变灰/)).toBeVisible();
   });
 
   test("点击重试后展示接口返回的帮助内容", async () => {

@@ -4,7 +4,7 @@ import type { HelpCenter as HelpCenterData } from "../lib/types";
 
 const FALLBACK_HELP_CENTER: HelpCenterData = {
   kind: "help_center",
-  version: 1,
+  version: 2,
   quickStart: [
     { label: "先看仪表盘下一步", page: "dashboard" },
     { label: "补岗位和 JD", page: "jobs" },
@@ -68,8 +68,8 @@ const FALLBACK_HELP_CENTER: HelpCenterData = {
       nextStep: "先生成招呼语草稿，通过校验和最终确认后，再人工或灰度发送。发送前必须通过 BOSS 登录预检。",
       steps: ["生成话术草稿", "验证 BOSS 登录并查看校验结果", "小批量灰度发送"],
       goodSignals: ["话术有岗位相关理由", "失败原因能明确定位"],
-      commonFailures: ["话术校验失败", "页面风控", "找不到立即沟通按钮"],
-      safetyNotes: ["自动发送不绕过验证码和风控。"],
+      commonFailures: ["话术校验失败", "页面风控", "找不到立即沟通按钮", "连续失败后自动发送按钮变灰"],
+      safetyNotes: ["自动发送不绕过验证码和风控。", "连续失败达到安全阈值后会锁定自动发送；先完成预检，再手动成功发送 1 个岗位，并在该岗位卡片点击“标记已招呼”后刷新安全阈值。"],
       repairActions: [
         { label: "发送前预检", page: "greeting", type: "navigate" },
         { label: "检测页面可用性", page: "greeting", type: "navigate" },
@@ -96,10 +96,12 @@ const FALLBACK_HELP_CENTER: HelpCenterData = {
   faq: [
     { question: "为什么帮助一直加载？", answer: "通常是后端未重启、接口暂时不可用或请求被代理到旧服务。可先使用内置帮助并点击重试。", page: "settings" },
     { question: "什么时候可以开启自动发送？", answer: "建议先完成话术校验、页面可用性检查和小批量灰度首发。", page: "greeting" },
+    { question: "自动打招呼按钮为什么变灰，怎么恢复？", answer: "通常是连续发送失败触发安全阈值。先运行“发送前预检”和“检测页面可用性”，确认 BOSS 登录、风控和页面控件正常；再在 BOSS 手动成功发送 1 个岗位，回到该岗位卡片点击“标记已招呼”，最后点击“刷新安全阈值”。不要把未实际发送的岗位标记为成功，也不要直接编辑本地发送记录。", page: "greeting" },
   ],
   glossary: [
     { term: "灰度模式", meaning: "先用小批量、低频率验证真实发送链路，再逐步扩大范围。" },
     { term: "岗位池质量", meaning: "用于查看 JD 缺失、重复、过期、黑名单命中等影响后续流程的问题。" },
+    { term: "安全阈值锁定", meaning: "连续发送失败后系统暂时禁用自动发送，需先完成预检并确认一次真实成功发送，再恢复批量操作。" },
   ],
 };
 

@@ -270,6 +270,32 @@ def test_greeting_generation_uses_job_jd_and_resume_context(tmp_path, monkeypatc
     assert "甲公司" in captured["user"]
 
 
+def test_greeting_generation_uses_plain_text_ai_mode(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.services import greeting_workbench
+
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        city="上海",
+        jd_text="负责用户研究、需求分析和产品规划",
+        source_url="https://example.com/job/1",
+    )
+    captured = {}
+
+    def fake_chat_json(system, user, **kwargs):
+        captured.update(kwargs)
+        return {"raw": "您好，我有用户研究和产品规划经验，希望和您进一步交流。"}
+
+    monkeypatch.setattr(greeting_workbench, "chat_json", fake_chat_json)
+    response = client.post("/api/greetings/generate", json={"job_id": "job-1", "resume": {"summary": "用户研究"}})
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "ai"
+    assert captured["expect_json"] is False
+
+
 def test_greeting_generation_falls_back_when_ai_response_has_no_message(tmp_path, monkeypatch):
     jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
     from app.services import greeting_workbench

@@ -226,6 +226,7 @@ export default function GreetingPage() {
 
 	  async function onGenerateGreeting(job: JobPosting) {
 	    setLoading(prev => ({ ...prev, [job.id + "-greet"]: "生成中…" }));
+	    setError("");
 	    try {
 	      const jdA = await ensureJDAnalysis(job);
 	      if (!resumeProfile) { setError("请先上传简历"); return; }

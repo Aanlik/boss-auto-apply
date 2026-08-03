@@ -163,7 +163,7 @@ def generate_greeting_with_ai(
         "resume": resume,
         "output_schema": {"message": "string"},
     }, ensure_ascii=False)
-    result = chat_json(system, user, temperature=0.7)
+    result = chat_json(system, user, temperature=0.7, expect_json=False)
     message = ""
     if isinstance(result, dict):
         message = str(result.get("message") or result.get("greeting") or result.get("content") or result.get("text") or result.get("raw") or "").strip()

@@ -44,6 +44,33 @@ def test_successful_ai_json_call_persists_a_version_record(tmp_path, monkeypatch
     assert rows[0]["promptPreview"] == "生成招呼语"
 
 
+def test_chat_json_plain_text_mode_returns_raw_text_without_json_request(monkeypatch):
+    calls = []
+    plain_text = "您好，我有用户研究和产品规划经验，希望和您进一步交流。"
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return type("Response", (), {
+                "choices": [type("Choice", (), {
+                    "message": type("Message", (), {"content": plain_text})(),
+                })()],
+            })()
+
+    fake_client = type("Client", (), {"chat": type("Chat", (), {"completions": FakeCompletions()})()})()
+    monkeypatch.setattr(ai_client, "test_mode_enabled", lambda: False)
+    monkeypatch.setattr(ai_client, "get_client", lambda: fake_client)
+    monkeypatch.setattr(ai_client, "get_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(ai_client, "get_config", lambda: {"provider": "deepseek", "base_url": "https://api.deepseek.com"})
+    monkeypatch.setattr(ai_client, "run_with_resilience", lambda _category, operation, **_kwargs: operation())
+
+    result = ai_client.chat_json("生成一条打招呼语", "岗位信息", expect_json=False)
+
+    assert result == {"raw": plain_text}
+    assert "response_format" not in calls[0]
+
+
+
 def test_deepseek_structured_request_explicitly_disables_thinking(monkeypatch):
     """DeepSeek V4 的 JSON 排序请求不能使用默认思考模式。"""
     calls = []

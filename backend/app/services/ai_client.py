@@ -205,8 +205,15 @@ def _record_ai_version(system: str, model: str, kind: str = "ai_generation") -> 
         logger.warning("写入 AI 版本记录失败: %s", exc)
 
 
-def chat_json(system: str, user: str, model: str | None = None, temperature: float = 0.3, record_version: bool = True):
-    """调用 AI chat，要求返回 JSON，自动解析。使用配置的模型。"""
+def chat_json(
+    system: str,
+    user: str,
+    model: str | None = None,
+    temperature: float = 0.3,
+    record_version: bool = True,
+    expect_json: bool = True,
+):
+    """调用 AI chat；结构化场景要求 JSON，纯文本场景返回 ``raw``。"""
     if test_mode_enabled():
         return {
             "summary": "测试模式报告",
@@ -231,6 +238,8 @@ def chat_json(system: str, user: str, model: str | None = None, temperature: flo
     try:
         def operation():
             request_kwargs = dict(kwargs)
+            if not expect_json:
+                return client.chat.completions.create(**request_kwargs)
             try:
                 request_kwargs["response_format"] = {"type": "json_object"}
                 return client.chat.completions.create(**request_kwargs)
@@ -258,6 +267,11 @@ def chat_json(system: str, user: str, model: str | None = None, temperature: flo
         _record_ai_version(system, active_model)
 
     text = resp.choices[0].message.content
+    if not expect_json:
+        try:
+            return json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            return {"raw": str(text or "").strip()}
     try:
         return json.loads(text)
     except json.JSONDecodeError:
