@@ -22,7 +22,7 @@ const CARD: React.CSSProperties = { padding: 10, border: "1px solid var(--border
 const CARD_ROW: React.CSSProperties = { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" as const };
 const GRID: React.CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 10 };
 
-export default function ResumesPage() {
+export default function ResumesPage({ visible = true }: { visible?: boolean }) {
   const { resumeProfile, uploadedFiles: propFiles } = useWorkflowState();
   const dispatch = useWorkflowDispatch();
 
@@ -52,7 +52,6 @@ export default function ResumesPage() {
   const pollingRef = useRef("");
   const evalRef = useRef("");
   const mountedRef = useRef(true);
-  const initDoneRef = useRef(false);
 
   const autoSave = useCallback((p: ResumeProfile) => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -66,7 +65,7 @@ export default function ResumesPage() {
 
   // ── 初始化 ──
   useEffect(() => {
-    if (initDoneRef.current) return; initDoneRef.current = true;
+    if (!visible) return;
     let c = false;
     getActiveResume().then(d => {
       if (c || !d.profile) return;
@@ -89,7 +88,7 @@ export default function ResumesPage() {
       setPdfDensity(options.defaultDensity || "balanced");
     }).catch(() => {});
     return () => { c = true; };
-  }, []);
+  }, [visible]);
 
   // ── AI 轮询 ──
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);

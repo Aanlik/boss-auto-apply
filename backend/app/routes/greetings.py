@@ -887,7 +887,10 @@ def _send_greetings_impl(payload: GreetingSendRequest, workflow_task_id: str | N
                 record["status"] = "blocked" if status == "blocked" else "failed"
                 record["failureCode"] = str(send_result.get("failureCode") or "browser_send_failed")
                 record["failureMessage"] = str(send_result.get("message") or "自动发送失败")
-                save_send_record(job.id, record["status"], record["failureMessage"], message=message, dry_run=False)
+                diagnostics = send_result.get("diagnostics") if isinstance(send_result.get("diagnostics"), dict) else {}
+                if diagnostics:
+                    record["diagnostics"] = diagnostics
+                save_send_record(job.id, record["status"], record["failureMessage"], message=message, dry_run=False, diagnostics=diagnostics)
                 records.append(record)
                 failed_job_ids.append(job.id)
                 failed_messages[job.id] = message
@@ -904,6 +907,7 @@ def _send_greetings_impl(payload: GreetingSendRequest, workflow_task_id: str | N
         job.status_history.append({"kind": "application", "status": "greeted", "previous": previous, "note": job.application_note, "time": job.application_updated_at})
         record = build_greeting_record(job, message, status="sent", dry_run=False)
         save_send_record(job.id, "sent", job.application_note, message=message, dry_run=False)
+        workflow_persistence.remove_greeting_selection(job.id)
         records.append(record)
         sent += 1
         update_task(task["id"], done=sent, message=f"已完成 {sent}/{len(requested_ids)}", payload={**(task.get("payload") or {}), "current_job_id": job.id})
@@ -999,4 +1003,7 @@ def confirm_send_record(payload: dict) -> dict:
     note = str(payload.get("note", "")).strip()
     if not job_id:
         raise HTTPException(status_code=400, detail="缺少 job_id")
-    return {"record": save_send_record(job_id, status, note)}
+    record = save_send_record(job_id, status, note)
+    if status == "sent":
+        workflow_persistence.remove_greeting_selection(job_id)
+    return {"record": record}

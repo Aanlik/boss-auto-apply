@@ -19,3 +19,16 @@ describe("global workflow status copy", () => {
     expect(styles).not.toContain(".workflow-status-card--jobs");
   });
 });
+
+describe("module activation refresh", () => {
+  test("passes active visibility to every persistent module page", () => {
+    const app = readFileSync(resolve(process.cwd(), "src/App.tsx"), "utf8");
+
+    expect(app).toContain('<DashboardPage onNavigate={navigateFromDashboard} visible={page === "dashboard"} />');
+    expect(app).toContain('<ResumesPage visible={page === "resumes"} />');
+    expect(app).toContain('<JobsPage onNavigate={(p) => setPage(p as PageKey)} visible={page === "jobs"} />');
+    expect(app).toContain('<DiligencePage onNavigate={(p) => setPage(p as PageKey)} visible={page === "diligence"} />');
+    expect(app).toContain('<RankedJobsPage onNavigate={(p) => setPage(p as PageKey)} visible={page === "ranking"} />');
+    expect(app).toContain('<GreetingPage visible={page === "greeting"} />');
+  });
+});

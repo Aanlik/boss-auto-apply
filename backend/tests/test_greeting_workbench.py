@@ -383,6 +383,62 @@ def test_greeting_send_marks_jobs_and_application_timeline(tmp_path, monkeypatch
     assert tasks[0]["status"] == "completed"
 
 
+def test_successful_greeting_removes_job_from_persisted_greeting_selection(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.services import workflow_persistence
+
+    workflow_persistence.save_greeting_selection(["job-1", "job-2"])
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1",
+        title="产品经理",
+        company="示例科技",
+        city="上海",
+        jd_text="负责产品规划",
+        source_url="https://example.com/job/1",
+    )
+
+    response = client.post("/api/greetings/send", json={
+        "job_ids": ["job-1"],
+        "messages": {"job-1": "您好，我对贵司的产品经理岗位很感兴趣，过往有需求分析经验，希望有机会进一步沟通。"},
+        "confirm": True,
+        "mode": "manual_confirm",
+    })
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["sent"] == 1
+    assert workflow_persistence.load_greeting_selection() == ["job-2"]
+
+
+def test_manual_send_confirmation_removes_job_from_persisted_greeting_selection(tmp_path, monkeypatch):
+    _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.services import workflow_persistence
+
+    workflow_persistence.save_greeting_selection(["job-1", "job-2"])
+
+    response = client.post("/api/greetings/send-records", json={
+        "job_id": "job-1",
+        "status": "sent",
+        "note": "人工确认已打招呼",
+    })
+
+    assert response.status_code == 200
+    assert workflow_persistence.load_greeting_selection() == ["job-2"]
+
+
+def test_greeting_selection_read_prunes_previously_sent_jobs(tmp_path, monkeypatch):
+    _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.services import workflow_persistence
+
+    workflow_persistence.save_greeting_selection(["job-1", "job-2"])
+    workflow_persistence.save_send_record("job-1", "sent", "已人工确认")
+
+    response = client.get("/api/workflow/greeting-selection")
+
+    assert response.status_code == 200
+    assert response.json()["greetingJobIds"] == ["job-2"]
+    assert workflow_persistence.load_greeting_selection() == ["job-2"]
+
+
 def test_greeting_acceptance_records_are_persisted(tmp_path, monkeypatch):
     _prepare_greeting_test_state(tmp_path, monkeypatch)
 
@@ -667,6 +723,69 @@ def test_cdp_eval_js_waits_for_async_greeting_script():
     assert cdp.eval_js("(async function(){ return 'ok'; })()", "sid-1") == "ok"
     assert captured["method"] == "Runtime.evaluate"
     assert captured["params"]["awaitPromise"] is True
+
+
+def test_failed_greeting_keeps_original_page_script_exception(monkeypatch):
+    from app.services import boss_scraper as scraper
+
+    class FakeCDP:
+        def __init__(self, port):
+            self.last_js_error = ""
+
+        def create_page(self):
+            return "target-1", "session-1"
+
+        def navigate(self, url, sid):
+            return None
+
+        def eval_js(self, js, sid):
+            if js == "window.location.href":
+                self.last_js_error = ""
+                return "https://www.zhipin.com/web/geek/chat?id=example"
+            self.last_js_error = "Uncaught TypeError: Cannot read properties of null (line 42)"
+            return None
+
+        def send(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(scraper, "CDPSession", FakeCDP)
+    monkeypatch.setattr(scraper, "_chrome_running", lambda: True)
+    monkeypatch.setattr(scraper, "_probe_login", lambda cdp, sid: {"status": "ok"})
+
+    result = scraper.send_boss_greeting_sync("https://www.zhipin.com/job_detail/example.html", "您好，想进一步了解岗位。")
+
+    assert result["failureCode"] == "page_script_failed"
+    assert result["diagnostics"]["exception"] == "Uncaught TypeError: Cannot read properties of null (line 42)"
+    assert result["diagnostics"]["currentUrl"].endswith("chat?id=example")
+
+
+def test_failed_browser_greeting_persists_stage_diagnostics(tmp_path, monkeypatch):
+    jobs_route = _prepare_greeting_test_state(tmp_path, monkeypatch)
+    from app.routes import greetings as greeting_route
+    from app.services import workflow_persistence
+    _enable_auto_send()
+
+    monkeypatch.setattr(greeting_route, "execute_browser_greeting", lambda job, message: {
+        "ok": False,
+        "status": "failed",
+        "failureCode": "send_button_not_found",
+        "message": "未找到发送按钮",
+        "diagnostics": {"stage": "send_button", "currentUrl": "https://www.zhipin.com/job_detail/example.html", "messageLength": len(message)},
+    })
+    jobs_route._job_store["job-1"] = JobRecord(
+        id="job-1", title="产品经理", company="示例科技", city="上海", jd_text="负责产品规划", source_url="https://example.com/job/1",
+    )
+
+    body = client.post("/api/greetings/send", json={
+        "job_ids": ["job-1"],
+        "messages": {"job-1": "您好，我对贵司的产品经理岗位很感兴趣，过往有需求分析经验，希望有机会进一步沟通。"},
+        "confirm": True,
+        "mode": "browser_auto",
+    }).json()
+
+    assert body["records"][0]["diagnostics"]["stage"] == "send_button"
+    saved = workflow_persistence.load_send_records()
+    assert saved[0]["diagnostics"]["currentUrl"].endswith("example.html")
 
 
 def test_greeting_browser_auto_mode_blocks_when_sender_reports_risk(tmp_path, monkeypatch):

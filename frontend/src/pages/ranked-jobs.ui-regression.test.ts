@@ -29,4 +29,9 @@ describe("ranking continuation", () => {
     expect(page).toContain("AI 匹配度已更新");
     expect(page).toContain("遗留临时结果未被替换");
   });
+
+  test("reloads persisted ranking data on demand", () => {
+    expect(page).toContain("async function refreshPageData()");
+    expect(page).toContain('aria-label="刷新排序数据"');
+  });
 });

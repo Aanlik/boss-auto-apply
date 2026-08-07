@@ -67,7 +67,7 @@ const statusOptions: Array<{ key: JobApplicationStatus; label: string }> = [
 ];
 
 
-export default function DashboardPage({ onNavigate }: { onNavigate?: (page: string) => void }) {
+export default function DashboardPage({ onNavigate, visible = true }: { onNavigate?: (page: string) => void; visible?: boolean }) {
   const workflow = useWorkflowState();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [funnel, setFunnel] = useState<ApplicationFunnel | null>(null);
@@ -151,8 +151,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
   }
 
   useEffect(() => {
-    loadSummary();
-  }, []);
+    if (visible) void loadSummary();
+  }, [visible]);
 
   async function refreshLiveDashboard() {
     try {
@@ -194,6 +194,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
   }
 
   useEffect(() => {
+    if (!visible) return;
     void refreshLiveDashboard();
     const timer = window.setInterval(refreshLiveDashboard, 10000);
     const onFocus = () => { void refreshLiveDashboard(); };
@@ -202,7 +203,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: stri
       window.clearInterval(timer);
       window.removeEventListener("focus", onFocus);
     };
-  }, [workflow.selectedJobIds]);
+  }, [visible, workflow.selectedJobIds]);
 
   async function refreshPromptVersions(silent = false) {
     if (!silent) setPromptVersionsRefreshing(true);

@@ -163,8 +163,14 @@ def save_selection(payload: dict) -> dict:
 
 @router.get("/greeting-selection")
 def get_greeting_selection() -> dict:
-    from app.services.workflow_persistence import load_greeting_selection
-    return {"greetingJobIds": load_greeting_selection()}
+    from app.services.workflow_persistence import load_greeting_selection, load_send_records, save_greeting_selection
+
+    ids = load_greeting_selection()
+    sent_ids = {str(record.get("jobId")) for record in load_send_records() if record.get("status") == "sent"}
+    remaining = [job_id for job_id in ids if str(job_id) not in sent_ids]
+    if remaining != ids:
+        save_greeting_selection(remaining)
+    return {"greetingJobIds": remaining}
 
 
 @router.post("/greeting-selection")

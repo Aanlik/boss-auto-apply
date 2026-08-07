@@ -175,7 +175,20 @@ def load_greeting_selection() -> list[str]:
     return data if isinstance(data, list) else []
 
 
-def save_send_record(job_id: str, status: str, note: str = "", message: str = "", dry_run: bool = False) -> dict:
+def remove_greeting_selection(job_id: str) -> list[str]:
+    """Remove one completed greeting target while preserving the remaining batch."""
+    remaining = [item for item in load_greeting_selection() if str(item) != str(job_id)]
+    return save_greeting_selection(remaining)
+
+
+def save_send_record(
+    job_id: str,
+    status: str,
+    note: str = "",
+    message: str = "",
+    dry_run: bool = False,
+    diagnostics: dict | None = None,
+) -> dict:
     if not job_id:
         raise ValueError("job_id is required")
     records = load_send_records()
@@ -190,6 +203,8 @@ def save_send_record(job_id: str, status: str, note: str = "", message: str = ""
         "dryRun": dry_run,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
+    if isinstance(diagnostics, dict) and diagnostics:
+        record["diagnostics"] = diagnostics
     records = [record for record in records if record.get("jobId") != job_id] + [record]
     _write_json(DATA_DIR / "greetings" / "send_records.json", records)
     return record

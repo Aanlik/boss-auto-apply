@@ -84,12 +84,20 @@ PROBE_JS = """(function(){
 
 GREETING_SEND_JS_TEMPLATE = r"""(async function(){
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    const diagnostics = {stage:'page_loaded', currentUrl:location.href, messageLength:__MESSAGE_LENGTH__, events:[]};
+    const recordStage = (stage, detail = '') => {
+        diagnostics.stage = stage;
+        diagnostics.currentUrl = location.href;
+        diagnostics.events.push({stage, detail, at: Date.now()});
+    };
     const bodyText = (document.body && document.body.innerText || '').toLowerCase();
     if (bodyText.includes('登录') && (location.href.includes('/web/user') || bodyText.includes('微信扫码'))) {
-        return JSON.stringify({ok:false, status:'blocked', failureCode:'not_logged_in', message:'未登录或登录页可见'});
+        recordStage('login_check', '登录页可见');
+        return JSON.stringify({ok:false, status:'blocked', failureCode:'not_logged_in', message:'未登录或登录页可见', diagnostics});
     }
     if (['验证码','滑块','拼图','captcha','verify','操作太频繁','稍后再试','账号异常','限制使用'].some(t => bodyText.includes(t.toLowerCase()))) {
-        return JSON.stringify({ok:false, status:'blocked', failureCode:'risk_control', message:'检测到验证码、风控或账号异常提示'});
+        recordStage('risk_check', '检测到页面风控文本');
+        return JSON.stringify({ok:false, status:'blocked', failureCode:'risk_control', message:'检测到验证码、风控或账号异常提示', diagnostics});
     }
 
     function visible(el) {
@@ -169,17 +177,22 @@ GREETING_SEND_JS_TEMPLATE = r"""(async function(){
     }
     let chatButton = actionableByText('button,a,span,div', ['立即沟通','立即投递','投递简历','继续沟通']);
     if (!chatButton) {
-        return JSON.stringify({ok:false, status:'failed', failureCode:'button_not_found', message:'未找到立即沟通按钮'});
+        recordStage('chat_button', '未找到立即沟通按钮');
+        return JSON.stringify({ok:false, status:'failed', failureCode:'button_not_found', message:'未找到立即沟通按钮', diagnostics});
     }
+    recordStage('chat_button', '已找到立即沟通按钮');
     if (!clickElement(chatButton)) {
-        return JSON.stringify({ok:false, status:'failed', failureCode:'button_click_failed', message:'立即沟通按钮不可点击'});
+        return JSON.stringify({ok:false, status:'failed', failureCode:'button_click_failed', message:'立即沟通按钮不可点击', diagnostics});
     }
+    recordStage('chat_button_clicked', '已触发立即沟通点击');
     await sleep(1200);
 
     let input = await waitFor(chatInput, 8000, 300);
     if (!input) {
-        return JSON.stringify({ok:false, status:'failed', failureCode:'input_not_found', message:'未找到聊天输入框'});
+        recordStage('chat_input', '未找到聊天输入框');
+        return JSON.stringify({ok:false, status:'failed', failureCode:'input_not_found', message:'未找到聊天输入框', diagnostics});
     }
+    recordStage('chat_input', `已找到${input.tagName.toLowerCase()}输入框`);
 
     const message = __MESSAGE_JSON__;
     input.focus();
@@ -196,22 +209,28 @@ GREETING_SEND_JS_TEMPLATE = r"""(async function(){
         document.execCommand('insertText', false, message);
         input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:message}));
     }
+    recordStage('message_filled', '已触发输入事件');
     await sleep(800);
 
     let sendButton = await waitFor(() => actionableByText('button,span,div,a,[role="button"]', ['发送']), 5000, 250);
     if (!sendButton) {
-        return JSON.stringify({ok:false, status:'failed', failureCode:'send_button_not_found', message:'未找到发送按钮'});
+        recordStage('send_button', '未找到发送按钮');
+        return JSON.stringify({ok:false, status:'failed', failureCode:'send_button_not_found', message:'未找到发送按钮', diagnostics});
     }
+    recordStage('send_button', '已找到发送按钮');
     if (!clickElement(sendButton)) {
-        return JSON.stringify({ok:false, status:'failed', failureCode:'send_button_click_failed', message:'发送按钮不可点击'});
+        return JSON.stringify({ok:false, status:'failed', failureCode:'send_button_click_failed', message:'发送按钮不可点击', diagnostics});
     }
+    recordStage('send_button_clicked', '已触发发送点击');
     await sleep(1200);
 
     const afterText = (document.body && document.body.innerText || '').toLowerCase();
     if (['验证码','滑块','拼图','captcha','verify','操作太频繁','稍后再试'].some(t => afterText.includes(t.toLowerCase()))) {
-        return JSON.stringify({ok:false, status:'blocked', failureCode:'risk_control', message:'发送后检测到验证码或频率限制'});
+        recordStage('post_send_check', '发送后检测到风控文本');
+        return JSON.stringify({ok:false, status:'blocked', failureCode:'risk_control', message:'发送后检测到验证码或频率限制', diagnostics});
     }
-    return JSON.stringify({ok:true, status:'sent', failureCode:'', message:'已自动点击发送'});
+    recordStage('post_send_check', '未检测到页面风控文本');
+    return JSON.stringify({ok:true, status:'sent', failureCode:'', message:'已自动点击发送', diagnostics});
 })()"""
 
 GREETING_SELECTOR_HEALTH_JS = r"""(function(){
@@ -293,11 +312,13 @@ class CDPSession:
 
     def eval_js(self, js, sid):
         """在页面中执行 JS 并返回结果。"""
+        self.last_js_error = ""
         r = self.send("Runtime.evaluate", {"expression": js, "returnByValue": True, "awaitPromise": True}, sid)
         result = r.get("result", {})
         if "exceptionDetails" in result:
             exc = result["exceptionDetails"]
-            logger.warning("JS 异常: %s (line %d)", exc.get("text", "")[:200], exc.get("lineNumber", 0))
+            self.last_js_error = f"{exc.get('text', '')[:200]} (line {exc.get('lineNumber', 0)})"
+            logger.warning("JS 异常: %s", self.last_js_error)
             return None
         return result.get("result", {}).get("value")
 
@@ -721,27 +742,49 @@ def send_boss_greeting_sync(job_url: str, message: str) -> dict:
         if not _launch_chrome():
             return {"ok": False, "status": "blocked", "failureCode": "browser_start_failed", "message": "Chrome 启动失败"}
 
+    diagnostics = {"stage": "start", "jobUrl": job_url, "messageLength": len(message.strip())}
     cdp = None
     tid = None
     try:
         cdp = CDPSession(CDP_PORT)
         tid, sid = cdp.create_page()
         cdp.navigate(job_url, sid)
+        diagnostics.update({"stage": "page_loaded", "currentUrl": cdp.eval_js("window.location.href", sid) or ""})
         probe = _probe_login(cdp, sid)
         if probe["status"] != "ok":
             reason = "risk_control" if probe.get("status") == "restricted" else "cookie_expired"
-            return {"ok": False, "status": "blocked", "failureCode": reason, "message": probe.get("message") or "登录态无效"}
-        js = GREETING_SEND_JS_TEMPLATE.replace("__MESSAGE_JSON__", json.dumps(message, ensure_ascii=False))
+            diagnostics["stage"] = "login_check"
+            return {"ok": False, "status": "blocked", "failureCode": reason, "message": probe.get("message") or "登录态无效", "diagnostics": diagnostics}
+        js = GREETING_SEND_JS_TEMPLATE.replace("__MESSAGE_JSON__", json.dumps(message, ensure_ascii=False)).replace("__MESSAGE_LENGTH__", str(len(message.strip())))
         raw = cdp.eval_js(js, sid)
         if raw is None:
-            return {"ok": False, "status": "failed", "failureCode": "page_script_failed", "message": "页面脚本执行失败"}
+            # Preserve the Runtime.evaluate exception before the follow-up URL probe
+            # resets CDPSession.last_js_error.
+            script_error = getattr(cdp, "last_js_error", "")
+            current_url = cdp.eval_js("window.location.href", sid) or diagnostics.get("currentUrl", "")
+            diagnostics.update({
+                "stage": "page_script",
+                "currentUrl": current_url,
+                "exception": script_error,
+                "result": "undefined" if not script_error else "exception",
+            })
+            logger.warning(
+                "打招呼页面脚本未返回结果: url=%s exception=%s",
+                current_url,
+                script_error or "无异常信息（脚本返回 undefined 或 CDP 未返回结果）",
+            )
+            return {"ok": False, "status": "failed", "failureCode": "page_script_failed", "message": "页面脚本执行失败", "diagnostics": diagnostics}
         try:
             result = json.loads(raw) if isinstance(raw, str) else raw
         except (json.JSONDecodeError, TypeError):
             return {"ok": False, "status": "failed", "failureCode": "page_script_invalid", "message": str(raw)[:120]}
-        return result if isinstance(result, dict) else {"ok": False, "status": "failed", "failureCode": "page_script_invalid", "message": "页面返回异常"}
+        if isinstance(result, dict):
+            result["diagnostics"] = {**diagnostics, **(result.get("diagnostics") or {})}
+            return result
+        return {"ok": False, "status": "failed", "failureCode": "page_script_invalid", "message": "页面返回异常", "diagnostics": diagnostics}
     except Exception as e:
-        return {"ok": False, "status": "failed", "failureCode": "browser_error", "message": str(e)}
+        diagnostics.update({"stage": "browser_session", "exception": str(e)[:300]})
+        return {"ok": False, "status": "failed", "failureCode": "browser_error", "message": str(e), "diagnostics": diagnostics}
     finally:
         if tid and cdp:
             try:

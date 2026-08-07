@@ -12,7 +12,7 @@ import { runWithConcurrency } from "../lib/asyncPool";
 type CardState = { jdExpanded: boolean; ddExpanded: boolean; chatExpanded: boolean };
 type BatchProgress = { done: number; total: number; current: string } | null;
 
-export default function DiligencePage({ onNavigate }: { onNavigate?: (page: string) => void }) {
+export default function DiligencePage({ onNavigate, visible = true }: { onNavigate?: (page: string) => void; visible?: boolean }) {
   const { selectedJobIds, jdAnalyses, diligenceReports, chatMessages } = useWorkflowState();
   const dispatch = useWorkflowDispatch();
 
@@ -33,19 +33,15 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
   // 同步外部选择
   useEffect(() => { setLocalSelection([...selectedJobIds]); }, [selectedJobIds]);
 
-  useEffect(() => {
-    getDiligenceReports()
-      .then(r => {
-        if (r.reports && Object.keys(r.reports).length > 0) {
-          dispatch(actions.setDiligenceReports({ ...diligenceRef.current, ...r.reports }));
-        }
-      })
-      .catch(() => {});
-  }, [dispatch]);
-
-  // 加载岗位，同时清空之前的尽调缓存
-  useEffect(() => {
-    poolJobs().then(r => {
+  async function refreshPageData() {
+    setLoading(prev => ({ ...prev, "page-refresh": true }));
+    try {
+      const [reportsResponse, jobsResponse] = await Promise.all([getDiligenceReports(), poolJobs()]);
+      if (reportsResponse.reports && Object.keys(reportsResponse.reports).length > 0) {
+        dispatch(actions.setDiligenceReports({ ...diligenceRef.current, ...reportsResponse.reports }));
+      }
+      {
+        const r = jobsResponse;
       const all = r.jobs || [];
       const selected = all.filter((j: JobPosting) => selectedJobIds.includes(j.id));
       setJobs(selected);
@@ -61,10 +57,18 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
         dispatch(actions.setSelection(selected.map(j => j.id)));
         setError(prev => prev || `已自动同步选择：已移除 ${removedFromSelection.length} 个黑名单或下架岗位，当前仍保留 ${selected.length} 个岗位。`);
       }
-    }).catch((err) => {
+      }
+    } catch (err) {
       console.warn("[diligence] 加载岗位失败:", err);
-    });
-  }, [selectedJobIds, dispatch]);
+      setError(err instanceof Error ? err.message : "刷新尽调数据失败");
+    } finally {
+      setLoading(prev => ({ ...prev, "page-refresh": false }));
+    }
+  }
+
+  useEffect(() => {
+    if (visible) void refreshPageData();
+  }, [visible, selectedJobIds, dispatch]);
 
   function toggleLocal(id: string) {
     setLocalSelection(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
@@ -249,6 +253,9 @@ export default function DiligencePage({ onNavigate }: { onNavigate?: (page: stri
           <p className="page-copy">千帆智能搜索 + AI 总结 → AI 整合分析，综合评估公司风险与前景。</p>
         </div>
 	        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+	          <button type="button" className="button-secondary" aria-label="刷新尽调数据" title="刷新尽调数据" disabled={!!loading["page-refresh"]} onClick={() => void refreshPageData()}>
+	            {loading["page-refresh"] ? "刷新中..." : "刷新数据"}
+	          </button>
 	          <button type="button" className="button-primary" onClick={() => analyzeSelectedJD(jdAction.targetIds)}
 	            disabled={jdAction.disabled || jdActionBusy}>
             {jdBatchProgress ? `JD分析 ${jdBatchProgress.done}/${jdBatchProgress.total}` : jdAction.label}

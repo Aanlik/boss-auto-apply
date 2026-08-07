@@ -1,7 +1,7 @@
 {
   "name": "boss-workbench-frontend",
   "private": true,
-  "version": "1.0.3",
+  "version": "1.0.4",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
   "scripts": {

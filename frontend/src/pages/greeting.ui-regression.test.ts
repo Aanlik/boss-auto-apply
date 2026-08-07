@@ -70,6 +70,13 @@ describe("Greeting UI regressions", () => {
     expect(greeting).toContain("key={`${job.id}-${tag}-${index}`}");
   });
 
+  test("reloads greeting state on demand without sending", () => {
+    const greeting = readProjectFile("src/pages/greeting.tsx");
+
+    expect(greeting).toContain("async function refreshPageData()");
+    expect(greeting).toContain('aria-label="刷新打招呼数据"');
+  });
+
   test("keeps the PDF preview close button above the embedded PDF viewer", () => {
     const overlayRule = cssRule(".pdf-preview-overlay");
     const closeRule = cssRule(".pdf-preview-close");

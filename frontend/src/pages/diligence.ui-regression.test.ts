@@ -24,4 +24,9 @@ describe("diligence action layout", () => {
   test("uses a stable unique key when evidence sources share the same label", () => {
     expect(source).toContain("key={`${source.label}-${index}`}");
   });
+
+  test("offers a page-level data refresh without starting diligence", () => {
+    expect(source).toContain("async function refreshPageData()");
+    expect(source).toContain('aria-label="刷新尽调数据"');
+  });
 });

@@ -6,7 +6,7 @@ import { EmptyState, ErrorBanner } from "../components/SharedUI";
 import type { JobPosting, RankingResult, RankingWeightTemplate, RankingWeights, WorkflowRuntimeTask } from "../lib/types";
 import AiFeedbackButtons from "../components/AiFeedbackButtons";
 
-export default function RankedJobsPage({ onNavigate }: { onNavigate?: (page: string) => void }) {
+export default function RankedJobsPage({ onNavigate, visible = true }: { onNavigate?: (page: string) => void; visible?: boolean }) {
   const { selectedJobIds, diligenceReports, resumeProfile, rankingResults } = useWorkflowState();
   const dispatch = useWorkflowDispatch();
   const [loading, setLoading] = useState(false);
@@ -47,25 +47,28 @@ export default function RankedJobsPage({ onNavigate }: { onNavigate?: (page: str
 
   useEffect(() => { setLocalSelection([...selectedJobIds]); }, [selectedJobIds]);
 
+  async function refreshPageData() {
+    setLoading(true);
+    setError("");
+    try {
+      const [rankingResponse, weightsResponse, templatesResponse, jobsResponse, center] = await Promise.all([
+        getRankingResults(), getRankingWeights(), getRankingWeightTemplates(), listJobPool(), getWorkflowCenter(),
+      ]);
+      dispatch(actions.setRankingResults(rankingResponse.rankings || []));
+      setWeights(weightsResponse.weights);
+      setTemplates(templatesResponse.templates || {});
+      setJobs(jobsResponse.jobs || []);
+      setFailedRankingTask(center.recovery.find(task => task.type === "ranking") || null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "刷新排序数据失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    getRankingResults()
-      .then(r => {
-        if (r.rankings?.length) dispatch(actions.setRankingResults(r.rankings));
-      })
-      .catch(() => {});
-    getRankingWeights()
-      .then(r => setWeights(r.weights))
-      .catch(() => {});
-    getRankingWeightTemplates()
-      .then(r => setTemplates(r.templates || {}))
-      .catch(() => {});
-    listJobPool()
-      .then(r => setJobs(r.jobs || []))
-      .catch(() => {});
-    getWorkflowCenter()
-      .then(center => setFailedRankingTask(center.recovery.find(task => task.type === "ranking") || null))
-      .catch(() => {});
-  }, [dispatch]);
+    if (visible) void refreshPageData();
+  }, [visible, dispatch]);
 
   async function onStartRanking() {
     const ids = localSelection.length > 0 ? localSelection : selectedJobIds;
@@ -183,6 +186,7 @@ export default function RankedJobsPage({ onNavigate }: { onNavigate?: (page: str
           {greetingReadySelection.length > 0 && <span className="tag">{greetingReadySelection.length} 个可打招呼</span>}
           {fallbackRankingResults.length > 0 && <span className="tag tag--red">临时匹配分 {fallbackRankingResults.length} 个</span>}
           {visibleRankingResults.length > 0 && <button type="button" className="button-primary" disabled={greetingReadySelection.length === 0} onClick={passToGreeting}>进入打招呼 ({greetingReadySelection.length}) →</button>}
+          <button type="button" className="button-secondary" aria-label="刷新排序数据" title="刷新排序数据" disabled={loading} onClick={() => void refreshPageData()}>{loading ? "刷新中..." : "刷新数据"}</button>
         </div>
       </div>
       <div className="module-export-bar" aria-label="排序数据导出">

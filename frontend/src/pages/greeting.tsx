@@ -73,7 +73,7 @@ function formatSafetyCheckMessage(check: GreetingSafetySummary["checks"][number]
   return check.message;
 }
 
-export default function GreetingPage() {
+export default function GreetingPage({ visible = true }: { visible?: boolean }) {
   const { greetingJobIds, resumeProfile, jdAnalyses, optimizations, greetingTexts, chatMessages } = useWorkflowState();
   const dispatch = useWorkflowDispatch();
 
@@ -114,25 +114,41 @@ export default function GreetingPage() {
   const [bossLogin, setBossLogin] = useState<BossLoginStatus | null>(null);
   const [revealedGreetingIds, setRevealedGreetingIds] = useState<string[]>([]);
 
+  async function refreshPageData() {
+    setWorkbenchLoading("刷新中...");
+    setError("");
+    try {
+      const [jobsResult, draftsResult, recordsResult, optimizationsResult, settingsResult, profilesResult, progressResult, statsResult, safetyResult, followupResult, acceptanceResult, repliesResult, loginResult] = await Promise.all([
+        poolJobs(), getGreetingDrafts(), getSendRecords(), listResumeOptimizations(), getGreetingAutoSendSettings(), getGreetingFrequencyProfiles(), getGreetingProgress(), getGreetingStats(), getGreetingSafetySummary(), getGreetingFollowups(), getGreetingAcceptanceRecords(), getGreetingReplies(), bossLoginStatus(false),
+      ]);
+      const filtered = (jobsResult.jobs || []).filter(job => greetingJobIds.includes(job.id));
+      setJobs(filtered);
+      setGreetedStatus(Object.fromEntries(recordsResult.records?.filter(record => record.status === "sent").map(record => [record.jobId, true]) || []));
+      setCustomTags(Object.fromEntries(filtered.filter(job => job.tags?.length).map(job => [job.id, job.tags || []])));
+      if (draftsResult.greetings) dispatch(actions.setGreetingTexts({ ...greetingTexts, ...draftsResult.greetings }));
+      if (optimizationsResult.optimizations) dispatch(actions.setOptimizations({ ...optimizations, ...optimizationsResult.optimizations }));
+      setAutoSendEnabled(!!settingsResult.settings.auto_send_enabled);
+      setAutoSendProfile(settingsResult.settings.profile);
+      setGrayModeEnabled(settingsResult.settings.gray_mode_enabled !== false);
+      setAutoDailyLimit(settingsResult.settings.daily_limit);
+      setAutoIntervalSeconds(settingsResult.settings.send_interval_seconds);
+      setFrequencyProfiles(profilesResult.profiles || settingsResult.profiles || []);
+      setProgress(progressResult); setGreetingStats(statsResult); setSafetySummary(safetyResult); setFollowups(followupResult);
+      setAcceptanceRecords(acceptanceResult.records || []); setReplyRecords(repliesResult.records || []); setBossLogin(loginResult);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "刷新打招呼数据失败");
+    } finally {
+      setWorkbenchLoading("");
+    }
+  }
+
   useEffect(() => () => {
     if (pdfPreviewUrl) URL.revokeObjectURL(pdfPreviewUrl);
   }, [pdfPreviewUrl]);
 
   useEffect(() => {
-    poolJobs().then(r => {
-      const all: JobPosting[] = r.jobs || [];
-      // 打招呼只能加载排序页面明确传入的岗位，不能回退为全部岗位。
-      const filtered = all.filter(j => greetingJobIds.includes(j.id));
-      setJobs(filtered);
-      const g: Record<string, boolean> = {};
-      const t: Record<string, string[]> = {};
-      filtered.forEach((j) => { if (j.greeted) g[j.id] = true; if (j.tags?.length) t[j.id] = j.tags; });
-      setGreetedStatus(g);
-      setCustomTags(t);
-    }).catch((err) => {
-      console.warn("[greeting] 加载岗位失败:", err);
-    });
-  }, [greetingJobIds]);
+    if (visible) void refreshPageData();
+  }, [visible, greetingJobIds]);
 
   useEffect(() => {
     const validIds = new Set(jobs.map(job => job.id));
@@ -142,64 +158,12 @@ export default function GreetingPage() {
   }, [jobs, greetingJobIds]);
 
   useEffect(() => {
-    getGreetingDrafts()
-      .then(r => {
-        if (r.greetings && Object.keys(r.greetings).length > 0) {
-          dispatch(actions.setGreetingTexts({ ...greetingTexts, ...r.greetings }));
-        }
-      })
-      .catch(() => {});
-    getSendRecords()
-      .then(r => {
-        const next: Record<string, boolean> = {};
-        r.records?.forEach(record => {
-          if (record.status === "sent") next[record.jobId] = true;
-        });
-        if (Object.keys(next).length > 0) setGreetedStatus(prev => ({ ...prev, ...next }));
-      })
-      .catch(() => {});
-    listResumeOptimizations()
-      .then(r => {
-        if (r.optimizations && Object.keys(r.optimizations).length > 0) {
-          dispatch(actions.setOptimizations({ ...optimizations, ...r.optimizations }));
-        }
-      })
-      .catch(() => {});
-  }, [dispatch]);
-
-  useEffect(() => {
-    Promise.all([
-      getGreetingAutoSendSettings(),
-      getGreetingFrequencyProfiles(),
-      getGreetingProgress(),
-      getGreetingStats(),
-      getGreetingSafetySummary(),
-      getGreetingFollowups(),
-      getGreetingAcceptanceRecords(),
-      getGreetingReplies(),
-      bossLoginStatus(false),
-    ]).then(([settingsResult, profilesResult, progressResult, statsResult, safetyResult, followupResult, acceptanceResult, repliesResult, loginResult]) => {
-      setAutoSendEnabled(!!settingsResult.settings.auto_send_enabled);
-      setAutoSendProfile(settingsResult.settings.profile);
-      setGrayModeEnabled(settingsResult.settings.gray_mode_enabled !== false);
-      setAutoDailyLimit(settingsResult.settings.daily_limit);
-      setAutoIntervalSeconds(settingsResult.settings.send_interval_seconds);
-      setFrequencyProfiles(profilesResult.profiles || settingsResult.profiles || []);
-      setProgress(progressResult);
-      setGreetingStats(statsResult);
-      setSafetySummary(safetyResult);
-      setFollowups(followupResult);
-      setAcceptanceRecords(acceptanceResult.records || []);
-      setReplyRecords(repliesResult.records || []);
-      setBossLogin(loginResult);
-    }).catch((err) => {
-      console.warn("[greeting] 加载自动发送设置失败:", err);
-    });
+    if (!visible) return;
     const timer = window.setInterval(() => {
       getGreetingProgress().then(setProgress).catch(() => {});
     }, 5000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [visible]);
 
   // 确保 JD 分析存在 — 优先从 store 读取，没有则请求
   async function ensureJDAnalysis(job: JobPosting) {
@@ -306,7 +270,10 @@ export default function GreetingPage() {
 	    setGreetedStatus(prev => ({ ...prev, [jobId]: newVal }));
 	    try {
 	      await tagJob(jobId, { greeted: newVal });
-	      if (newVal) await confirmSendRecord(jobId);
+	      if (newVal) {
+          await confirmSendRecord(jobId);
+          dispatch(actions.setGreetingSelection(greetingJobIds.filter(id => id !== jobId)));
+        }
 	      else await updateSendRecord(jobId, "pending", "人工撤销已打招呼");
 	    } catch (err) {
 	      setGreetedStatus(prev => ({ ...prev, [jobId]: oldVal }));
@@ -678,6 +645,10 @@ export default function GreetingPage() {
       getGreetingProgress().then(setProgress).catch(() => {});
       getGreetingSafetySummary().then(setSafetySummary).catch(() => {});
       if (result.records.length > 0) {
+        const sentIds = new Set(result.records.filter(record => record.status === "sent").map(record => record.jobId));
+        if (sentIds.size > 0) {
+          dispatch(actions.setGreetingSelection(greetingJobIds.filter(id => !sentIds.has(id))));
+        }
         setGreetedStatus(prev => {
           const next = { ...prev };
           result.records.forEach(record => {
@@ -757,6 +728,9 @@ export default function GreetingPage() {
           <h2 className="page-title">打招呼语与简历修订</h2>
           <p className="page-copy">根据岗位 JD 生成定制打招呼语，AI 逐岗位优化简历并支持导出。</p>
         </div>
+        <button type="button" className="button-secondary" aria-label="刷新打招呼数据" title="刷新打招呼数据" disabled={!!workbenchLoading} onClick={() => void refreshPageData()}>
+          {workbenchLoading === "刷新中..." ? "刷新中..." : "刷新数据"}
+        </button>
       </div>
 
       {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}

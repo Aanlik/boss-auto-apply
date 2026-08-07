@@ -155,22 +155,22 @@ function AppShell() {
 
       <main className="workspace-stage">
         <div style={{ display: page === "dashboard" ? "block" : "none" }}>
-          <DashboardPage onNavigate={navigateFromDashboard} />
+          <DashboardPage onNavigate={navigateFromDashboard} visible={page === "dashboard"} />
         </div>
         <div style={{ display: page === "resumes" ? "block" : "none" }}>
-          <ResumesPage />
+          <ResumesPage visible={page === "resumes"} />
         </div>
         <div style={{ display: page === "jobs" ? "block" : "none" }}>
           <JobsPage onNavigate={(p) => setPage(p as PageKey)} visible={page === "jobs"} />
         </div>
         <div style={{ display: page === "diligence" ? "block" : "none" }}>
-          <DiligencePage onNavigate={(p) => setPage(p as PageKey)} />
+          <DiligencePage onNavigate={(p) => setPage(p as PageKey)} visible={page === "diligence"} />
         </div>
         <div style={{ display: page === "ranking" ? "block" : "none" }}>
-          <RankedJobsPage onNavigate={(p) => setPage(p as PageKey)} />
+          <RankedJobsPage onNavigate={(p) => setPage(p as PageKey)} visible={page === "ranking"} />
         </div>
         <div style={{ display: page === "greeting" ? "block" : "none" }}>
-          <GreetingPage />
+          <GreetingPage visible={page === "greeting"} />
         </div>
       </main>
     </div>
